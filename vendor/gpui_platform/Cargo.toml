@@ -1,0 +1,29 @@
+[package]
+name = "gpui_platform"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/gpui_platform.rs"
+doctest = false
+
+[features]
+default = []
+bench-support = ["gpui/bench-support", "gpui_wgpu/bench-support"]
+font-kit = []
+inspector = ["gpui/inspector"]
+test-support = ["gpui/test-support", "gpui_wgpu/test-support"]
+screen-capture = ["gpui/screen-capture", "gpui_linux/screen-capture"]
+wayland = ["gpui_linux/wayland"]
+x11 = ["gpui_linux/x11"]
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui_linux.workspace = true
+gpui_wgpu = { workspace = true, optional = true }

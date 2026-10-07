@@ -1,0 +1,9 @@
+[package]
+name = "helix-parsec"
+description = "Parser combinators for Helix"
+include = ["src/**/*", "README.md"]
+version = "25.7.1"
+edition = "2021"
+license = "MPL-2.0"
+
+[dependencies]
