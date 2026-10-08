@@ -22,9 +22,10 @@ use crate::{
     InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
     KeyboardClickEvent, LayoutId, LongPressEvent, ModifiersChangedEvent, MouseButton,
     MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
-    MouseUpEvent, OngoingScroll, Overflow, ParentElement, PinchEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
-    TouchPhase, Visibility, Window, WindowControlArea, point, px, size,
+    MouseUpEvent, OngoingScroll, Overflow, ParentElement, PenContact, PenEvent, PenPhase,
+    PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
+    StyleRefinement, Styled, Task, TooltipId, TouchPhase, Visibility, Window, WindowControlArea,
+    point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -409,6 +410,19 @@ impl Interactivity {
                     (listener)(event, window, cx);
                 }
             }));
+    }
+
+    /// Bind the given callback to drawing tablet events during the bubble phase.
+    /// The element must have an id, as it remembers which element owns a stroke.
+    ///
+    /// The innermost hovered element with a pen listener claims the stroke at
+    /// [`PenPhase::Down`] and alone receives it until [`PenPhase::Up`], even
+    /// outside its bounds; the stroke is then not delivered as mouse events.
+    /// See [`PenEvent`] for details.
+    ///
+    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    pub fn on_pen_event(&mut self, listener: impl Fn(&PenEvent, &mut Window, &mut App) + 'static) {
+        self.pen_listeners.push(Box::new(listener));
     }
 
     /// Bind the given callback to pinch gesture events during the capture phase.
@@ -1595,6 +1609,18 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Bind the given callback to drawing tablet events of this element.
+    /// The fluent API equivalent to [`Interactivity::on_pen_event`].
+    ///
+    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    fn on_pen_event(mut self, listener: impl Fn(&PenEvent, &mut Window, &mut App) + 'static) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().on_pen_event(listener);
+        self
+    }
+
     /// Bind the given callback to non-primary click events of this element.
     /// The fluent API equivalent to [`Interactivity::on_aux_click`].
     ///
@@ -1733,6 +1759,8 @@ pub(crate) type ScrollWheelListener =
 
 pub(crate) type PinchListener =
     Box<dyn Fn(&PinchEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
+
+pub(crate) type PenListener = Box<dyn Fn(&PenEvent, &mut Window, &mut App) + 'static>;
 
 pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -2171,6 +2199,7 @@ pub struct Interactivity {
     pub(crate) file_drop_exit_listeners: Vec<FileDropExitListener>,
     pub(crate) scroll_wheel_listeners: Vec<ScrollWheelListener>,
     pub(crate) pinch_listeners: Vec<PinchListener>,
+    pub(crate) pen_listeners: Vec<PenListener>,
     pub(crate) key_down_listeners: Vec<KeyDownListener>,
     pub(crate) key_up_listeners: Vec<KeyUpListener>,
     pub(crate) modifiers_changed_listeners: Vec<ModifiersChangedListener>,
@@ -2424,6 +2453,7 @@ impl Interactivity {
             || !self.aux_click_listeners.is_empty()
             || !self.scroll_wheel_listeners.is_empty()
             || self.has_pinch_listeners()
+            || !self.pen_listeners.is_empty()
             || self.drag_listener.is_some()
             || !self.drop_listeners.is_empty()
             || !self.drag_over_styles.is_empty()
@@ -2758,7 +2788,7 @@ impl Interactivity {
     fn paint_mouse_listeners(
         &mut self,
         hitbox: &Hitbox,
-        element_state: Option<&mut InteractiveElementState>,
+        mut element_state: Option<&mut InteractiveElementState>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -2840,6 +2870,45 @@ impl Interactivity {
             window.on_mouse_event(move |event: &PinchEvent, phase, window, cx| {
                 listener(event, phase, &hitbox, window, cx);
             })
+        }
+
+        if let Some(element_state) = element_state.as_deref_mut()
+            && !self.pen_listeners.is_empty()
+        {
+            let owns_stroke = element_state
+                .owns_pen_stroke
+                .get_or_insert_with(Default::default)
+                .clone();
+            let hitbox = hitbox.clone();
+            let listeners = mem::take(&mut self.pen_listeners);
+            window.on_mouse_event(move |event: &PenEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let targeted = match event.phase {
+                    PenPhase::Enter | PenPhase::Hover => hitbox.is_hovered(window),
+                    PenPhase::Leave => {
+                        owns_stroke.set(false);
+                        hitbox.is_hovered(window)
+                    }
+                    PenPhase::Down => {
+                        let claimed =
+                            window.pen_contact == PenContact::Pending && hitbox.is_hovered(window);
+                        if claimed {
+                            window.pen_contact = PenContact::Captured;
+                        }
+                        owns_stroke.set(claimed);
+                        claimed
+                    }
+                    PenPhase::Move => owns_stroke.get(),
+                    PenPhase::Up => owns_stroke.replace(false),
+                };
+                if targeted {
+                    for listener in &listeners {
+                        listener(event, window, cx);
+                    }
+                }
+            });
         }
 
         if self.hover_style.is_some()
@@ -3624,6 +3693,7 @@ pub struct InteractiveElementState {
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
+    owns_pen_stroke: Option<Rc<Cell<bool>>>,
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.

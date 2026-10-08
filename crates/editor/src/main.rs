@@ -1,4 +1,5 @@
 mod input;
+mod text;
 mod theme;
 mod workspace;
 
@@ -6,10 +7,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
 use clap::Parser as _;
-use gpui::{App, AppContext as _, TitlebarOptions, WindowOptions};
+use gpui::{
+    App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowOptions, font, px, size,
+};
 use model::color::Palette;
 use model::config::Config;
-use state::{Root, State};
+use state::{Root, State, watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -38,9 +41,14 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("reading palette {:?}", config.theme.palette))?;
     let palette: Palette = serde_json::from_slice(&palette_bytes)
         .with_context(|| format!("parsing palette {:?}", config.theme.palette))?;
-    let theme = Theme::new(&palette, &config);
     let title = root.path().display().to_string();
     let state = State::new(root, helix_core::config::default_lang_loader())?;
+    let (changed_tx, changed_rx) = async_channel::unbounded::<Vec<PathBuf>>();
+    let watcher = watch::start(move |paths| {
+        // A closed channel means the window is gone; nothing left to notify.
+        let _ = changed_tx.send_blocking(paths);
+    })
+    .context("starting file watcher")?;
 
     gpui_platform::application().run(move |cx: &mut App| {
         let installed = cx.text_system().all_font_names();
@@ -56,6 +64,21 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        let text_system = cx.text_system();
+        let mono = text_system.resolve_font(&font(config.font.mono.family.clone()));
+        let mono_size = px(config.font.mono.size_px);
+        let cell = match text_system.advance(mono, mono_size, 'm') {
+            Ok(advance) => size(
+                advance.width,
+                (text_system.ascent(mono, mono_size) + text_system.descent(mono, mono_size).abs())
+                    .ceil(),
+            ),
+            Err(error) => {
+                tracing::error!(%error, "cannot measure the monospace font");
+                std::process::exit(1);
+            }
+        };
+        let theme = Theme::new(&palette, &config, cell);
         let opened = cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -66,7 +89,7 @@ fn main() -> anyhow::Result<()> {
                 ..Default::default()
             },
             |window, cx| {
-                cx.new(|cx| {
+                let workspace = cx.new(|cx| {
                     let focus = cx.focus_handle();
                     window.focus(&focus, cx);
                     Workspace {
@@ -74,8 +97,25 @@ fn main() -> anyhow::Result<()> {
                         theme,
                         effects: Vec::new(),
                         focus,
+                        preedit: String::new(),
+                        watcher,
+                        tree_scroll: UniformListScrollHandle::new(),
                     }
-                })
+                });
+                workspace.update(cx, |workspace, cx| {
+                    state::boot(&mut workspace.state, &mut workspace.effects);
+                    workspace.flush(cx);
+                    cx.spawn(async move |this, cx| {
+                        while let Ok(paths) = changed_rx.recv().await {
+                            match this.update(cx, |workspace, cx| workspace.on_paths(paths, cx)) {
+                                Ok(()) => {}
+                                Err(_) => break,
+                            }
+                        }
+                    })
+                    .detach();
+                });
+                workspace
             },
         );
         match opened {

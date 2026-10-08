@@ -11,9 +11,13 @@ workspace = true
 integration = []
 
 [dependencies]
+git2.workspace = true
 helix-core.workspace = true
 helix-stdx.workspace = true
+ignore.workspace = true
 model.workspace = true
+notify-debouncer-mini.workspace = true
+nucleo.workspace = true
 ropey.workspace = true
 slotmap.workspace = true
 thiserror.workspace = true
@@ -30,4 +34,12 @@ required-features = ["integration"]
 
 [[bench]]
 name = "keystroke"
+harness = false
+
+[[bench]]
+name = "display"
+harness = false
+
+[[bench]]
+name = "files"
 harness = false

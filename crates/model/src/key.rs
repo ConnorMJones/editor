@@ -63,6 +63,29 @@ impl Key {
             mods: Mods::empty(),
         }
     }
+
+    /// Unique integer per key for cheap ordered lookups; named keys sit above the char range.
+    pub const fn packed(self) -> u32 {
+        const NAMED: u32 = char::MAX as u32 + 1;
+        let code = match self.code {
+            KeyCode::Char(c) => c as u32,
+            KeyCode::Enter => NAMED,
+            KeyCode::Esc => NAMED + 1,
+            KeyCode::Tab => NAMED + 2,
+            KeyCode::Backspace => NAMED + 3,
+            KeyCode::Delete => NAMED + 4,
+            KeyCode::Left => NAMED + 5,
+            KeyCode::Right => NAMED + 6,
+            KeyCode::Up => NAMED + 7,
+            KeyCode::Down => NAMED + 8,
+            KeyCode::Home => NAMED + 9,
+            KeyCode::End => NAMED + 10,
+            KeyCode::PageUp => NAMED + 11,
+            KeyCode::PageDown => NAMED + 12,
+            KeyCode::F(n) => NAMED + 13 + n as u32,
+        };
+        code << 3 | self.mods.bits() as u32
+    }
 }
 
 /// Helix notation: `C-k`, `A-x`, `S-tab`, `esc`, `space`.

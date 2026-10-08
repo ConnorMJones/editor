@@ -26,7 +26,7 @@ use crate::{
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
-use crate::interactive::TouchEvent;
+use crate::interactive::{MouseDownEvent, MouseExitEvent, PenEvent, PenPhase, TouchEvent};
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1210,6 +1210,18 @@ enum InputModality {
     Touch,
 }
 
+/// Who receives the pen stroke between [`PenPhase::Down`] and [`PenPhase::Up`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PenContact {
+    Lifted,
+    /// `Down` is being dispatched and no pen listener has claimed the stroke yet.
+    Pending,
+    /// A pen listener claimed the stroke at `Down` and receives it as pen events.
+    Captured,
+    /// No pen listener took the stroke, so it is delivered as left-button mouse events.
+    EmulatingMouse,
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -1280,6 +1292,7 @@ pub struct Window {
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
+    pub(crate) pen_contact: PenContact,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -2172,6 +2185,7 @@ impl Window {
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
+            pen_contact: PenContact::Lifted,
             refreshing: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
@@ -5510,7 +5524,9 @@ impl Window {
         let old_modality = self.last_input_modality;
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
-            PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) | PlatformInput::Pen(_) => {
+                InputModality::Mouse
+            }
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
@@ -5616,6 +5632,11 @@ impl Window {
                 }
             },
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
+            PlatformInput::Pen(pen) => {
+                self.mouse_position = pen.position;
+                self.modifiers = pen.modifiers;
+                PlatformInput::Pen(pen)
+            }
             PlatformInput::LongPress(long_press) => {
                 self.mouse_position = if long_press.phase == crate::TouchPhase::Started {
                     long_press.start_position
@@ -5634,7 +5655,9 @@ impl Window {
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 
-        if let Some(any_mouse_event) = event.mouse_event() {
+        if let PlatformInput::Pen(pen) = &event {
+            self.dispatch_pen_event(pen, cx);
+        } else if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
@@ -5835,6 +5858,88 @@ impl Window {
                 window.schedule_touch_momentum_tick();
             }
         });
+    }
+
+    /// Delivers a pen event per the [`PenEvent`] dispatch contract. Hover always also
+    /// reaches mouse listeners; contact goes either to the claiming pen listener or,
+    /// when none claimed it, to mouse listeners as the left button.
+    fn dispatch_pen_event(&mut self, event: &PenEvent, cx: &mut App) {
+        let position = event.position;
+        let modifiers = event.modifiers;
+        match (event.phase, self.pen_contact) {
+            (PenPhase::Enter | PenPhase::Hover, _) => {
+                self.dispatch_mouse_event(event, cx);
+                cx.propagate_event = true;
+                self.dispatch_mouse_event(
+                    &MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers,
+                    },
+                    cx,
+                );
+            }
+            (PenPhase::Down, _) => {
+                self.pen_contact = PenContact::Pending;
+                self.dispatch_mouse_event(event, cx);
+                if self.pen_contact == PenContact::Pending {
+                    self.pen_contact = PenContact::EmulatingMouse;
+                    cx.propagate_event = true;
+                    self.dispatch_mouse_event(
+                        &MouseDownEvent {
+                            button: MouseButton::Left,
+                            position,
+                            modifiers,
+                            click_count: 1,
+                            first_mouse: false,
+                        },
+                        cx,
+                    );
+                }
+            }
+            (PenPhase::Move, PenContact::Captured | PenContact::Lifted | PenContact::Pending) => {
+                self.dispatch_mouse_event(event, cx);
+            }
+            (PenPhase::Move, PenContact::EmulatingMouse) => {
+                self.dispatch_mouse_event(
+                    &MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers,
+                    },
+                    cx,
+                );
+            }
+            (PenPhase::Up, PenContact::Captured | PenContact::Lifted | PenContact::Pending) => {
+                self.dispatch_mouse_event(event, cx);
+                self.pen_contact = PenContact::Lifted;
+            }
+            (PenPhase::Up, PenContact::EmulatingMouse) => {
+                self.dispatch_mouse_event(
+                    &MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers,
+                        click_count: 1,
+                    },
+                    cx,
+                );
+                self.pen_contact = PenContact::Lifted;
+            }
+            (PenPhase::Leave, _) => {
+                self.dispatch_mouse_event(event, cx);
+                self.pen_contact = PenContact::Lifted;
+                cx.propagate_event = true;
+                self.dispatch_mouse_event(
+                    &MouseExitEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers,
+                    },
+                    cx,
+                );
+            }
+        }
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {

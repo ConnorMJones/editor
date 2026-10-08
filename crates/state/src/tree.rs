@@ -1,0 +1,156 @@
+use std::collections::HashMap;
+use std::io;
+use std::path::Path;
+
+use crate::path::RelPath;
+
+/// File explorer data; directories are listed lazily as they are expanded.
+#[derive(Default)]
+pub struct Tree {
+    /// Directories expanded at least once, keyed by path; the root is `RelPath::ROOT`.
+    pub dirs: HashMap<RelPath, Dir>,
+    /// Visible rows in display order, rebuilt whenever `dirs` changes.
+    pub rows: Vec<Row>,
+    pub cursor: usize,
+    pub edit: TreeEdit,
+}
+
+pub struct Dir {
+    pub fold: Fold,
+    pub listing: Listing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fold {
+    Expanded,
+    Collapsed,
+}
+
+pub enum Listing {
+    Loading,
+    Loaded(Vec<Entry>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    pub kind: EntryKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EntryKind {
+    Dir,
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub path: RelPath,
+    pub depth: u16,
+    pub kind: RowKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKind {
+    File,
+    Dir(Fold),
+}
+
+/// A file operation being typed in the tree's input line.
+#[derive(Default)]
+pub enum TreeEdit {
+    #[default]
+    None,
+    /// Path relative to the root; a trailing `/` creates a directory.
+    Create {
+        line: String,
+    },
+    Rename {
+        from: RelPath,
+        line: String,
+    },
+    /// Proceeds only when the line reads `y`.
+    Delete {
+        path: RelPath,
+        kind: EntryKind,
+        line: String,
+    },
+}
+
+/// Directory entries sorted directories-first, then case-insensitively; `.git` is skipped.
+pub fn list(root: &Path, dir: &RelPath) -> io::Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir.to_path(root))? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            tracing::warn!(path = ?entry.path(), "skipping non-UTF-8 name");
+            continue;
+        };
+        match name.as_str() {
+            ".git" => continue,
+            _ => {}
+        }
+        // Symlinks are shown as what they point to.
+        let kind = match std::fs::metadata(entry.path()).map(|m| m.is_dir()) {
+            Ok(true) => EntryKind::Dir,
+            Ok(false) | Err(_) => EntryKind::File,
+        };
+        entries.push(Entry { name, kind });
+    }
+    entries.sort_unstable_by(|a, b| {
+        a.kind.cmp(&b.kind).then_with(|| {
+            a.name
+                .chars()
+                .flat_map(char::to_lowercase)
+                .cmp(b.name.chars().flat_map(char::to_lowercase))
+                .then_with(|| a.name.cmp(&b.name))
+        })
+    });
+    Ok(entries)
+}
+
+/// Recomputes `rows`, keeping the cursor on the same path when it is still visible.
+pub fn rebuild(tree: &mut Tree) {
+    let selected = tree.rows.get(tree.cursor).map(|row| row.path.clone());
+    tree.rows.clear();
+    push_rows(&tree.dirs, &RelPath::ROOT, 0, &mut tree.rows);
+    tree.cursor = match selected {
+        Some(path) => match tree.rows.iter().position(|row| row.path == path) {
+            Some(index) => index,
+            None => tree.cursor.min(tree.rows.len().saturating_sub(1)),
+        },
+        None => 0,
+    };
+}
+
+fn push_rows(dirs: &HashMap<RelPath, Dir>, dir: &RelPath, depth: u16, rows: &mut Vec<Row>) {
+    let Some(Dir {
+        fold: Fold::Expanded,
+        listing: Listing::Loaded(entries),
+    }) = dirs.get(dir)
+    else {
+        return;
+    };
+    for entry in entries {
+        let path = dir.join(&entry.name);
+        match entry.kind {
+            EntryKind::File => rows.push(Row {
+                path,
+                depth,
+                kind: RowKind::File,
+            }),
+            EntryKind::Dir => {
+                let fold = match dirs.get(&path) {
+                    Some(Dir { fold, .. }) => *fold,
+                    None => Fold::Collapsed,
+                };
+                rows.push(Row {
+                    path: path.clone(),
+                    depth,
+                    kind: RowKind::Dir(fold),
+                });
+                push_rows(dirs, &path, depth + 1, rows);
+            }
+        }
+    }
+}

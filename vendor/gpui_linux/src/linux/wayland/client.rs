@@ -51,6 +51,11 @@ use wayland_protocols::wp::primary_selection::zv1::client::{
     zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
     zwp_primary_selection_source_v1,
 };
+use wayland_protocols::wp::tablet::zv2::client::{
+    zwp_tablet_manager_v2, zwp_tablet_pad_group_v2, zwp_tablet_pad_ring_v2,
+    zwp_tablet_pad_strip_v2, zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2,
+    zwp_tablet_v2,
+};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ContentHint, ContentPurpose,
 };
@@ -102,10 +107,10 @@ use gpui::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, ExternalDragPayload,
     FileDragPaths, FileDropEvent, ForegroundExecutor, GraphicalEnvironment, KeyDownEvent,
     KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay,
-    PlatformFrameSignal, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams,
-    point, px, size,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, PenButtons, PenEvent,
+    PenPhase, PenTool, Pixels, PlatformDisplay, PlatformFrameSignal, PlatformInput,
+    PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
+    Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams, point, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -258,6 +263,7 @@ pub struct Globals {
     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
+    pub tablet_manager: Option<zwp_tablet_manager_v2::ZwpTabletManagerV2>,
     pub executor: ForegroundExecutor,
     pub frame_ping: Ping,
 }
@@ -308,6 +314,7 @@ impl Globals {
             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
+            tablet_manager: globals.bind(&qh, 1..=1, ()).ok(),
             executor,
             qh,
             frame_ping,
@@ -407,6 +414,45 @@ pub(crate) struct WaylandClientState {
     registrations: Vec<RegistrationToken>,
     pub common: Rc<RefCell<LinuxCommon>>,
     ime_enabled: Option<bool>,
+    tablet_seat: Option<zwp_tablet_seat_v2::ZwpTabletSeatV2>,
+    tablets: HashMap<ObjectId, TabletInfo>,
+    tablet_tools: HashMap<ObjectId, TabletTool>,
+}
+
+#[derive(Default)]
+struct TabletInfo {
+    name: Option<String>,
+    usb_id: Option<(u32, u32)>,
+    path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolContact {
+    Lifted,
+    Touching,
+}
+
+struct TabletToolFocus {
+    window: WaylandWindowStatePtr,
+    serial: u32,
+}
+
+struct TabletTool {
+    kind: PenTool,
+    hardware_serial: u64,
+    hardware_id: u64,
+    capabilities: SmallVec<[zwp_tablet_tool_v2::Capability; 6]>,
+    cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    focus: Option<TabletToolFocus>,
+    contact: ToolContact,
+    /// Surface-local position, unknown from proximity_in until the first motion.
+    position: Option<Point<Pixels>>,
+    pressure: f32,
+    tilt: Point<f32>,
+    distance: f32,
+    buttons: PenButtons,
+    /// Phase transitions received since the last `frame`, each with the window it targets.
+    pending: SmallVec<[(PenPhase, WaylandWindowStatePtr); 4]>,
 }
 
 struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowStatePtr> {
@@ -778,6 +824,18 @@ impl WaylandClientStatePtr {
         {
             state.cursor_hidden_window = Some(window);
         }
+        for tool in state.tablet_tools.values_mut() {
+            if tool
+                .focus
+                .as_ref()
+                .is_some_and(|focus| focus.window.ptr_eq(&closed_window))
+            {
+                tool.focus = None;
+                tool.contact = ToolContact::Lifted;
+            }
+            tool.pending
+                .retain(|(_, window)| !window.ptr_eq(&closed_window));
+        }
     }
 }
 
@@ -1017,6 +1075,17 @@ impl WaylandConnection {
 
         let cursor = Cursor::new(&conn, &globals, 24);
 
+        let tablet_seat = match &globals.tablet_manager {
+            Some(tablet_manager) => {
+                log::info!("wayland: zwp_tablet_manager_v2 bound, waiting for tablets");
+                Some(tablet_manager.get_tablet_seat(&seat, &qh, ()))
+            }
+            None => {
+                log::info!("wayland: compositor has no zwp_tablet_manager_v2, pen input disabled");
+                None
+            }
+        };
+
         let state = Rc::new(RefCell::new(WaylandClientState {
             serial_tracker: SerialTracker::new(),
             globals,
@@ -1096,6 +1165,9 @@ impl WaylandConnection {
             },
             registrations: Vec::new(),
             ime_enabled: None,
+            tablet_seat,
+            tablets: HashMap::default(),
+            tablet_tools: HashMap::default(),
         }));
 
         // From here on, `Drop` removes whatever was registered if a later step fails.
@@ -1312,6 +1384,12 @@ impl WaylandConnection {
         }
 
         state.cursor_style = Some(style);
+
+        for tool in state.tablet_tools.values() {
+            if let (Some(device), Some(focus)) = (&tool.cursor_shape_device, &tool.focus) {
+                device.set_shape(focus.serial, to_shape(style));
+            }
+        }
 
         // Don't clobber the invisible cursor; restore reads back from `cursor_style`.
         if state.cursor_hidden_window.is_some() {
@@ -1566,8 +1644,15 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                     if let Some(wl_keyboard) = state.wl_keyboard.take() {
                         wl_keyboard.release();
                     }
+                    if let Some(tablet_seat) = state.tablet_seat.take() {
+                        tablet_seat.destroy();
+                    }
                     state.wl_seat.release();
                     state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(name, version, qh, ());
+                    state.tablet_seat =
+                        state.globals.tablet_manager.as_ref().map(|tablet_manager| {
+                            tablet_manager.get_tablet_seat(&state.wl_seat, qh, ())
+                        });
                 }
                 "wl_output" => {
                     let Ok(version) = wl_output_version(version) else {
@@ -2721,6 +2806,353 @@ impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()>
         }
     }
 }
+
+impl Dispatch<zwp_tablet_manager_v2::ZwpTabletManagerV2, ()> for WaylandClientStatePtr {
+    fn event(
+        _: &mut Self,
+        _: &zwp_tablet_manager_v2::ZwpTabletManagerV2,
+        _: zwp_tablet_manager_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The tablet manager doesn't generate events.
+    }
+}
+
+impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        _: &zwp_tablet_seat_v2::ZwpTabletSeatV2,
+        event: zwp_tablet_seat_v2::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        match event {
+            zwp_tablet_seat_v2::Event::TabletAdded { id } => {
+                state.tablets.insert(id.id(), TabletInfo::default());
+            }
+            zwp_tablet_seat_v2::Event::ToolAdded { id } => {
+                let cursor_shape_device = state
+                    .globals
+                    .cursor_shape_manager
+                    .as_ref()
+                    .map(|manager| manager.get_tablet_tool_v2(&id, qh, ()));
+                state.tablet_tools.insert(
+                    id.id(),
+                    TabletTool {
+                        kind: PenTool::Pen,
+                        hardware_serial: 0,
+                        hardware_id: 0,
+                        capabilities: SmallVec::new(),
+                        cursor_shape_device,
+                        focus: None,
+                        contact: ToolContact::Lifted,
+                        position: None,
+                        pressure: 0.0,
+                        tilt: Point::default(),
+                        distance: 0.0,
+                        buttons: PenButtons::default(),
+                        pending: SmallVec::new(),
+                    },
+                );
+            }
+            zwp_tablet_seat_v2::Event::PadAdded { .. } => {}
+            _ => {}
+        }
+    }
+
+    event_created_child!(WaylandClientStatePtr, zwp_tablet_seat_v2::ZwpTabletSeatV2, [
+        zwp_tablet_seat_v2::EVT_TABLET_ADDED_OPCODE => (zwp_tablet_v2::ZwpTabletV2, ()),
+        zwp_tablet_seat_v2::EVT_TOOL_ADDED_OPCODE => (zwp_tablet_tool_v2::ZwpTabletToolV2, ()),
+        zwp_tablet_seat_v2::EVT_PAD_ADDED_OPCODE => (zwp_tablet_pad_v2::ZwpTabletPadV2, ()),
+    ]);
+}
+
+impl Dispatch<zwp_tablet_v2::ZwpTabletV2, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        tablet: &zwp_tablet_v2::ZwpTabletV2,
+        event: zwp_tablet_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let id = tablet.id();
+        match event {
+            zwp_tablet_v2::Event::Removed => {
+                if let Some(info) = state.tablets.remove(&id) {
+                    log::info!("wayland: tablet removed: {:?}", info.name);
+                }
+                tablet.destroy();
+                return;
+            }
+            zwp_tablet_v2::Event::Done => {
+                if let Some(info) = state.tablets.get(&id) {
+                    log::info!(
+                        "wayland: tablet detected: name={:?} usb_id={} path={:?}",
+                        info.name,
+                        info.usb_id.map_or_else(
+                            || "unknown".to_string(),
+                            |(vid, pid)| format!("{vid:04x}:{pid:04x}")
+                        ),
+                        info.path,
+                    );
+                }
+                return;
+            }
+            _ => {}
+        }
+        let Some(info) = state.tablets.get_mut(&id) else {
+            return;
+        };
+        match event {
+            zwp_tablet_v2::Event::Name { name } => info.name = Some(name),
+            zwp_tablet_v2::Event::Id { vid, pid } => info.usb_id = Some((vid, pid)),
+            zwp_tablet_v2::Event::Path { path } => info.path = Some(path),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        wl_tool: &zwp_tablet_tool_v2::ZwpTabletToolV2,
+        event: zwp_tablet_tool_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // evdev codes for the stylus barrel buttons, from linux/input-event-codes.h.
+        const BTN_STYLUS: u32 = 0x14b;
+        const BTN_STYLUS2: u32 = 0x14c;
+        const BTN_STYLUS3: u32 = 0x149;
+
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let id = wl_tool.id();
+        let modifiers = state.modifiers;
+        let cursor_style = state.cursor_style.unwrap_or(CursorStyle::Arrow);
+        let window = match &event {
+            zwp_tablet_tool_v2::Event::ProximityIn { surface, .. } => {
+                get_window(&mut state, &surface.id())
+            }
+            _ => None,
+        };
+        let Some(tool) = state.tablet_tools.get_mut(&id) else {
+            return;
+        };
+
+        match event {
+            zwp_tablet_tool_v2::Event::Type {
+                tool_type: WEnum::Value(tool_type),
+            } => {
+                tool.kind = match tool_type {
+                    zwp_tablet_tool_v2::Type::Pen => PenTool::Pen,
+                    zwp_tablet_tool_v2::Type::Eraser => PenTool::Eraser,
+                    zwp_tablet_tool_v2::Type::Brush => PenTool::Brush,
+                    zwp_tablet_tool_v2::Type::Pencil => PenTool::Pencil,
+                    zwp_tablet_tool_v2::Type::Airbrush => PenTool::Airbrush,
+                    zwp_tablet_tool_v2::Type::Finger => PenTool::Finger,
+                    zwp_tablet_tool_v2::Type::Mouse => PenTool::Mouse,
+                    zwp_tablet_tool_v2::Type::Lens => PenTool::Lens,
+                    _ => PenTool::Pen,
+                };
+            }
+            zwp_tablet_tool_v2::Event::HardwareSerial {
+                hardware_serial_hi,
+                hardware_serial_lo,
+            } => {
+                tool.hardware_serial =
+                    (u64::from(hardware_serial_hi) << 32) | u64::from(hardware_serial_lo);
+            }
+            zwp_tablet_tool_v2::Event::HardwareIdWacom {
+                hardware_id_hi,
+                hardware_id_lo,
+            } => {
+                tool.hardware_id = (u64::from(hardware_id_hi) << 32) | u64::from(hardware_id_lo);
+            }
+            zwp_tablet_tool_v2::Event::Capability {
+                capability: WEnum::Value(capability),
+            } => tool.capabilities.push(capability),
+            zwp_tablet_tool_v2::Event::Done => {
+                log::info!(
+                    "wayland: tablet tool detected: type={:?} serial={:#x} hardware_id={:#x} capabilities={:?}",
+                    tool.kind,
+                    tool.hardware_serial,
+                    tool.hardware_id,
+                    tool.capabilities,
+                );
+            }
+            zwp_tablet_tool_v2::Event::Removed => {
+                log::info!(
+                    "wayland: tablet tool removed: type={:?} serial={:#x}",
+                    tool.kind,
+                    tool.hardware_serial
+                );
+                if let Some(device) = &tool.cursor_shape_device {
+                    device.destroy();
+                }
+                state.tablet_tools.remove(&id);
+                wl_tool.destroy();
+            }
+            zwp_tablet_tool_v2::Event::ProximityIn { serial, .. } => {
+                if let Some(focus) = tool.focus.take() {
+                    tool.pending.push((PenPhase::Leave, focus.window));
+                }
+                let Some(window) = window else {
+                    return;
+                };
+                log::debug!("wayland: tablet tool {:?} entered window", tool.kind);
+                if let Some(device) = &tool.cursor_shape_device {
+                    device.set_shape(serial, to_shape(cursor_style));
+                }
+                tool.pending.push((PenPhase::Enter, window.clone()));
+                tool.focus = Some(TabletToolFocus { window, serial });
+                tool.position = None;
+            }
+            zwp_tablet_tool_v2::Event::ProximityOut => {
+                if let Some(focus) = tool.focus.take() {
+                    tool.pending.push((PenPhase::Leave, focus.window));
+                }
+                tool.contact = ToolContact::Lifted;
+            }
+            zwp_tablet_tool_v2::Event::Down { serial } => {
+                state.serial_tracker.update(SerialKind::MousePress, serial);
+                let Some(tool) = state.tablet_tools.get_mut(&id) else {
+                    return;
+                };
+                if let Some(focus) = &tool.focus {
+                    tool.pending.push((PenPhase::Down, focus.window.clone()));
+                    tool.contact = ToolContact::Touching;
+                }
+            }
+            zwp_tablet_tool_v2::Event::Up => {
+                if let Some(focus) = &tool.focus
+                    && tool.contact == ToolContact::Touching
+                {
+                    tool.pending.push((PenPhase::Up, focus.window.clone()));
+                }
+                tool.contact = ToolContact::Lifted;
+            }
+            zwp_tablet_tool_v2::Event::Motion { x, y } => {
+                tool.position = Some(point(px(x as f32), px(y as f32)));
+            }
+            zwp_tablet_tool_v2::Event::Pressure { pressure } => {
+                tool.pressure = pressure as f32 / 65535.0;
+            }
+            zwp_tablet_tool_v2::Event::Distance { distance } => {
+                tool.distance = distance as f32 / 65535.0;
+            }
+            zwp_tablet_tool_v2::Event::Tilt { tilt_x, tilt_y } => {
+                tool.tilt = point(tilt_x as f32, tilt_y as f32);
+            }
+            zwp_tablet_tool_v2::Event::Button {
+                button,
+                state: WEnum::Value(button_state),
+                ..
+            } => {
+                let pressed = button_state == zwp_tablet_tool_v2::ButtonState::Pressed;
+                match button {
+                    BTN_STYLUS => tool.buttons.primary = pressed,
+                    BTN_STYLUS2 => tool.buttons.secondary = pressed,
+                    BTN_STYLUS3 => tool.buttons.tertiary = pressed,
+                    _ => {}
+                }
+            }
+            zwp_tablet_tool_v2::Event::Frame { .. } => {
+                // Mutter sends proximity_in in a frame without motion, so hold the
+                // transitions until the position on the new surface is known.
+                let Some(position) = tool.position else {
+                    if tool.focus.is_none() {
+                        tool.pending.clear();
+                    }
+                    return;
+                };
+                if tool.pending.is_empty()
+                    && let Some(focus) = &tool.focus
+                {
+                    let phase = match tool.contact {
+                        ToolContact::Lifted => PenPhase::Hover,
+                        ToolContact::Touching => PenPhase::Move,
+                    };
+                    tool.pending.push((phase, focus.window.clone()));
+                }
+                let (kind, pressure, tilt, distance, buttons) = (
+                    tool.kind,
+                    tool.pressure,
+                    tool.tilt,
+                    tool.distance,
+                    tool.buttons,
+                );
+                let pending = std::mem::take(&mut tool.pending);
+                drop(state);
+                for (phase, window) in pending {
+                    window.handle_input(PlatformInput::Pen(PenEvent {
+                        phase,
+                        tool: kind,
+                        position,
+                        pressure,
+                        tilt,
+                        distance,
+                        buttons,
+                        modifiers,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwp_tablet_pad_v2::ZwpTabletPadV2, ()> for WaylandClientStatePtr {
+    fn event(
+        _: &mut Self,
+        pad: &zwp_tablet_pad_v2::ZwpTabletPadV2,
+        event: zwp_tablet_pad_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_tablet_pad_v2::Event::Buttons { buttons } => {
+                log::info!("wayland: tablet pad detected with {buttons} buttons");
+            }
+            zwp_tablet_pad_v2::Event::Removed => pad.destroy(),
+            _ => {}
+        }
+    }
+
+    event_created_child!(WaylandClientStatePtr, zwp_tablet_pad_v2::ZwpTabletPadV2, [
+        zwp_tablet_pad_v2::EVT_GROUP_OPCODE => (zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, ()),
+    ]);
+}
+
+impl Dispatch<zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, ()> for WaylandClientStatePtr {
+    fn event(
+        _: &mut Self,
+        _: &zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
+        _: zwp_tablet_pad_group_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+
+    event_created_child!(WaylandClientStatePtr, zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, [
+        zwp_tablet_pad_group_v2::EVT_RING_OPCODE => (zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, ()),
+        zwp_tablet_pad_group_v2::EVT_STRIP_OPCODE => (zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, ()),
+    ]);
+}
+
+delegate_noop!(WaylandClientStatePtr: ignore zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2);
+delegate_noop!(WaylandClientStatePtr: ignore zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2);
 
 impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ObjectId> for WaylandClientStatePtr {
     fn event(

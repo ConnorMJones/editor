@@ -143,6 +143,104 @@ impl InputEvent for TouchEvent {
     }
 }
 
+/// The physical tool of a drawing tablet that produced a [`PenEvent`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PenTool {
+    /// The tip of a stylus.
+    #[default]
+    Pen,
+    /// The eraser end of a stylus, or a dedicated eraser.
+    Eraser,
+    /// A brush-like stylus.
+    Brush,
+    /// A pencil-like stylus.
+    Pencil,
+    /// An airbrush-like stylus.
+    Airbrush,
+    /// A finger on a tablet that reports touches as tool input.
+    Finger,
+    /// A puck or mouse used on a tablet.
+    Mouse,
+    /// A lens cursor used on a tablet.
+    Lens,
+}
+
+/// The phase of a [`PenEvent`].
+///
+/// A tool's events always follow `Enter (Hover | Down Move* Up)* Leave`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PenPhase {
+    /// The tool came into proximity above the window.
+    Enter,
+    /// The tool moved, or an axis or button changed, while above the tablet without contact.
+    #[default]
+    Hover,
+    /// The tool made contact with the tablet.
+    Down,
+    /// The tool moved, or an axis or button changed, while in contact.
+    Move,
+    /// The tool lifted off the tablet.
+    Up,
+    /// The tool left proximity or moved off the window.
+    Leave,
+}
+
+/// The barrel buttons held on a stylus during a [`PenEvent`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PenButtons {
+    /// The button closest to the tip.
+    pub primary: bool,
+    /// The second button.
+    pub secondary: bool,
+    /// The third button, if the stylus has one.
+    pub tertiary: bool,
+}
+
+/// An event from a drawing tablet tool such as a stylus.
+///
+/// Dispatch contract: `Enter`, `Hover` and `Leave` reach every hovered
+/// element with a pen listener and are also delivered as mouse moves and
+/// exits. `Down` goes to the innermost hovered element with a pen listener,
+/// which claims the stroke so `Move` and `Up` reach only that element, even
+/// outside its bounds. When no pen listener is hovered at `Down`, the stroke
+/// is delivered as left-button mouse down, move and up events instead.
+#[derive(Clone, Debug, Default)]
+pub struct PenEvent {
+    /// The phase of the event.
+    pub phase: PenPhase,
+    /// The physical tool producing the event.
+    pub tool: PenTool,
+    /// The position of the tool in window coordinates.
+    pub position: Point<Pixels>,
+    /// Normalized tip pressure in `0.0..=1.0`; `0.0` for tools without a pressure sensor.
+    pub pressure: f32,
+    /// Tilt in degrees from the axis perpendicular to the tablet, positive towards
+    /// the right (x) and towards the user (y); zero for tools without tilt sensors.
+    pub tilt: Point<f32>,
+    /// Normalized hover distance in `0.0..=1.0`; `0.0` for tools without a distance sensor.
+    pub distance: f32,
+    /// The barrel buttons held during the event.
+    pub buttons: PenButtons,
+    /// The keyboard modifiers held during the event.
+    pub modifiers: Modifiers,
+}
+
+impl Sealed for PenEvent {}
+impl InputEvent for PenEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::Pen(self)
+    }
+}
+impl MouseEvent for PenEvent {}
+
+impl Deref for PenEvent {
+    type Target = Modifiers;
+
+    fn deref(&self) -> &Self::Target {
+        &self.modifiers
+    }
+}
+
 /// A mouse down event from the platform
 #[derive(Clone, Debug, Default)]
 pub struct MouseDownEvent {
@@ -797,6 +895,8 @@ pub enum PlatformInput {
     FileDrop(FileDropEvent),
     /// A raw touch event on a touch screen.
     Touch(TouchEvent),
+    /// An event from a drawing tablet tool.
+    Pen(PenEvent),
 }
 
 impl PlatformInput {
@@ -816,6 +916,7 @@ impl PlatformInput {
             PlatformInput::TouchDrag(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
             PlatformInput::Touch(_) => None,
+            PlatformInput::Pen(event) => Some(event),
         }
     }
 
@@ -835,6 +936,7 @@ impl PlatformInput {
             PlatformInput::TouchDrag(_) => None,
             PlatformInput::FileDrop(_) => None,
             PlatformInput::Touch(_) => None,
+            PlatformInput::Pen(_) => None,
         }
     }
 
@@ -856,6 +958,7 @@ impl PlatformInput {
             PlatformInput::TouchDrag(_) => "touch_drag",
             PlatformInput::FileDrop(_) => "file_drop",
             PlatformInput::Touch(_) => "touch",
+            PlatformInput::Pen(_) => "pen",
         }
     }
 

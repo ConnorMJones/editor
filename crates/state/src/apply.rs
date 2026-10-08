@@ -1,57 +1,128 @@
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use helix_core::doc_formatter::TextFormat;
-use helix_core::movement::{self, Direction, Movement};
-use helix_core::text_annotations::TextAnnotations;
-use helix_core::{ChangeSet, Range, Rope, RopeSlice, Selection, Tendril, Transaction, graphemes};
-use model::command::Command;
+use helix_core::chars::char_is_whitespace;
+use helix_core::line_ending::{line_end_char_index, str_is_line_ending};
+use helix_core::movement::{self, Movement};
+use helix_core::syntax::Loader;
+use helix_core::unicode::segmentation::UnicodeSegmentation;
+use helix_core::{
+    Assoc, ChangeSet, Operation, Range, Rope, RopeSlice, Selection, SmallVec, Transaction,
+    graphemes, object,
+};
+use helix_stdx::rope::RopeSliceExt;
+use model::command::{Command, Direction, Dirs, Motion, Paste};
 use model::mode::Mode;
 use model::notice::Notice;
+use model::register::Register;
 use slotmap::SlotMap;
 
-use crate::buffer::{Buffer, BufferId, Content, Disk, HistoryStep, TextDoc};
-use crate::job::Job;
-use crate::layout::{Layout, PaneId, Scroll, TextView, View};
-use crate::{Effect, Exit, Overlay, Prompt, State, prompt};
-
-type Motion =
-    fn(RopeSlice, Range, Direction, usize, Movement, &TextFormat, &mut TextAnnotations) -> Range;
+use crate::buffer::{Buffer, BufferId, Content, Disk, HistoryStep, TextDoc, Uncommitted};
+use crate::job::{Job, ReloadPolicy};
+use crate::layout::{Layout, PaneId, TextView, View};
+use crate::register::{self, ClipboardUse, Values};
+use crate::{
+    Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky, edit, input,
+    motion, prompt, select, workspace,
+};
 
 pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
-    match command {
-        Command::NormalMode => {
-            if let Some(id) = focused_buffer(state) {
-                commit(state, id);
-            }
-            state.input.mode = Mode::Normal;
+    match &command {
+        Command::FindChar(..)
+        | Command::SelectTextObject(..)
+        | Command::GotoSyntaxObject(..)
+        | Command::Move(
+            Motion::NextParagraph
+            | Motion::PrevParagraph
+            | Motion::ParentNodeEnd
+            | Motion::ParentNodeStart,
+        )
+        | Command::ExpandSelection
+        | Command::ShrinkSelection
+        | Command::SelectSibling(_)
+        | Command::SelectAllSiblings
+        | Command::SelectAllChildren => {
+            state.input.last_motion = Some(LastMotion {
+                command: command.clone(),
+                count: state.input.count,
+            });
         }
+        _ => {}
+    }
+    match command {
+        Command::NormalMode => match state.input.mode {
+            Mode::Normal => {}
+            Mode::Select => state.input.mode = Mode::Normal,
+            Mode::Insert => {
+                let blank_line = match focused(&mut state.layout, &mut state.buffers) {
+                    Some((view, doc)) => {
+                        let text = doc.text.slice(..);
+                        let range = view.selection.primary();
+                        let pos = range.cursor(text);
+                        let line = range.cursor_line(text);
+                        let inserted_blank = match &doc.uncommitted {
+                            Uncommitted::Pending { changes, .. } => {
+                                match changes.changes().changes() {
+                                    [
+                                        Operation::Retain(at),
+                                        Operation::Insert(inserted),
+                                        Operation::Retain(_),
+                                    ] => {
+                                        let mut graphemes = inserted.graphemes(true);
+                                        at + inserted.len() == pos
+                                            && graphemes.next().is_some_and(str_is_line_ending)
+                                            && graphemes.all(|g| g.chars().all(char_is_whitespace))
+                                            && pos == line_end_char_index(&text, line)
+                                    }
+                                    _ => false,
+                                }
+                            }
+                            Uncommitted::Clean => false,
+                        };
+                        inserted_blank.then(|| (text.line_to_char(line), pos))
+                    }
+                    None => None,
+                };
+                if let Some((start, end)) = blank_line {
+                    edit(state, |doc, _, _| {
+                        Transaction::change(&doc.text, [(start, end, None)].into_iter())
+                    });
+                }
+                match std::mem::replace(&mut state.input.insert_exit, InsertExit::Keep) {
+                    InsertExit::RestoreCursor => reselect(state, |text, range| {
+                        let head = match range.head > range.anchor {
+                            true => graphemes::prev_grapheme_boundary(text, range.to()),
+                            false => range.to(),
+                        };
+                        Range::new(range.from(), head)
+                    }),
+                    InsertExit::Keep => {}
+                }
+                state.input.mode = Mode::Normal;
+                commit_focused(state);
+            }
+        },
         Command::InsertMode => {
             state.input.mode = Mode::Insert;
             reselect(state, |_, range| Range::new(range.to(), range.from()));
         }
         Command::AppendMode => {
             state.input.mode = Mode::Insert;
-            let State {
-                layout,
-                buffers,
-                languages,
-                ..
-            } = state;
-            if let Some((view, doc)) = focused(layout, buffers) {
+            state.input.insert_exit = InsertExit::RestoreCursor;
+            edit(state, |doc, selection, _| {
                 let end = doc.text.len_chars();
-                let last = view.selection.ranges().last().copied();
-                if let Some(last) = last
-                    && !last.is_empty()
-                    && last.to() == end
-                {
-                    let tx = Transaction::change(
-                        &doc.text,
-                        [(end, end, Some(doc.line_ending.as_str().into()))].into_iter(),
-                    );
-                    doc.apply(&tx, &view.selection, languages);
-                }
-            }
+                let last = selection
+                    .ranges()
+                    .last()
+                    .copied()
+                    .unwrap_or(Range::point(0));
+                let changes = match !last.is_empty() && last.to() == end {
+                    true => Some((end, end, Some(doc.line_ending.as_str().into()))),
+                    false => None,
+                };
+                Transaction::change(&doc.text, changes.into_iter())
+            });
             reselect(state, |text, range| {
                 Range::new(
                     range.from(),
@@ -59,82 +130,597 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
                 )
             });
         }
-        Command::SelectMode => state.input.mode = Mode::Select,
-
-        Command::MoveCharLeft => motion(state, movement::move_horizontally, Direction::Backward),
-        Command::MoveCharRight => motion(state, movement::move_horizontally, Direction::Forward),
-        Command::MoveLineUp => motion(state, movement::move_vertically, Direction::Backward),
-        Command::MoveLineDown => motion(state, movement::move_vertically, Direction::Forward),
-
-        Command::InsertChar(c) => insert(state, Tendril::from_iter([c])),
-        Command::InsertNewline => {
-            let line_ending = match focused(&mut state.layout, &mut state.buffers) {
-                Some((_, doc)) => doc.line_ending,
-                None => return,
-            };
-            insert(state, Tendril::from(line_ending.as_str()));
+        Command::SelectMode => {
+            reselect(state, |text, range| {
+                match range.is_empty() && range.head == text.len_chars() {
+                    true => Range::new(
+                        graphemes::prev_grapheme_boundary(text, range.anchor),
+                        range.head,
+                    ),
+                    false => range,
+                }
+            });
+            state.input.mode = Mode::Select;
         }
-        Command::DeleteCharBackward => edit(state, |text, selection| {
-            let slice = text.slice(..);
-            Transaction::delete_by_selection(text, selection, |range| {
-                let cursor = range.cursor(slice);
-                (
-                    graphemes::nth_prev_grapheme_boundary(slice, cursor, 1),
-                    cursor,
+        Command::InsertAtLineStart => edit::insert_with_indent(state, edit::Fallback::LineStart),
+        Command::InsertAtLineEnd => edit::insert_with_indent(state, edit::Fallback::LineEnd),
+        Command::OpenBelow => edit::open(state, Direction::Forward),
+        Command::OpenAbove => edit::open(state, Direction::Backward),
+
+        Command::Move(m) => motion::motion(state, m),
+        Command::FindChar(find, target) => motion::find_char(state, find, target),
+        Command::SelectTextObject(scope, object) => motion::text_object(state, scope, object),
+        Command::GotoSyntaxObject(object, direction) => {
+            motion::goto_syntax_object(state, object, direction)
+        }
+        Command::RepeatMotion => {
+            let last =
+                (state.input.last_motion.as_ref()).map(|last| (last.command.clone(), last.count));
+            if let Some((command, recorded)) = last {
+                for _ in 0..count_of(state) {
+                    state.input.count = recorded;
+                    apply(state, command.clone(), out);
+                }
+            }
+        }
+
+        Command::CollapseSelection => {
+            reselect(state, |text, range| Range::point(range.cursor(text)))
+        }
+        Command::FlipSelections => reselect(state, |_, range| range.flip()),
+        Command::EnsureSelectionsForward => reselect(state, |_, range| {
+            range.with_direction(helix_core::movement::Direction::Forward)
+        }),
+        Command::KeepPrimarySelection => select(state, |_, selection, _| {
+            let range = selection.primary();
+            Selection::single(range.anchor, range.head)
+        }),
+        Command::RemovePrimarySelection => {
+            try_select(state, |_, selection, _| match selection.len() {
+                1 => Err(Notice::NoSelectionsRemaining),
+                _ => Ok(selection.clone().remove(selection.primary_index())),
+            })
+        }
+        Command::RotateSelections(direction) => {
+            let count = count_of(state);
+            select(state, |_, selection, _| {
+                let mut selection = selection.clone();
+                let (index, len) = (selection.primary_index(), selection.len());
+                selection.set_primary_index(match direction {
+                    Direction::Forward => (index + count) % len,
+                    Direction::Backward => (index + (len.saturating_sub(count) % len)) % len,
+                });
+                selection
+            })
+        }
+        Command::RotateSelectionContents(direction) => {
+            let rotate = state.input.count.map_or(1, NonZeroUsize::get);
+            select(state, |_, selection, _| {
+                let len = selection.len();
+                let rotate = rotate.min(len);
+                let mut selection = selection.clone();
+                selection.set_primary_index(match direction {
+                    Direction::Forward => (selection.primary_index() + len + rotate) % len,
+                    Direction::Backward => (selection.primary_index() + len - rotate) % len,
+                });
+                selection
+            });
+            edit(state, |doc, selection, _| {
+                let text = doc.text.slice(..);
+                let mut fragments: Vec<helix_core::Tendril> = selection
+                    .slices(text)
+                    .map(|fragment| fragment.chunks().collect())
+                    .collect();
+                let rotate = rotate.min(fragments.len());
+                match direction {
+                    Direction::Forward => fragments.rotate_right(rotate),
+                    Direction::Backward => fragments.rotate_left(rotate),
+                }
+                Transaction::change(
+                    &doc.text,
+                    selection
+                        .ranges()
+                        .iter()
+                        .zip(fragments)
+                        .map(|(range, fragment)| (range.from(), range.to(), Some(fragment))),
                 )
+            });
+        }
+        Command::SelectAll => select(state, |doc, _, _| {
+            Selection::single(0, doc.text.len_chars())
+        }),
+        Command::ExtendLineBelow => {
+            let count = count_of(state);
+            select(state, |doc, selection, _| {
+                let text = &doc.text;
+                selection.clone().transform(|range| {
+                    let (start_line, end_line) = range.line_range(text.slice(..));
+                    let start = text.line_to_char(start_line);
+                    let end = text.line_to_char((end_line + 1).min(text.len_lines()));
+                    let lines = match range.from() == start && range.to() == end {
+                        true => count + 1,
+                        false => count,
+                    };
+                    Range::new(
+                        start,
+                        text.line_to_char((end_line + lines).min(text.len_lines())),
+                    )
+                })
+            })
+        }
+        Command::ExtendToLineBounds => select(state, |doc, selection, _| {
+            let text = &doc.text;
+            selection.clone().transform(|range| {
+                let (start_line, end_line) = range.line_range(text.slice(..));
+                let start = text.line_to_char(start_line);
+                let end = text.line_to_char((end_line + 1).min(text.len_lines()));
+                Range::new(start, end).with_direction(range.direction())
             })
         }),
+        Command::ShrinkToLineBounds => select(state, |doc, selection, _| {
+            let text = &doc.text;
+            selection.clone().transform(|range| {
+                let (start_line, end_line) = range.line_range(text.slice(..));
+                match start_line == end_line {
+                    true => range,
+                    false => {
+                        let start = match text.line_to_char(start_line) == range.from() {
+                            true => range.from(),
+                            false => text.line_to_char((start_line + 1).min(text.len_lines())),
+                        };
+                        let full_end = text.line_to_char((end_line + 1).min(text.len_lines()));
+                        let end = match full_end == range.to() {
+                            true => full_end,
+                            false => text.line_to_char(end_line),
+                        };
+                        Range::new(start, end).with_direction(range.direction())
+                    }
+                }
+            })
+        }),
+        Command::SplitSelectionOnNewline => select(state, |doc, selection, _| {
+            helix_core::selection::split_on_newline(doc.text.slice(..), selection)
+        }),
+        Command::MergeSelections => {
+            select(state, |_, selection, _| selection.clone().merge_ranges())
+        }
+        Command::MergeConsecutiveSelections => select(state, |_, selection, _| {
+            selection.clone().merge_consecutive_ranges()
+        }),
+        Command::CopySelectionOnLine(direction) => select::copy_selection_on_line(state, direction),
+        Command::TrimSelections => select(state, |doc, selection, _| {
+            let text = doc.text.slice(..);
+            let ranges: SmallVec<[Range; 1]> = selection
+                .iter()
+                .filter(|range| {
+                    !range.is_empty() && !range.slice(text).chars().all(char_is_whitespace)
+                })
+                .map(|range| {
+                    let start = movement::skip_while(text, range.from(), char_is_whitespace)
+                        .unwrap_or(range.from());
+                    let end = movement::backwards_skip_while(text, range.to(), char_is_whitespace)
+                        .unwrap_or(range.to());
+                    Range::new(start, end).with_direction(range.direction())
+                })
+                .collect();
+            let primary = selection.primary();
+            match ranges.iter().position(|range| range.overlaps(&primary)) {
+                _ if ranges.is_empty() => Selection::point(primary.cursor(text)),
+                Some(index) => Selection::new(ranges, index),
+                None => {
+                    let last = ranges.len() - 1;
+                    Selection::new(ranges, last)
+                }
+            }
+        }),
+        Command::AlignSelections => {
+            edit::align_selections(state);
+            exit_select_mode(state);
+        }
+        Command::ExpandSelection => select(state, |doc, selection, _| match &doc.syntax {
+            Some(syntax) => object::expand_selection(syntax, doc.text.slice(..), selection.clone()),
+            None => selection.clone(),
+        }),
+        Command::ShrinkSelection => select(state, |doc, selection, _| match &doc.syntax {
+            Some(syntax) => object::shrink_selection(syntax, doc.text.slice(..), selection.clone()),
+            None => selection.clone(),
+        }),
+        Command::SelectSibling(direction) => {
+            select(state, |doc, selection, _| match (&doc.syntax, direction) {
+                (Some(syntax), Direction::Forward) => {
+                    object::select_next_sibling(syntax, doc.text.slice(..), selection.clone())
+                }
+                (Some(syntax), Direction::Backward) => {
+                    object::select_prev_sibling(syntax, doc.text.slice(..), selection.clone())
+                }
+                (None, _) => selection.clone(),
+            })
+        }
+        Command::SelectAllSiblings => select(state, |doc, selection, _| match &doc.syntax {
+            Some(syntax) => {
+                object::select_all_siblings(syntax, doc.text.slice(..), selection.clone())
+            }
+            None => selection.clone(),
+        }),
+        Command::SelectAllChildren => select(state, |doc, selection, _| match &doc.syntax {
+            Some(syntax) => {
+                object::select_all_children(syntax, doc.text.slice(..), selection.clone())
+            }
+            None => selection.clone(),
+        }),
+        Command::SearchNext(direction) => select::search_next(state, direction),
+        Command::SearchSelection(bounds) => select::search_selection(state, bounds, out),
 
-        Command::Undo => step_history(state, HistoryStep::Undo),
-        Command::Redo => step_history(state, HistoryStep::Redo),
+        Command::InsertChar(c) => edit::insert_char(state, c),
+        Command::InsertNewline => edit::insert_newline(state),
+        Command::InsertTab => edit::insert_tab(state),
+        Command::SmartTab => {
+            let after_text = match focused(&mut state.layout, &mut state.buffers) {
+                Some((view, doc)) => view.selection.ranges().iter().any(|range| {
+                    let text = doc.text.slice(..);
+                    let cursor = range.cursor(text);
+                    let line_start = text.line_to_char(text.char_to_line(cursor));
+                    !text
+                        .slice(line_start..cursor)
+                        .chars()
+                        .all(char::is_whitespace)
+                }),
+                None => false,
+            };
+            match after_text {
+                true => motion::motion(state, Motion::ParentNodeEnd),
+                false => edit::insert_tab(state),
+            }
+        }
+        Command::DeleteCharBackward => edit::delete_char_backward(state),
+        Command::DeleteCharForward => {
+            let count = count_of(state);
+            edit::delete_insert_mode(state, Direction::Forward, |text, range| {
+                let pos = range.cursor(text);
+                (pos, graphemes::nth_next_grapheme_boundary(text, pos, count))
+            })
+        }
+        Command::DeleteWordBackward => {
+            let count = count_of(state);
+            edit::delete_insert_mode(state, Direction::Backward, |text, range| {
+                let anchor = movement::move_prev_word_start(text, *range, count).from();
+                let next = Range::new(anchor, range.cursor(text));
+                // Exclude the cursor itself unless it sits at the end of the text.
+                let next = match next.to() == range.to() && text.len_chars() != range.to() {
+                    true => Range::new(
+                        next.from(),
+                        graphemes::prev_grapheme_boundary(text, range.to()),
+                    ),
+                    false => next,
+                };
+                (next.from(), next.to())
+            })
+        }
+        Command::DeleteWordForward => {
+            let count = count_of(state);
+            edit::delete_insert_mode(state, Direction::Forward, |text, range| {
+                let head = movement::move_next_word_end(text, *range, count).to();
+                (range.cursor(text), head)
+            })
+        }
+        Command::KillToLineStart => {
+            edit::delete_insert_mode(state, Direction::Backward, |text, range| {
+                let line = range.cursor_line(text);
+                let first_char = text.line_to_char(line);
+                let anchor = range.cursor(text);
+                let head = match (anchor == first_char && line != 0, text.line(line)) {
+                    (true, _) => line_end_char_index(&text, line - 1),
+                    (false, line_text) => match line_text.first_non_whitespace_char() {
+                        Some(pos) if first_char + pos < anchor => first_char + pos,
+                        Some(_) | None => first_char,
+                    },
+                };
+                (head, anchor)
+            })
+        }
+        Command::Delete(yanking) => {
+            edit::delete_selection(state, edit::Operation::Delete, yanking, out)
+        }
+        Command::Change(yanking) => {
+            edit::delete_selection(state, edit::Operation::Change, yanking, out)
+        }
+        Command::Replace(target) => {
+            edit(state, |doc, selection, _| {
+                let mut buf = [0u8; 4];
+                let ch: &str = match target {
+                    model::command::CharTarget::Char(c) => c.encode_utf8(&mut buf),
+                    model::command::CharTarget::LineEnding => doc.line_ending.as_str(),
+                };
+                Transaction::change_by_selection(&doc.text, selection, |range| {
+                    match range.is_empty() {
+                        false => {
+                            let text: helix_core::Tendril = doc
+                                .text
+                                .slice(range.from()..range.to())
+                                .graphemes()
+                                .map(|_| ch)
+                                .collect();
+                            (range.from(), range.to(), Some(text))
+                        }
+                        true => (range.from(), range.to(), None),
+                    }
+                })
+            });
+            exit_select_mode(state);
+        }
+        Command::ChangeCase(case) => {
+            edit(state, |doc, selection, _| {
+                let text = doc.text.slice(..);
+                Transaction::change_by_selection(&doc.text, selection, |range| {
+                    let fragment = range.slice(text);
+                    let changed: helix_core::Tendril = match case {
+                        model::command::Case::Switch => fragment
+                            .chars()
+                            .flat_map(|c| {
+                                let (upper, lower) = (c.is_uppercase(), c.is_lowercase());
+                                match (lower, upper) {
+                                    (true, _) => CaseChars::Upper(c.to_uppercase()),
+                                    (false, true) => CaseChars::Lower(c.to_lowercase()),
+                                    (false, false) => CaseChars::Keep(Some(c)),
+                                }
+                            })
+                            .collect(),
+                        model::command::Case::Lower => fragment
+                            .chunks()
+                            .map(|chunk| chunk.to_lowercase())
+                            .collect(),
+                        model::command::Case::Upper => fragment
+                            .chunks()
+                            .map(|chunk| chunk.to_uppercase())
+                            .collect(),
+                    };
+                    (range.from(), range.to(), Some(changed))
+                })
+            });
+            exit_select_mode(state);
+        }
+        Command::Indent => {
+            let count = count_of(state);
+            edit(state, |doc, selection, _| {
+                let indent = doc.indent_style.as_str().repeat(count);
+                Transaction::change(
+                    &doc.text,
+                    selected_lines(&doc.text, selection)
+                        .into_iter()
+                        .filter_map(|line| {
+                            let line_text = doc.text.line(line);
+                            match line_text.chunks().all(|s| s.trim().is_empty()) {
+                                true => None,
+                                false => {
+                                    let pos = doc.text.line_to_char(line);
+                                    let offset = match doc.indent_style {
+                                        helix_core::indent::IndentStyle::Spaces(width) => {
+                                            helix_stdx::rope::RopeSliceExt::first_non_whitespace_char(
+                                                line_text,
+                                            )
+                                            .unwrap_or(0)
+                                                % width as usize
+                                        }
+                                        helix_core::indent::IndentStyle::Tabs => 0,
+                                    };
+                                    Some((pos, pos, Some(indent[offset..].into())))
+                                }
+                            }
+                        }),
+                )
+            });
+            exit_select_mode(state);
+        }
+        Command::Unindent => {
+            let count = count_of(state);
+            edit(state, |doc, selection, _| {
+                let tab_width = doc.tab_width;
+                let indent_width = count * doc.indent_width();
+                let changes: Vec<helix_core::Change> = selected_lines(&doc.text, selection)
+                    .into_iter()
+                    .filter_map(|line_idx| {
+                        let mut width = 0;
+                        let mut pos = 0;
+                        for ch in doc.text.line(line_idx).chars() {
+                            match ch {
+                                ' ' => width += 1,
+                                '\t' => width = (width / tab_width + 1) * tab_width,
+                                _ => break,
+                            }
+                            pos += 1;
+                            if width >= indent_width {
+                                break;
+                            }
+                        }
+                        let start = doc.text.line_to_char(line_idx);
+                        (pos > 0).then_some((start, start + pos, None))
+                    })
+                    .collect();
+                Transaction::change(&doc.text, changes.into_iter())
+            });
+            exit_select_mode(state);
+        }
+        Command::Join(join) => edit::join_selections(state, join),
+        Command::ToggleComments => {
+            edit::toggle_comments(state);
+            exit_select_mode(state);
+        }
+        Command::SurroundAdd(target) => {
+            edit::surround_add(state, target);
+            exit_select_mode(state);
+        }
+        Command::SurroundReplace(from, to) => {
+            edit::surround_replace(state, from, to);
+            exit_select_mode(state);
+        }
+        Command::SurroundDelete(pair) => {
+            edit::surround_delete(state, pair);
+            exit_select_mode(state);
+        }
+        Command::AddNewline(direction) => {
+            let count = count_of(state);
+            edit(state, |doc, selection, _| {
+                let text = &doc.text;
+                let changes = selection.iter().map(|range| {
+                    let (start, end) = range.line_range(text.slice(..));
+                    let line = match direction {
+                        Direction::Backward => start,
+                        Direction::Forward => end + 1,
+                    };
+                    let pos = text.line_to_char(line);
+                    (
+                        pos,
+                        pos,
+                        Some(doc.line_ending.as_str().repeat(count).into()),
+                    )
+                });
+                Transaction::change(text, changes)
+            });
+        }
+        Command::Increment => edit::increment(state, 1),
+        Command::Decrement => edit::increment(state, -1),
+
+        Command::Yank => {
+            let register = state.input.register.unwrap_or(Register::DEFAULT);
+            edit::yank(state, register, edit::Yank::All, out);
+        }
+        Command::YankTo(register) => edit::yank(state, register, edit::Yank::All, out),
+        Command::YankMainTo(register) => edit::yank(state, register, edit::Yank::Primary, out),
+        Command::Paste(at) => {
+            let register = state.input.register.unwrap_or(Register::DEFAULT);
+            paste_from(state, register, at, out);
+        }
+        Command::PasteFrom(register, at) => paste_from(state, register, at, out),
+        Command::ReplaceWithYanked => {
+            let register = state.input.register.unwrap_or(Register::DEFAULT);
+            replace_from(state, register, out);
+        }
+        Command::ReplaceFrom(register) => replace_from(state, register, out),
+
+        Command::Undo => step_history(state, HistoryStep::Undo, Notice::AlreadyOldest),
+        Command::Redo => step_history(state, HistoryStep::Redo, Notice::AlreadyNewest),
+        Command::Earlier => step_history(state, HistoryStep::Earlier, Notice::AlreadyOldest),
+        Command::Later => step_history(state, HistoryStep::Later, Notice::AlreadyNewest),
+        Command::CommitUndoCheckpoint => commit_focused(state),
+        Command::RepeatInsert => {
+            let entry = state.input.last_insert.entry.clone();
+            let keys = state.input.last_insert.keys.clone();
+            for _ in 0..count_of(state) {
+                apply(state, entry.clone(), out);
+                for key in &keys {
+                    input::insert_key(state, *key, out);
+                }
+            }
+        }
+
+        Command::Await(pending) => state.input.awaiting = Some(pending),
 
         Command::CommandMode => {
             state.overlay = Overlay::Prompt(Prompt {
+                kind: PromptKind::Command,
                 line: String::new(),
             })
         }
+        Command::RegexPrompt(op) => match focused(&mut state.layout, &mut state.buffers) {
+            Some((view, _)) => {
+                state.overlay = Overlay::Prompt(Prompt {
+                    kind: PromptKind::Regex {
+                        op,
+                        register: state.input.register.unwrap_or(Register::SEARCH),
+                        snapshot: view.selection.clone(),
+                    },
+                    line: String::new(),
+                })
+            }
+            None => state.notice = Some(Notice::NoBuffer),
+        },
         Command::PromptInsert(c) => match &mut state.overlay {
-            Overlay::Prompt(prompt) => prompt.line.push(c),
-            Overlay::None => {}
+            Overlay::Prompt(prompt) => {
+                prompt.line.push(c);
+                select::preview_regex(state);
+            }
+            Overlay::None | Overlay::Picker(_) => {}
         },
         Command::PromptBackspace => match &mut state.overlay {
             Overlay::Prompt(prompt) => match prompt.line.pop() {
-                Some(_) => {}
-                None => state.overlay = Overlay::None,
+                Some(_) => select::preview_regex(state),
+                None => apply(state, Command::PromptCancel, out),
             },
-            Overlay::None => {}
+            Overlay::None | Overlay::Picker(_) => {}
         },
-        Command::PromptCancel => state.overlay = Overlay::None,
+        Command::PromptCancel => match std::mem::replace(&mut state.overlay, Overlay::None) {
+            Overlay::Prompt(Prompt {
+                kind: PromptKind::Regex { snapshot, .. },
+                ..
+            }) => select(state, |_, _, _| snapshot),
+            Overlay::Prompt(Prompt {
+                kind: PromptKind::Command,
+                ..
+            })
+            | Overlay::None
+            | Overlay::Picker(_) => {}
+        },
         Command::PromptSubmit => match std::mem::replace(&mut state.overlay, Overlay::None) {
-            Overlay::Prompt(prompt) => match prompt::parse(&prompt.line) {
+            Overlay::Prompt(Prompt {
+                kind: PromptKind::Command,
+                line,
+            }) => match prompt::parse(&line) {
                 Ok(command) => apply(state, command, out),
                 Err(notice) => state.notice = Some(notice),
             },
-            Overlay::None => {}
+            Overlay::Prompt(Prompt {
+                kind:
+                    PromptKind::Regex {
+                        op,
+                        register,
+                        snapshot,
+                    },
+                line,
+            }) => select::submit_regex(state, op, register, snapshot, line, out),
+            Overlay::None | Overlay::Picker(_) => {}
         },
 
         Command::Open(path) => open(state, path),
         Command::Write => match focused_buffer(state) {
-            Some(id) => out.extend(write_job(state, id).map(Effect::Job)),
+            Some(id) => out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job)),
+            None => state.notice = Some(Notice::NoBuffer),
+        },
+        Command::ForceWrite => match focused_buffer(state) {
+            Some(id) => out.extend(write_job(state, id, Dirs::Create).map(Effect::Job)),
+            None => state.notice = Some(Notice::NoBuffer),
+        },
+        Command::WriteAs(path, dirs) => match focused_buffer(state) {
+            Some(id) => {
+                let path = helix_stdx::path::normalize(state.root.path().join(path));
+                if let Some(buffer) = state.buffers.get_mut(id) {
+                    buffer.path = path;
+                    buffer.disk = Disk::New;
+                    buffer.mtime = None;
+                }
+                out.extend(write_job(state, id, dirs).map(Effect::Job));
+            }
             None => state.notice = Some(Notice::NoBuffer),
         },
         Command::WriteAll => {
-            let modified: Vec<BufferId> = state
-                .buffers
-                .iter()
-                .filter(|(_, buffer)| is_modified(buffer))
-                .map(|(id, _)| id)
-                .collect();
-            for id in modified {
-                out.extend(write_job(state, id).map(Effect::Job));
+            for id in modified_buffers(&state.buffers) {
+                out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job));
             }
         }
         Command::WriteQuit => match focused_buffer(state) {
             Some(id) => {
-                out.extend(write_job(state, id).map(Effect::Job));
-                state.exit = Exit::AfterWrite { buffer: id };
+                out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job));
+                state.exit = Exit::AfterWrite { buffers: vec![id] };
             }
             None => apply(state, Command::Quit, out),
+        },
+        Command::WriteAllQuit => match modified_buffers(&state.buffers) {
+            buffers if buffers.is_empty() => apply(state, Command::Quit, out),
+            buffers => {
+                for id in &buffers {
+                    out.extend(write_job(state, *id, Dirs::Existing).map(Effect::Job));
+                }
+                state.exit = Exit::AfterWrite { buffers };
+            }
         },
         Command::Quit => match state.buffers.values().filter(|b| is_modified(b)).count() {
             0 => out.push(Effect::Quit),
@@ -143,6 +729,98 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::ForceQuit => out.push(Effect::Quit),
         Command::CloseBuffer => close_buffer(state, Force::No),
         Command::ForceCloseBuffer => close_buffer(state, Force::Yes),
+        Command::Reload => match focused_buffer(state) {
+            Some(id) => out.extend(reload_job(state, id).map(Effect::Job)),
+            None => state.notice = Some(Notice::NoBuffer),
+        },
+        Command::ReloadAll => {
+            let ids: Vec<BufferId> = state.buffers.keys().collect();
+            for id in ids {
+                out.extend(reload_job(state, id).map(Effect::Job));
+            }
+        }
+        Command::GotoLine(line) => {
+            state.input.count = Some(line);
+            motion::motion(state, Motion::Line);
+        }
+        Command::Sort(case, order) => edit::sort(state, case, order),
+        Command::Reflow(width) => edit(state, |doc, selection, _| {
+            let width = width.map_or(doc.text_width, NonZeroUsize::get);
+            Transaction::change_by_selection(&doc.text, selection, |range| {
+                let fragment = range.fragment(doc.text.slice(..));
+                let reflowed = helix_core::wrap::reflow_hard_wrap(&fragment, width);
+                (range.from(), range.to(), Some(reflowed))
+            })
+        }),
+
+        Command::Scroll(direction, by) => motion::scroll(state, direction, by),
+        Command::AlignView(align) => motion::align_view(state, align),
+        Command::StickyView => state.input.sticky = Sticky::View,
+
+        Command::Window(command) => workspace::window(state, command, out),
+        Command::CycleBuffer(cycle) => workspace::cycle_buffer(state, cycle),
+        Command::Tree(command) => workspace::tree(state, command, out),
+        Command::Picker(command) => workspace::picker(state, command, out),
+    }
+}
+
+enum CaseChars {
+    Upper(std::char::ToUppercase),
+    Lower(std::char::ToLowercase),
+    Keep(Option<char>),
+}
+
+impl Iterator for CaseChars {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        match self {
+            CaseChars::Upper(upper) => upper.next(),
+            CaseChars::Lower(lower) => lower.next(),
+            CaseChars::Keep(c) => c.take(),
+        }
+    }
+}
+
+/// Sorted, deduplicated lines touched by any range.
+pub(crate) fn selected_lines(text: &Rope, selection: &Selection) -> Vec<usize> {
+    let mut lines: Vec<usize> = selection
+        .iter()
+        .flat_map(|range| {
+            let (start, end) = range.line_range(text.slice(..));
+            start..=end
+        })
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+fn paste_from(state: &mut State, register: Register, at: Paste, out: &mut Vec<Effect>) {
+    let count = count_of(state);
+    match register::read(state, register) {
+        Values::Ready(values) => {
+            edit::paste(state, &values, at, count);
+            exit_select_mode(state);
+        }
+        Values::Clipboard(clipboard) => out.push(Effect::ReadClipboard {
+            clipboard,
+            then: ClipboardUse::Paste { at, count },
+        }),
+    }
+}
+
+fn replace_from(state: &mut State, register: Register, out: &mut Vec<Effect>) {
+    let count = count_of(state);
+    match register::read(state, register) {
+        Values::Ready(values) => {
+            edit::replace_with(state, &values, count);
+            exit_select_mode(state);
+        }
+        Values::Clipboard(clipboard) => out.push(Effect::ReadClipboard {
+            clipboard,
+            then: ClipboardUse::Replace { count },
+        }),
     }
 }
 
@@ -152,10 +830,29 @@ enum Force {
     Yes,
 }
 
-fn focused<'a>(
+pub(crate) fn count_of(state: &State) -> usize {
+    state.input.count.map_or(1, NonZeroUsize::get)
+}
+
+/// Select mode extends selections where normal mode moves them.
+pub(crate) fn movement_of(state: &State) -> Movement {
+    match state.input.mode {
+        Mode::Select => Movement::Extend,
+        Mode::Normal | Mode::Insert => Movement::Move,
+    }
+}
+
+pub(crate) fn exit_select_mode(state: &mut State) {
+    match state.input.mode {
+        Mode::Select => state.input.mode = Mode::Normal,
+        Mode::Normal | Mode::Insert => {}
+    }
+}
+
+pub(crate) fn focused<'a, 'b>(
     layout: &'a mut Layout,
-    buffers: &'a mut SlotMap<BufferId, Buffer>,
-) -> Option<(&'a mut TextView, &'a mut TextDoc)> {
+    buffers: &'b mut SlotMap<BufferId, Buffer>,
+) -> Option<(&'a mut TextView, &'b mut TextDoc)> {
     let focus = layout.focus;
     match layout.panes.get_mut(focus).map(|pane| &mut pane.view) {
         Some(View::Text(view)) => match buffers.get_mut(view.buffer).map(|b| &mut b.content) {
@@ -184,97 +881,161 @@ fn is_modified(buffer: &Buffer) -> bool {
     }
 }
 
-fn map_other_views(layout: &mut Layout, buffer: BufferId, changes: &ChangeSet) {
-    let focus = layout.focus;
-    for (id, pane) in layout.panes.iter_mut() {
+fn modified_buffers(buffers: &SlotMap<BufferId, Buffer>) -> Vec<BufferId> {
+    buffers
+        .iter()
+        .filter(|(_, buffer)| is_modified(buffer))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Maps every view of `buffer` through `changes`, keeping helix's selection invariants.
+pub(crate) fn map_views(
+    layout: &mut Layout,
+    buffer: BufferId,
+    changes: &ChangeSet,
+    text: RopeSlice,
+) {
+    for pane in layout.panes.values_mut() {
         match &mut pane.view {
-            View::Text(view) if id != focus && view.buffer == buffer => {
-                view.selection = view.selection.clone().map(changes);
+            View::Text(view) if view.buffer == buffer => {
+                view.selection = view.selection.clone().map(changes).ensure_invariants(text);
+                view.scroll.anchor = changes.map_pos(view.scroll.anchor, Assoc::Before);
             }
             View::Text(_) | View::Empty => {}
         }
     }
 }
 
-fn reselect(state: &mut State, mut f: impl FnMut(RopeSlice, Range) -> Range) {
-    if let Some((view, doc)) = focused(&mut state.layout, &mut state.buffers) {
-        let text = doc.text.slice(..);
-        view.selection = view.selection.clone().transform(|range| f(text, range));
+pub(crate) fn try_select(
+    state: &mut State,
+    f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Result<Selection, Notice>,
+) {
+    let State {
+        layout,
+        buffers,
+        languages,
+        notice,
+        ..
+    } = state;
+    let Some((view, doc)) = focused(layout, buffers) else {
+        return;
+    };
+    match f(doc, &view.selection, languages) {
+        Ok(selection) => view.selection = selection.ensure_invariants(doc.text.slice(..)),
+        Err(error) => *notice = Some(error),
     }
 }
 
-fn motion(state: &mut State, f: Motion, direction: Direction) {
-    let behaviour = match state.input.mode {
-        Mode::Select => Movement::Extend,
-        Mode::Normal | Mode::Insert => Movement::Move,
-    };
-    let format = TextFormat::default();
-    let mut annotations = TextAnnotations::default();
-    reselect(state, |text, range| {
-        f(
-            text,
-            range,
-            direction,
-            1,
-            behaviour,
-            &format,
-            &mut annotations,
-        )
+pub(crate) fn select(
+    state: &mut State,
+    f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Selection,
+) {
+    try_select(state, |doc, selection, loader| {
+        Ok(f(doc, selection, loader))
     });
 }
 
-fn edit(state: &mut State, f: impl FnOnce(&Rope, &Selection) -> Transaction) {
+pub(crate) fn reselect(state: &mut State, mut f: impl FnMut(RopeSlice, Range) -> Range) {
+    select(state, |doc, selection, _| {
+        let text = doc.text.slice(..);
+        selection.clone().transform(|range| f(text, range))
+    });
+}
+
+/// Applies the transaction `f` builds to the focused buffer and maps every view of it.
+pub(crate) fn try_edit(
+    state: &mut State,
+    f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Result<Transaction, Notice>,
+) {
     let State {
         layout,
         buffers,
         languages,
+        notice,
         ..
     } = state;
+    let focus = layout.focus;
     let Some((view, doc)) = focused(layout, buffers) else {
-        state.notice = Some(Notice::NoBuffer);
+        *notice = Some(Notice::NoBuffer);
         return;
     };
-    let tx = f(&doc.text, &view.selection);
-    let before = view.selection.clone();
-    doc.apply(&tx, &before, languages);
-    view.selection = match tx.selection() {
-        Some(selection) => selection.clone(),
-        None => before.map(tx.changes()),
+    let tx = match f(doc, &view.selection, languages) {
+        Ok(tx) => tx,
+        Err(error) => {
+            *notice = Some(error);
+            return;
+        }
     };
     let buffer = view.buffer;
-    map_other_views(layout, buffer, tx.changes());
+    doc.apply(&tx, &view.selection, languages);
+    let text = doc.text.slice(..);
+    map_views(layout, buffer, tx.changes(), text);
+    match (
+        tx.selection(),
+        layout.panes.get_mut(focus).map(|pane| &mut pane.view),
+    ) {
+        (Some(selection), Some(View::Text(view))) => {
+            view.selection = selection.clone().ensure_invariants(text);
+        }
+        (Some(_), Some(View::Empty) | None) | (None, _) => {}
+    }
 }
 
-fn insert(state: &mut State, text: Tendril) {
-    edit(state, |doc, selection| {
-        let slice = doc.slice(..);
-        Transaction::change_by_selection(doc, selection, |range| {
-            let cursor = range.cursor(slice);
-            (cursor, cursor, Some(text.clone()))
-        })
+pub(crate) fn edit(
+    state: &mut State,
+    f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Transaction,
+) {
+    try_edit(state, |doc, selection, loader| {
+        Ok(f(doc, selection, loader))
     });
 }
 
-fn step_history(state: &mut State, step: HistoryStep) {
+/// Groups the focused buffer's staged edits into an undo revision.
+pub(crate) fn commit_focused(state: &mut State) {
+    if let Some((view, doc)) = focused(&mut state.layout, &mut state.buffers) {
+        match doc.uncommitted {
+            Uncommitted::Pending { .. } => doc.commit(&view.selection),
+            Uncommitted::Clean => {}
+        }
+    }
+}
+
+fn step_history(state: &mut State, step: HistoryStep, exhausted: Notice) {
+    let count = count_of(state);
     let State {
         layout,
         buffers,
         languages,
+        notice,
         ..
     } = state;
-    let Some((view, doc)) = focused(layout, buffers) else {
-        return;
-    };
-    doc.commit(&view.selection);
-    let Some(tx) = doc.step_history(step, languages) else {
-        return;
-    };
-    view.selection = match tx.selection() {
-        Some(selection) => selection.clone(),
-        None => view.selection.clone().map(tx.changes()),
-    };
-    let buffer = view.buffer;
-    map_other_views(layout, buffer, tx.changes());
+    let focus = layout.focus;
+    for _ in 0..count {
+        let Some((view, doc)) = focused(layout, buffers) else {
+            return;
+        };
+        doc.commit(&view.selection);
+        let buffer = view.buffer;
+        let txs = doc.step_history(step, languages);
+        if txs.is_empty() {
+            *notice = Some(exhausted);
+            return;
+        }
+        let text = doc.text.slice(..);
+        for tx in &txs {
+            map_views(layout, buffer, tx.changes(), text);
+            match (
+                tx.selection(),
+                layout.panes.get_mut(focus).map(|pane| &mut pane.view),
+            ) {
+                (Some(selection), Some(View::Text(view))) => {
+                    view.selection = selection.clone().ensure_invariants(text);
+                }
+                (Some(_), Some(View::Empty) | None) | (None, _) => {}
+            }
+        }
+    }
 }
 
 fn commit(state: &mut State, id: BufferId) {
@@ -293,7 +1054,7 @@ fn commit(state: &mut State, id: BufferId) {
     }
 }
 
-fn write_job(state: &mut State, id: BufferId) -> Option<Job> {
+fn write_job(state: &mut State, id: BufferId, dirs: Dirs) -> Option<Job> {
     commit(state, id);
     let buffer = state.buffers.get(id)?;
     match &buffer.content {
@@ -302,8 +1063,21 @@ fn write_job(state: &mut State, id: BufferId) -> Option<Job> {
             path: buffer.path.clone(),
             text: doc.text.clone(),
             revision: doc.history.current_revision(),
+            dirs,
         }),
     }
+}
+
+/// `:reload` reads the file regardless of mtime and replaces unsaved edits.
+fn reload_job(state: &mut State, id: BufferId) -> Option<Job> {
+    commit(state, id);
+    let buffer = state.buffers.get(id)?;
+    Some(Job::Reload {
+        buffer: id,
+        path: buffer.path.clone(),
+        mtime: None,
+        policy: ReloadPolicy::Discard,
+    })
 }
 
 fn open(state: &mut State, path: PathBuf) {
@@ -346,28 +1120,22 @@ fn open(state: &mut State, path: PathBuf) {
                 }
             };
             let doc = TextDoc::new(text, &path, &state.languages);
-            state.buffers.insert(Buffer {
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let id = state.buffers.insert(Buffer {
                 path,
                 content: Content::Text(doc),
                 disk,
-            })
+                mtime,
+            });
+            state.tabs.push(id);
+            id
         }
     };
     if let Some(current) = focused_buffer(state) {
         commit(state, current);
     }
     let focus = state.layout.focus;
-    show(&mut state.layout, focus, id);
-}
-
-fn show(layout: &mut Layout, pane: PaneId, buffer: BufferId) {
-    if let Some(pane) = layout.panes.get_mut(pane) {
-        pane.view = View::Text(TextView {
-            buffer,
-            selection: Selection::point(0),
-            scroll: Scroll::default(),
-        });
-    }
+    workspace::show(&mut state.layout, &state.buffers, focus, id);
 }
 
 fn close_buffer(state: &mut State, force: Force) {
@@ -382,9 +1150,27 @@ fn close_buffer(state: &mut State, force: Force) {
         }
         (false, _) | (true, Force::Yes) => {
             state.buffers.remove(id);
-            for pane in state.layout.panes.values_mut() {
+            state.tabs.retain(|&tab| tab != id);
+            let pane_ids: Vec<PaneId> = state.layout.panes.keys().collect();
+            for pane_id in pane_ids {
+                let pane = &mut state.layout.panes[pane_id];
+                pane.parked.retain(|view| view.buffer != id);
                 match &pane.view {
-                    View::Text(view) if view.buffer == id => pane.view = View::Empty,
+                    View::Text(view) if view.buffer == id => {
+                        // Fall back to the pane's previous buffer, then the last tab, then empty.
+                        pane.view = View::Empty;
+                        let next = pane
+                            .parked
+                            .last()
+                            .map(|view| view.buffer)
+                            .or_else(|| state.tabs.last().copied());
+                        match next {
+                            Some(next) => {
+                                workspace::show(&mut state.layout, &state.buffers, pane_id, next)
+                            }
+                            None => {}
+                        }
+                    }
                     View::Text(_) | View::Empty => {}
                 }
             }

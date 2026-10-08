@@ -1,6 +1,10 @@
 pub mod color;
 pub mod command;
 pub mod config;
+pub mod git;
 pub mod key;
 pub mod mode;
 pub mod notice;
+pub mod register;
+pub mod theme;
+pub mod window;

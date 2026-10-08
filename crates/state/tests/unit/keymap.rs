@@ -48,3 +48,23 @@ fn key_display_uses_helix_notation() {
     assert_eq!(Key::char(' ').to_string(), "space");
     assert_eq!(Key::code(KeyCode::Esc).to_string(), "esc");
 }
+
+#[test]
+fn select_mode_shares_normal_bindings() {
+    use model::command::Motion;
+    let keymap = Keymap::helix().unwrap();
+    for context in [Context::Normal, Context::Select] {
+        assert!(matches!(
+            keymap.resolve(context, &[Key::char('g'), Key::char('e')]),
+            Resolved::Command(Command::Move(Motion::LastLine))
+        ));
+    }
+    assert!(matches!(
+        keymap.resolve(Context::Select, &[Key::char('v')]),
+        Resolved::Command(Command::NormalMode)
+    ));
+    assert!(matches!(
+        keymap.resolve(Context::Insert, &[Key::ctrl('w')]),
+        Resolved::Command(Command::DeleteWordBackward)
+    ));
+}

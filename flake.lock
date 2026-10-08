@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "helix-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790649139,
+        "narHash": "sha256-ZjMduEHRsY0H8OHJ5oiF/AcxOBhIiCBwo7D+g1yYwKc=",
+        "owner": "helix-editor",
+        "repo": "helix",
+        "rev": "ba40e547426b0f9896c8bdc699a4ab11f2b37dbc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "helix-editor",
+        "repo": "helix",
+        "rev": "ba40e547426b0f9896c8bdc699a4ab11f2b37dbc",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1791260994,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "helix-src": "helix-src",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

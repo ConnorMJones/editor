@@ -40,6 +40,9 @@ ztracing_macro = { path = "vendor/ztracing_macro" }
 clap = { version = "4.6.7", features = ["derive"] }
 toml = "1.1.6"
 tracing-tracy = "0.12.0"
+ignore = "0.4.33"
+notify-debouncer-mini = { version = "0.7.0", default-features = false }
+git2 = { version = "0.21.0", default-features = false }
 
 # Vendored from helix.
 helix-core = { path = "vendor/helix-core" }
