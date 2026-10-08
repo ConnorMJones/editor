@@ -7,8 +7,8 @@ use model::notice::Notice;
 use model::register::Register;
 
 use crate::apply::{count_of, movement_of, select, try_select};
-use crate::register;
 use crate::{Effect, Overlay, Prompt, PromptKind, State};
+use crate::{prompt, register};
 
 /// Copies each selection onto the next or previous lines that are long enough.
 #[allow(deprecated)]
@@ -239,6 +239,7 @@ pub fn preview_regex(state: &mut State) {
         Overlay::Prompt(Prompt {
             kind: PromptKind::Regex { op, snapshot, .. },
             line,
+            ..
         }) => (*op, snapshot.clone(), line.clone()),
         Overlay::Prompt(Prompt {
             kind: PromptKind::Command,
@@ -263,18 +264,8 @@ pub fn submit_regex(
     out: &mut Vec<Effect>,
 ) {
     select(state, |_, _, _| snapshot);
-    let last = register::first(state, register);
-    let pattern = match (line.is_empty(), last) {
-        (true, Some(last)) => last,
-        (true, None) => return,
-        (false, last) => {
-            if last.as_deref() != Some(line.as_str())
-                && let Err(notice) = state.registers.push(register, line.clone(), out)
-            {
-                state.notice = Some(notice);
-            }
-            line
-        }
+    let Some(pattern) = prompt::remember(state, register, line, out) else {
+        return;
     };
     match op {
         RegexOp::Search(_) => state.registers.last_search = register,

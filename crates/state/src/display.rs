@@ -5,13 +5,13 @@ use helix_core::graphemes::Grapheme;
 use helix_core::indent::IndentStyle;
 use helix_core::syntax::{HighlightEvent, Highlighter, Loader};
 use helix_core::text_annotations::TextAnnotations;
-use helix_core::{RopeSlice, visual_offset_from_block};
+use helix_core::{RopeSlice, Selection, visual_offset_from_block};
 use helix_stdx::rope::RopeSliceExt;
 use model::mode::Mode;
 use model::theme::{self, Style};
 
 use crate::buffer::TextDoc;
-use crate::layout::{TextView, Viewport};
+use crate::layout::{Scroll, Viewport};
 
 /// Tab stops and indent-guide spacing of a document, in columns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,8 +203,15 @@ pub struct Frame {
     lead: Vec<Lead>,
 }
 
-/// Lays out the rows of `view` that fit its viewport into `frame`.
-pub fn layout(frame: &mut Frame, doc: &TextDoc, view: &TextView, loader: &Loader, focus: Focus) {
+/// Lays out the rows that fit `scroll`'s viewport into `frame`.
+pub fn layout(
+    frame: &mut Frame,
+    doc: &TextDoc,
+    selection: &Selection,
+    scroll: Scroll,
+    loader: &Loader,
+    focus: Focus,
+) {
     frame.rows.clear();
     frame.text.clear();
     frame.runs.clear();
@@ -213,11 +220,10 @@ pub fn layout(frame: &mut Frame, doc: &TextDoc, view: &TextView, loader: &Loader
     frame.lead.clear();
 
     let text = doc.text.slice(..);
-    let selection = &view.selection;
     let ranges = selection.ranges();
     let primary = selection.primary_index();
     frame.primary_line = text.char_to_line(selection.primary().cursor(text));
-    let viewport = view.scroll.viewport;
+    let viewport = scroll.viewport;
     match viewport {
         Viewport { rows: 0, .. } | Viewport { cols: 0, .. } => return,
         Viewport { .. } => {}
@@ -227,7 +233,7 @@ pub fn layout(frame: &mut Frame, doc: &TextDoc, view: &TextView, loader: &Loader
     let unit = indent.unit.max(1);
     let format = text_format(viewport, indent);
     let annotations = TextAnnotations::default();
-    let anchor = view.scroll.anchor.min(text.len_chars());
+    let anchor = scroll.anchor.min(text.len_chars());
     let row_off = visual_offset_from_block(text, anchor, anchor, &format, &annotations)
         .0
         .row;

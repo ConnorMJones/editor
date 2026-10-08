@@ -12,6 +12,7 @@ mod prompt;
 mod scroll;
 mod selection;
 mod session;
+mod syntax;
 mod tree;
 mod vcs;
 mod view;

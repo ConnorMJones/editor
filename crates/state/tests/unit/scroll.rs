@@ -102,3 +102,182 @@ fn click_maps_cells_to_chars() {
     assert_eq!(scroll::char_at(slice, 0, 1, 5, &format), 5);
     assert_eq!(scroll::char_at(slice, 0, 1, 30, &format), 6);
 }
+
+mod mouse {
+    use helix_core::{Range, Rope};
+    use state::layout::{View, Viewport};
+    use state::scroll::{self, Gesture, Press, Unit};
+
+    use crate::harness::Harness;
+
+    fn harness(marked: &str) -> Harness {
+        let mut h = Harness::with("m.txt", marked);
+        let focus = h.state.layout.focus;
+        scroll::set_viewport(&mut h.state, focus, Viewport { rows: 10, cols: 40 });
+        h
+    }
+
+    fn press(h: &mut Harness, row: u16, col: u16, press: Press) -> Option<Gesture> {
+        let focus = h.state.layout.focus;
+        h.run(|state, _| scroll::press(state, focus, row, col, press))
+    }
+
+    #[test]
+    fn units_around_a_position() {
+        let text = Rope::from("foo bar_baz\nnext\n");
+        let text = text.slice(..);
+        assert_eq!(Unit::Char.around(text, 5), Range::point(5));
+        assert_eq!(Unit::Word.around(text, 5), Range::new(4, 11));
+        // Whitespace has no word; the click stays a cursor.
+        assert_eq!(Unit::Word.around(text, 3), Range::point(3));
+        assert_eq!(Unit::Line.around(text, 5), Range::new(0, 12));
+        assert_eq!(Unit::Line.around(text, 13), Range::new(12, 17));
+        assert_eq!(Unit::from_clicks(1), Unit::Char);
+        assert_eq!(Unit::from_clicks(2), Unit::Word);
+        assert_eq!(Unit::from_clicks(3), Unit::Line);
+        assert_eq!(Unit::from_clicks(4), Unit::Line);
+    }
+
+    #[test]
+    fn drags_extend_by_whole_units() {
+        let text = Rope::from("one two three\nfour\n");
+        let text = text.slice(..);
+        let word = Gesture {
+            unit: Unit::Word,
+            origin: Range::new(4, 7),
+        };
+        assert_eq!(scroll::extend(text, word, 10), Range::new(4, 13));
+        assert_eq!(scroll::extend(text, word, 1), Range::new(7, 0));
+        assert_eq!(scroll::extend(text, word, 5), Range::new(4, 7));
+        let line = Gesture {
+            unit: Unit::Line,
+            origin: Range::new(14, 19),
+        };
+        assert_eq!(scroll::extend(text, line, 2), Range::new(19, 0));
+    }
+
+    #[test]
+    fn double_and_triple_click_select_word_and_line() {
+        let mut h = harness("#[f|]#oo bar\nbaz\n");
+        press(&mut h, 0, 5, Press::Select(Unit::Word));
+        assert_eq!(h.plain(), "foo #[bar|]#\nbaz\n");
+        let gesture = press(&mut h, 0, 1, Press::Select(Unit::Line)).expect("text pane");
+        assert_eq!(h.plain(), "#[foo bar\n|]#baz\n");
+        let focus = h.state.layout.focus;
+        h.run(|state, _| scroll::drag(state, focus, 1, 0, gesture));
+        assert_eq!(h.plain(), "#[foo bar\nbaz\n|]#");
+    }
+
+    #[test]
+    fn alt_click_adds_a_cursor() {
+        let mut h = harness("#[f|]#oo bar\n");
+        let gesture = press(&mut h, 0, 4, Press::AddCursor);
+        assert_eq!(gesture, None);
+        assert_eq!(h.plain(), "#(f|)#oo #[b|]#ar\n");
+    }
+
+    #[test]
+    fn release_copies_wide_selections_to_primary() {
+        let mut h = harness("#[f|]#oo bar\n");
+        let focus = h.state.layout.focus;
+        press(&mut h, 0, 1, Press::Select(Unit::Char));
+        h.run(|state, out| scroll::release(state, focus, out));
+        assert_eq!(h.clipboard[1], None);
+        press(&mut h, 0, 5, Press::Select(Unit::Word));
+        h.run(|state, out| scroll::release(state, focus, out));
+        assert_eq!(h.clipboard[1].as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn middle_click_pastes_primary_at_the_pointer() {
+        let mut h = harness("#[f|]#oo bar\nbaz\n");
+        h.clipboard[1] = Some("XY".to_owned());
+        let focus = h.state.layout.focus;
+        h.run(|state, out| scroll::middle_click(state, focus, 1, 1, out));
+        assert_eq!(h.plain(), "foo bar\nb#[XY|]#az\n");
+    }
+
+    #[test]
+    fn scroll_to_line_drags_the_cursor_along() {
+        let text: String = (0..100).map(|i| format!("{i}\n")).collect();
+        let mut h = harness(&format!("#[0|]#{}", &text[1..]));
+        let focus = h.state.layout.focus;
+        h.run(|state, _| scroll::scroll_to_line(state, focus, 50));
+        let (line, top) = match &h.state.layout.panes[focus].view {
+            View::Text(view) => {
+                let text = h.doc().text.slice(..);
+                (
+                    text.char_to_line(view.selection.primary().cursor(text)),
+                    text.char_to_line(view.scroll.anchor),
+                )
+            }
+            View::Empty => panic!("no view"),
+        };
+        // A 10-row view narrows the scrolloff band to 4 rows.
+        assert_eq!((line, top), (54, 50));
+    }
+}
+
+mod scrollbar {
+    use state::scroll::{Scrollbar, Thumb, line_at_thumb, scrollbar};
+
+    #[test]
+    fn hidden_when_everything_fits() {
+        assert_eq!(scrollbar(10, 0..10, 100., 10.), Scrollbar::Hidden);
+        assert_eq!(scrollbar(10, 0..12, 100., 10.), Scrollbar::Hidden);
+    }
+
+    #[test]
+    fn thumb_spans_the_visible_lines() {
+        assert_eq!(
+            scrollbar(100, 0..25, 200., 10.),
+            Scrollbar::Shown(Thumb {
+                top: 0.,
+                height: 50.
+            })
+        );
+        assert_eq!(
+            scrollbar(100, 75..100, 200., 10.),
+            Scrollbar::Shown(Thumb {
+                top: 150.,
+                height: 50.
+            })
+        );
+        // Scrolled to the last line, the bar stays shown and pinned to the bottom.
+        assert_eq!(
+            scrollbar(100, 99..100, 200., 10.),
+            Scrollbar::Shown(Thumb {
+                top: 190.,
+                height: 10.
+            })
+        );
+    }
+
+    #[test]
+    fn small_thumbs_are_clamped_and_still_reach_both_ends() {
+        let Scrollbar::Shown(top) = scrollbar(100_000, 0..50, 200., 16.) else {
+            panic!("shown");
+        };
+        assert_eq!(top.height, 16.);
+        let Scrollbar::Shown(bottom) = scrollbar(100_000, 99_950..100_000, 200., 16.) else {
+            panic!("shown");
+        };
+        assert_eq!(bottom.top + bottom.height, 200.);
+    }
+
+    #[test]
+    fn dragging_inverts_the_geometry() {
+        let (len, shown, track) = (1_000, 40, 400.);
+        for first in [0, 1, 123, 480, 960] {
+            let Scrollbar::Shown(thumb) = scrollbar(len, first..first + shown, track, 16.) else {
+                panic!("shown");
+            };
+            assert_eq!(
+                line_at_thumb(len, shown, thumb.height, track, thumb.top),
+                first
+            );
+        }
+        assert_eq!(line_at_thumb(len, shown, 16., track, -50.), 0);
+        assert_eq!(line_at_thumb(len, shown, 16., track, 1e6), len - shown);
+    }
+}

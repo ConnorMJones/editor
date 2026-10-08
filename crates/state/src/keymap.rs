@@ -1,7 +1,7 @@
 use model::command::{
     Align, Case, Command, Cycle, Direction, Find, Inclusion, Join, Motion, ObjectScope, Paste,
-    Pending, PickerCommand, RegexOp, ScrollBy, SyntaxObject, TreeCommand, WindowCommand,
-    WordBounds, Yanking,
+    Pending, PickerCommand, PromptCommand, PromptMotion, RegexOp, ScrollBy, SyntaxObject,
+    TreeCommand, WindowCommand, WordBounds, Yanking,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -464,11 +464,104 @@ const INSERT: Bindings = &[
     (&SAVE_ALL, Command::WriteAll),
 ];
 
+const fn prompt_move(motion: PromptMotion) -> Command {
+    Command::Prompt(PromptCommand::Move(motion))
+}
+
+const fn prompt_delete(motion: PromptMotion) -> Command {
+    Command::Prompt(PromptCommand::Delete(motion))
+}
+
+/// Helix's prompt line editing, from `helix-term/src/ui/prompt.rs`.
 const PROMPT: Bindings = &[
     (&[Key::code(KeyCode::Esc)], Command::PromptCancel),
     (&[Key::ctrl('c')], Command::PromptCancel),
     (&[Key::code(KeyCode::Enter)], Command::PromptSubmit),
-    (&[Key::code(KeyCode::Backspace)], Command::PromptBackspace),
+    (&[Key::alt('b')], prompt_move(PromptMotion::WordBackward)),
+    (
+        &[with(KeyCode::Left, Mods::CTRL)],
+        prompt_move(PromptMotion::WordBackward),
+    ),
+    (&[Key::alt('f')], prompt_move(PromptMotion::WordForward)),
+    (
+        &[with(KeyCode::Right, Mods::CTRL)],
+        prompt_move(PromptMotion::WordForward),
+    ),
+    (&[Key::ctrl('b')], prompt_move(PromptMotion::CharBackward)),
+    (
+        &[Key::code(KeyCode::Left)],
+        prompt_move(PromptMotion::CharBackward),
+    ),
+    (&[Key::ctrl('f')], prompt_move(PromptMotion::CharForward)),
+    (
+        &[Key::code(KeyCode::Right)],
+        prompt_move(PromptMotion::CharForward),
+    ),
+    (&[Key::ctrl('e')], prompt_move(PromptMotion::End)),
+    (&[Key::code(KeyCode::End)], prompt_move(PromptMotion::End)),
+    (&[Key::ctrl('a')], prompt_move(PromptMotion::Start)),
+    (
+        &[Key::code(KeyCode::Home)],
+        prompt_move(PromptMotion::Start),
+    ),
+    (&[Key::ctrl('w')], prompt_delete(PromptMotion::WordBackward)),
+    (
+        &[with(KeyCode::Backspace, Mods::ALT)],
+        prompt_delete(PromptMotion::WordBackward),
+    ),
+    (
+        &[with(KeyCode::Backspace, Mods::CTRL)],
+        prompt_delete(PromptMotion::WordBackward),
+    ),
+    (&[Key::alt('d')], prompt_delete(PromptMotion::WordForward)),
+    (
+        &[with(KeyCode::Delete, Mods::ALT)],
+        prompt_delete(PromptMotion::WordForward),
+    ),
+    (
+        &[with(KeyCode::Delete, Mods::CTRL)],
+        prompt_delete(PromptMotion::WordForward),
+    ),
+    (&[Key::ctrl('k')], prompt_delete(PromptMotion::End)),
+    (&[Key::ctrl('u')], prompt_delete(PromptMotion::Start)),
+    (&[Key::ctrl('h')], prompt_delete(PromptMotion::CharBackward)),
+    (
+        &[Key::code(KeyCode::Backspace)],
+        prompt_delete(PromptMotion::CharBackward),
+    ),
+    (
+        &[with(KeyCode::Backspace, Mods::SHIFT)],
+        prompt_delete(PromptMotion::CharBackward),
+    ),
+    (&[Key::ctrl('d')], prompt_delete(PromptMotion::CharForward)),
+    (
+        &[Key::code(KeyCode::Delete)],
+        prompt_delete(PromptMotion::CharForward),
+    ),
+    (
+        &[Key::ctrl('p')],
+        Command::Prompt(PromptCommand::History(Direction::Backward)),
+    ),
+    (
+        &[Key::code(KeyCode::Up)],
+        Command::Prompt(PromptCommand::History(Direction::Backward)),
+    ),
+    (
+        &[Key::ctrl('n')],
+        Command::Prompt(PromptCommand::History(Direction::Forward)),
+    ),
+    (
+        &[Key::code(KeyCode::Down)],
+        Command::Prompt(PromptCommand::History(Direction::Forward)),
+    ),
+    (
+        &[Key::code(KeyCode::Tab)],
+        Command::Prompt(PromptCommand::Complete(Direction::Forward)),
+    ),
+    (
+        &[with(KeyCode::Tab, Mods::SHIFT)],
+        Command::Prompt(PromptCommand::Complete(Direction::Backward)),
+    ),
 ];
 
 /// Helix view mode, reachable as `z x`; `Z` makes it sticky.

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
-use state::buffer::{Content, TextDoc};
+use state::buffer::{Buffer, Content, Disk, TextDoc};
 use state::layout::View;
 use state::watch::{self, Watcher};
 use state::{Effect, Root, State, input, job, register};
@@ -151,7 +151,8 @@ impl Harness {
     pub fn doc(&self) -> &TextDoc {
         match &self.state.layout.panes[self.state.layout.focus].view {
             View::Text(view) => match &self.state.buffers[view.buffer].content {
-                Content::Text(doc) => doc,
+                Content::Text { doc, .. } => doc,
+                Content::Loading { .. } => panic!("focused buffer is still loading"),
             },
             View::Empty => panic!("focused pane has no buffer"),
         }
@@ -226,4 +227,11 @@ fn special(name: &str) -> Key {
         other => panic!("unknown key <{other}>"),
     };
     Key { code, mods }
+}
+
+pub fn disk_of(buffer: &Buffer) -> Disk {
+    match &buffer.content {
+        Content::Text { disk, .. } => *disk,
+        Content::Loading { .. } => panic!("buffer is still loading"),
+    }
 }

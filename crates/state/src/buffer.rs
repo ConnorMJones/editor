@@ -1,11 +1,14 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use helix_core::history::{self, History, UndoKind};
 use helix_core::indent::{IndentStyle, auto_detect_indent_style};
-use helix_core::syntax::Loader;
 use helix_core::syntax::config::LanguageConfiguration;
+use helix_core::syntax::{HighlighterError, Loader};
 use helix_core::{Language, LineEnding, Rope, Selection, Syntax, Transaction};
 use slotmap::new_key_type;
+
+use crate::layout::PaneId;
 
 new_key_type! {
     pub struct BufferId;
@@ -15,13 +18,31 @@ pub struct Buffer {
     /// Canonical when the file exists; root-joined and normalized for new files.
     pub path: PathBuf,
     pub content: Content,
-    pub disk: Disk,
-    /// Modification time of the disk copy the text last matched; `None` before the first write.
-    pub mtime: Option<std::time::SystemTime>,
 }
 
 pub enum Content {
-    Text(TextDoc),
+    /// The first read and parse run as a job; commands skip the buffer and it cannot be written.
+    Loading { jump: Option<Jump> },
+    Text {
+        doc: TextDoc,
+        disk: Disk,
+        /// Modification time of the disk copy the text last matched; `None` before the first write.
+        mtime: Option<SystemTime>,
+    },
+}
+
+/// Cursor placement in `pane` waiting for a loading buffer's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Jump {
+    pub pane: PaneId,
+    pub to: Position,
+}
+
+/// Zero-based line and character column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,13 +141,11 @@ impl TextDoc {
         if !tx.apply(&mut self.text) || tx.changes().is_empty() {
             return;
         }
-        if let Some(syntax) = &mut self.syntax
-            && let Err(error) =
-                syntax.update(old.slice(..), self.text.slice(..), tx.changes(), loader)
-        {
-            tracing::warn!(?error, "syntax update failed; dropping highlights");
-            self.syntax = None;
-        }
+        let updated = self
+            .syntax
+            .as_mut()
+            .map(|syntax| syntax.update(old.slice(..), self.text.slice(..), tx.changes(), loader));
+        self.recover_syntax(updated, loader);
         self.uncommitted = match std::mem::replace(&mut self.uncommitted, Uncommitted::Clean) {
             Uncommitted::Clean => Uncommitted::Pending {
                 changes: tx.clone(),
@@ -164,15 +183,36 @@ impl TextDoc {
         for tx in &txs {
             let old = self.text.clone();
             tx.apply(&mut self.text);
-            if let Some(syntax) = &mut self.syntax
-                && syntax
-                    .update(old.slice(..), self.text.slice(..), tx.changes(), loader)
-                    .is_err()
-            {
-                self.syntax = None;
-            }
+            let updated = self.syntax.as_mut().map(|syntax| {
+                syntax.update(old.slice(..), self.text.slice(..), tx.changes(), loader)
+            });
+            self.recover_syntax(updated, loader);
         }
         txs
+    }
+
+    /// Re-parses from scratch after a failed incremental update, which may leave the tree half-edited.
+    pub fn recover_syntax(
+        &mut self,
+        updated: Option<Result<(), HighlighterError>>,
+        loader: &Loader,
+    ) {
+        match (updated, &self.syntax) {
+            (Some(Err(error)), Some(syntax)) => {
+                let language = syntax.root_language();
+                self.syntax = match Syntax::new(self.text.slice(..), language, loader) {
+                    Ok(syntax) => {
+                        tracing::warn!(?error, "syntax update failed; re-parsed");
+                        Some(syntax)
+                    }
+                    Err(reparse) => {
+                        tracing::warn!(?error, ?reparse, "syntax update and re-parse failed");
+                        None
+                    }
+                };
+            }
+            (Some(Ok(())) | None, _) | (Some(Err(_)), None) => {}
+        }
     }
 }
 
@@ -182,4 +222,13 @@ pub enum HistoryStep {
     Redo,
     Earlier,
     Later,
+}
+
+impl Content {
+    pub fn is_modified(&self) -> bool {
+        match self {
+            Content::Loading { .. } => false,
+            Content::Text { doc, .. } => doc.is_modified(),
+        }
+    }
 }

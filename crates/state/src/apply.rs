@@ -18,9 +18,12 @@ use model::notice::Notice;
 use model::register::Register;
 use slotmap::SlotMap;
 
-use crate::buffer::{Buffer, BufferId, Content, Disk, HistoryStep, TextDoc, Uncommitted};
+use crate::buffer::{
+    Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, TextDoc, Uncommitted,
+};
 use crate::job::{Job, ReloadPolicy};
 use crate::layout::{Layout, PaneId, TextView, View};
+use crate::prompt::{Candidate, Chosen};
 use crate::register::{self, ClipboardUse, Values};
 use crate::{
     Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky, edit, input,
@@ -616,38 +619,21 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::Await(pending) => state.input.awaiting = Some(pending),
 
         Command::CommandMode => {
-            state.overlay = Overlay::Prompt(Prompt {
-                kind: PromptKind::Command,
-                line: String::new(),
-            })
+            state.overlay = Overlay::Prompt(prompt::open(PromptKind::Command, &state.files))
         }
         Command::RegexPrompt(op) => match focused(&mut state.layout, &mut state.buffers) {
             Some((view, _)) => {
-                state.overlay = Overlay::Prompt(Prompt {
-                    kind: PromptKind::Regex {
-                        op,
-                        register: state.input.register.unwrap_or(Register::SEARCH),
-                        snapshot: view.selection.clone(),
-                    },
-                    line: String::new(),
-                })
+                let kind = PromptKind::Regex {
+                    op,
+                    register: state.input.register.unwrap_or(Register::SEARCH),
+                    snapshot: view.selection.clone(),
+                };
+                state.overlay = Overlay::Prompt(prompt::open(kind, &state.files))
             }
             None => state.notice = Some(Notice::NoBuffer),
         },
-        Command::PromptInsert(c) => match &mut state.overlay {
-            Overlay::Prompt(prompt) => {
-                prompt.line.push(c);
-                select::preview_regex(state);
-            }
-            Overlay::None | Overlay::Picker(_) => {}
-        },
-        Command::PromptBackspace => match &mut state.overlay {
-            Overlay::Prompt(prompt) => match prompt.line.pop() {
-                Some(_) => select::preview_regex(state),
-                None => apply(state, Command::PromptCancel, out),
-            },
-            Overlay::None | Overlay::Picker(_) => {}
-        },
+        Command::PromptInsert(c) => prompt::insert(state, c),
+        Command::Prompt(command) => prompt::command(state, command, out),
         Command::PromptCancel => match std::mem::replace(&mut state.overlay, Overlay::None) {
             Overlay::Prompt(Prompt {
                 kind: PromptKind::Regex { snapshot, .. },
@@ -660,27 +646,45 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             | Overlay::None
             | Overlay::Picker(_) => {}
         },
-        Command::PromptSubmit => match std::mem::replace(&mut state.overlay, Overlay::None) {
-            Overlay::Prompt(Prompt {
-                kind: PromptKind::Command,
-                line,
-            }) => match prompt::parse(&line) {
-                Ok(command) => apply(state, command, out),
-                Err(notice) => state.notice = Some(notice),
-            },
-            Overlay::Prompt(Prompt {
-                kind:
-                    PromptKind::Regex {
-                        op,
-                        register,
-                        snapshot,
+        // Enter on a chosen directory lists it instead of submitting, as in helix.
+        Command::PromptSubmit => match &mut state.overlay {
+            Overlay::Prompt(prompt)
+                if matches!(
+                    prompt.completion.chosen,
+                    Chosen::At(i) if matches!(prompt.completion.candidates[i], Candidate::Dir(_))
+                ) =>
+            {
+                prompt::complete(prompt, &state.files)
+            }
+            Overlay::Prompt(_) | Overlay::None | Overlay::Picker(_) => {
+                match std::mem::replace(&mut state.overlay, Overlay::None) {
+                    Overlay::Prompt(Prompt {
+                        kind: PromptKind::Command,
+                        line,
+                        ..
+                    }) => match prompt::remember(state, Register::COMMAND, line, out)
+                        .map(|line| prompt::parse(&line))
+                    {
+                        Some(Ok(command)) => apply(state, command, out),
+                        Some(Err(notice)) => state.notice = Some(notice),
+                        None => {}
                     },
-                line,
-            }) => select::submit_regex(state, op, register, snapshot, line, out),
-            Overlay::None | Overlay::Picker(_) => {}
+                    Overlay::Prompt(Prompt {
+                        kind:
+                            PromptKind::Regex {
+                                op,
+                                register,
+                                snapshot,
+                            },
+                        line,
+                        ..
+                    }) => select::submit_regex(state, op, register, snapshot, line, out),
+                    Overlay::None | Overlay::Picker(_) => {}
+                }
+            }
         },
 
-        Command::Open(path) => open(state, path),
+        Command::Open(path) => open(state, path, None, out),
         Command::Write => match focused_buffer(state) {
             Some(id) => out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job)),
             None => state.notice = Some(Notice::NoBuffer),
@@ -692,10 +696,20 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::WriteAs(path, dirs) => match focused_buffer(state) {
             Some(id) => {
                 let path = helix_stdx::path::normalize(state.root.path().join(path));
-                if let Some(buffer) = state.buffers.get_mut(id) {
-                    buffer.path = path;
-                    buffer.disk = Disk::New;
-                    buffer.mtime = None;
+                match state.buffers.get_mut(id) {
+                    Some(Buffer {
+                        path: current,
+                        content: Content::Text { disk, mtime, .. },
+                    }) => {
+                        *current = path;
+                        *disk = Disk::New;
+                        *mtime = None;
+                    }
+                    Some(Buffer {
+                        content: Content::Loading { .. },
+                        ..
+                    })
+                    | None => {}
                 }
                 out.extend(write_job(state, id, dirs).map(Effect::Job));
             }
@@ -707,10 +721,13 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             }
         }
         Command::WriteQuit => match focused_buffer(state) {
-            Some(id) => {
-                out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job));
-                state.exit = Exit::AfterWrite { buffers: vec![id] };
-            }
+            Some(id) => match write_job(state, id, Dirs::Existing) {
+                Some(job) => {
+                    out.push(Effect::Job(job));
+                    state.exit = Exit::AfterWrite { buffers: vec![id] };
+                }
+                None => {}
+            },
             None => apply(state, Command::Quit, out),
         },
         Command::WriteAllQuit => match modified_buffers(&state.buffers) {
@@ -722,13 +739,19 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
                 state.exit = Exit::AfterWrite { buffers };
             }
         },
-        Command::Quit => match state.buffers.values().filter(|b| is_modified(b)).count() {
-            0 => out.push(Effect::Quit),
-            count => state.notice = Some(Notice::UnsavedBuffers { count }),
+        Command::Quit => match workspace::request_close(state) {
+            workspace::Close::Allowed => out.push(Effect::Quit),
+            workspace::Close::Refused => {}
         },
         Command::ForceQuit => out.push(Effect::Quit),
-        Command::CloseBuffer => close_buffer(state, Force::No),
-        Command::ForceCloseBuffer => close_buffer(state, Force::Yes),
+        Command::CloseBuffer => match focused_buffer(state) {
+            Some(id) => close_buffer(state, id, Force::No),
+            None => state.notice = Some(Notice::NoBuffer),
+        },
+        Command::ForceCloseBuffer => match focused_buffer(state) {
+            Some(id) => close_buffer(state, id, Force::Yes),
+            None => state.notice = Some(Notice::NoBuffer),
+        },
         Command::Reload => match focused_buffer(state) {
             Some(id) => out.extend(reload_job(state, id).map(Effect::Job)),
             None => state.notice = Some(Notice::NoBuffer),
@@ -824,8 +847,8 @@ fn replace_from(state: &mut State, register: Register, out: &mut Vec<Effect>) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Force {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Force {
     No,
     Yes,
 }
@@ -856,8 +879,8 @@ pub(crate) fn focused<'a, 'b>(
     let focus = layout.focus;
     match layout.panes.get_mut(focus).map(|pane| &mut pane.view) {
         Some(View::Text(view)) => match buffers.get_mut(view.buffer).map(|b| &mut b.content) {
-            Some(Content::Text(doc)) => Some((view, doc)),
-            None => None,
+            Some(Content::Text { doc, .. }) => Some((view, doc)),
+            Some(Content::Loading { .. }) | None => None,
         },
         Some(View::Empty) | None => None,
     }
@@ -875,16 +898,10 @@ fn focused_buffer(state: &State) -> Option<BufferId> {
     }
 }
 
-fn is_modified(buffer: &Buffer) -> bool {
-    match &buffer.content {
-        Content::Text(doc) => doc.is_modified(),
-    }
-}
-
 fn modified_buffers(buffers: &SlotMap<BufferId, Buffer>) -> Vec<BufferId> {
     buffers
         .iter()
-        .filter(|(_, buffer)| is_modified(buffer))
+        .filter(|(_, buffer)| buffer.content.is_modified())
         .map(|(id, _)| id)
         .collect()
 }
@@ -1049,22 +1066,29 @@ fn commit(state: &mut State, id: BufferId) {
         })
         .unwrap_or_else(|| Selection::point(0));
     match state.buffers.get_mut(id).map(|b| &mut b.content) {
-        Some(Content::Text(doc)) => doc.commit(&selection),
-        None => {}
+        Some(Content::Text { doc, .. }) => doc.commit(&selection),
+        Some(Content::Loading { .. }) | None => {}
     }
 }
 
+/// `None` with a notice while the buffer is still loading.
 fn write_job(state: &mut State, id: BufferId, dirs: Dirs) -> Option<Job> {
     commit(state, id);
     let buffer = state.buffers.get(id)?;
     match &buffer.content {
-        Content::Text(doc) => Some(Job::Write {
+        Content::Text { doc, .. } => Some(Job::Write {
             buffer: id,
             path: buffer.path.clone(),
             text: doc.text.clone(),
             revision: doc.history.current_revision(),
             dirs,
         }),
+        Content::Loading { .. } => {
+            state.notice = Some(Notice::StillLoading {
+                path: buffer.path.clone(),
+            });
+            None
+        }
     }
 }
 
@@ -1072,17 +1096,33 @@ fn write_job(state: &mut State, id: BufferId, dirs: Dirs) -> Option<Job> {
 fn reload_job(state: &mut State, id: BufferId) -> Option<Job> {
     commit(state, id);
     let buffer = state.buffers.get(id)?;
-    Some(Job::Reload {
-        buffer: id,
-        path: buffer.path.clone(),
-        mtime: None,
-        policy: ReloadPolicy::Discard,
-    })
+    match &buffer.content {
+        Content::Text { .. } => Some(Job::Reload {
+            buffer: id,
+            path: buffer.path.clone(),
+            mtime: None,
+            policy: ReloadPolicy::Discard,
+        }),
+        Content::Loading { .. } => None,
+    }
 }
 
-fn open(state: &mut State, path: PathBuf) {
+/// Char index of `to`, with the column clamped to the line's end.
+pub(crate) fn line_column(text: &Rope, to: Position) -> usize {
+    let line = to.line.min(text.len_lines().saturating_sub(1));
+    let start = text.line_to_char(line);
+    (start + to.column).min(line_end_char_index(&text.slice(..), line))
+}
+
+/// Shows `path` in the focused pane, reading it as a job when no buffer has it yet; `to`
+/// places the cursor, once the text arrives if need be.
+pub(crate) fn open(state: &mut State, path: PathBuf, to: Option<Position>, out: &mut Vec<Effect>) {
     let joined = helix_stdx::path::normalize(state.root.path().join(&path));
     let path = match joined.canonicalize() {
+        Ok(path) if path.is_dir() => {
+            state.notice = Some(Notice::NotAFile { path });
+            return;
+        }
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => joined,
         Err(error) => {
@@ -1101,33 +1141,16 @@ fn open(state: &mut State, path: PathBuf) {
     let id = match existing {
         Some(id) => id,
         None => {
-            let (text, disk) = match std::fs::read(&path) {
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => (Rope::from(text), Disk::Synced),
-                    Err(_) => {
-                        state.notice = Some(Notice::NotUtf8 { path });
-                        return;
-                    }
-                },
-                Err(error) if error.kind() == io::ErrorKind::NotFound => (Rope::new(), Disk::New),
-                Err(error) if error.kind() == io::ErrorKind::IsADirectory => {
-                    state.notice = Some(Notice::NotAFile { path });
-                    return;
-                }
-                Err(error) => {
-                    state.notice = Some(Notice::OpenFailed { path, error });
-                    return;
-                }
-            };
-            let doc = TextDoc::new(text, &path, &state.languages);
-            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             let id = state.buffers.insert(Buffer {
-                path,
-                content: Content::Text(doc),
-                disk,
-                mtime,
+                path: path.clone(),
+                content: Content::Loading { jump: None },
             });
             state.tabs.push(id);
+            out.push(Effect::Job(Job::Open {
+                buffer: id,
+                path,
+                languages: state.languages.clone(),
+            }));
             id
         }
     };
@@ -1136,44 +1159,55 @@ fn open(state: &mut State, path: PathBuf) {
     }
     let focus = state.layout.focus;
     workspace::show(&mut state.layout, &state.buffers, focus, id);
-}
-
-fn close_buffer(state: &mut State, force: Force) {
-    let Some(id) = focused_buffer(state) else {
-        state.notice = Some(Notice::NoBuffer);
+    let Some(to) = to else {
         return;
     };
-    let modified = state.buffers.get(id).is_some_and(is_modified);
-    match (modified, force) {
-        (true, Force::No) => {
-            state.notice = Some(Notice::UnsavedBuffers { count: 1 });
+    match (
+        &mut state.buffers[id].content,
+        state.layout.panes.get_mut(focus).map(|pane| &mut pane.view),
+    ) {
+        (Content::Loading { jump }, _) => *jump = Some(Jump { pane: focus, to }),
+        (Content::Text { doc, .. }, Some(View::Text(view))) => {
+            view.selection = Selection::point(line_column(&doc.text, to));
         }
-        (false, _) | (true, Force::Yes) => {
-            state.buffers.remove(id);
-            state.tabs.retain(|&tab| tab != id);
-            let pane_ids: Vec<PaneId> = state.layout.panes.keys().collect();
-            for pane_id in pane_ids {
-                let pane = &mut state.layout.panes[pane_id];
-                pane.parked.retain(|view| view.buffer != id);
-                match &pane.view {
-                    View::Text(view) if view.buffer == id => {
-                        // Fall back to the pane's previous buffer, then the last tab, then empty.
-                        pane.view = View::Empty;
-                        let next = pane
-                            .parked
-                            .last()
-                            .map(|view| view.buffer)
-                            .or_else(|| state.tabs.last().copied());
-                        match next {
-                            Some(next) => {
-                                workspace::show(&mut state.layout, &state.buffers, pane_id, next)
-                            }
-                            None => {}
-                        }
-                    }
-                    View::Text(_) | View::Empty => {}
+        (Content::Text { .. }, Some(View::Empty) | None) => {}
+    }
+}
+
+/// Closes `id` everywhere unless it has unsaved edits and `force` is `No`.
+pub fn close_buffer(state: &mut State, id: BufferId, force: Force) {
+    match (
+        state.buffers.get(id).map(|b| b.content.is_modified()),
+        force,
+    ) {
+        (None, _) => {}
+        (Some(true), Force::No) => state.notice = Some(Notice::UnsavedBuffers { count: 1 }),
+        (Some(false), _) | (Some(true), Force::Yes) => remove_buffer(state, id),
+    }
+}
+
+/// Drops `id`; panes showing it fall back to their previous buffer, then the last tab.
+pub(crate) fn remove_buffer(state: &mut State, id: BufferId) {
+    state.buffers.remove(id);
+    state.tabs.retain(|&tab| tab != id);
+    let pane_ids: Vec<PaneId> = state.layout.panes.keys().collect();
+    for pane_id in pane_ids {
+        let pane = &mut state.layout.panes[pane_id];
+        pane.parked.retain(|view| view.buffer != id);
+        match &pane.view {
+            View::Text(view) if view.buffer == id => {
+                pane.view = View::Empty;
+                let next = pane
+                    .parked
+                    .last()
+                    .map(|view| view.buffer)
+                    .or_else(|| state.tabs.last().copied());
+                match next {
+                    Some(next) => workspace::show(&mut state.layout, &state.buffers, pane_id, next),
+                    None => {}
                 }
             }
+            View::Text(_) | View::Empty => {}
         }
     }
 }

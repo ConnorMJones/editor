@@ -35,6 +35,8 @@ impl Stored {
 impl Register {
     pub const DEFAULT: Register = Register::Stored(Stored('"'));
     pub const SEARCH: Register = Register::Stored(Stored('/'));
+    /// History of the `:` prompt.
+    pub const COMMAND: Register = Register::Stored(Stored(':'));
 
     pub fn from_char(c: char) -> Register {
         match c {

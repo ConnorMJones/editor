@@ -50,6 +50,35 @@ pub struct ShapedLine {
 }
 
 impl ShapedLine {
+    /// The same glyphs with new colours and decorations, skipping reshaping.
+    /// `runs` must select the same fonts over the same byte ranges as the shaped runs.
+    pub fn with_runs(&self, runs: &[crate::TextRun]) -> ShapedLine {
+        let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
+        for run in runs {
+            if let Some(last_run) = decoration_runs.last_mut()
+                && last_run.color == run.color
+                && last_run.underline == run.underline
+                && last_run.strikethrough == run.strikethrough
+                && last_run.background_color == run.background_color
+            {
+                last_run.len += run.len as u32;
+                continue;
+            }
+            decoration_runs.push(DecorationRun {
+                len: run.len as u32,
+                color: run.color,
+                background_color: run.background_color,
+                underline: run.underline,
+                strikethrough: run.strikethrough,
+            });
+        }
+        ShapedLine {
+            layout: self.layout.clone(),
+            text: self.text.clone(),
+            decoration_runs,
+        }
+    }
+
     /// Returns a forward-only cursor for this shaped line.
     pub fn cursor(&self) -> ShapedLineCursor<'_> {
         assert_eq!(

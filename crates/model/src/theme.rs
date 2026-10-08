@@ -128,3 +128,14 @@ pub const CURSOR_SECONDARY: CursorColors = CursorColors {
 pub const DIFF_PLUS: Base16 = Base0B;
 pub const DIFF_MINUS: Base16 = Base08;
 pub const DIFF_DELTA: Base16 = Base09;
+
+pub const SCROLLBAR_TRACK: Base16 = Base01;
+pub const SCROLLBAR_THUMB: Base16 = Base03;
+/// Thumb colour while dragged.
+pub const SCROLLBAR_THUMB_ACTIVE: Base16 = Base04;
+
+/// Prompt completion menu, as helix's `ui.menu` and `ui.menu.selected`.
+pub const MENU: Base16 = Base01;
+pub const MENU_SELECTED: Base16 = Base02;
+pub const MENU_TEXT: Base16 = Base05;
+pub const MENU_DIR: Base16 = Base0D;

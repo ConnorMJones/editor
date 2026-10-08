@@ -4,7 +4,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use model::command::Command;
 use model::key::Key;
 use state::keymap::{Context, Keymap, Resolved};
-use state::{Root, State, apply::apply, input};
+use state::{Effect, Root, State, apply::apply, input, job};
 
 fn keystroke(c: &mut Criterion) {
     let keymap = Keymap::helix().unwrap();
@@ -34,6 +34,16 @@ fn keystroke(c: &mut Criterion) {
     .unwrap();
     let mut out = Vec::new();
     apply(&mut state, Command::Open("big.rs".into()), &mut out);
+    // The read and parse run as a job; finish it as the host would.
+    for effect in std::mem::take(&mut out) {
+        match effect {
+            Effect::Job(work) => job::complete(&mut state, job::run(work), &mut out),
+            Effect::Quit
+            | Effect::Watch(_)
+            | Effect::WriteClipboard { .. }
+            | Effect::ReadClipboard { .. } => {}
+        }
+    }
     apply(&mut state, Command::InsertMode, &mut out);
     c.bench_function("insert char into 10MB rust buffer", |b| {
         b.iter(|| input::key(&mut state, black_box(Key::char('x')), &mut out))

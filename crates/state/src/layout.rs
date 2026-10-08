@@ -1,4 +1,4 @@
-use helix_core::Selection;
+use helix_core::{Selection, SmallVec};
 use model::window::{Axis, Side};
 use slotmap::{SlotMap, new_key_type};
 
@@ -16,11 +16,52 @@ pub struct Layout {
 }
 
 /// A split always has at least two children, none of which is a split along the same axis.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Pane(PaneId),
-    Split { axis: Axis, children: Vec<Node> },
+    Split { axis: Axis, children: Vec<Child> },
 }
+
+/// A split member; it spans `flex` over the sum of its siblings' flexes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Child {
+    pub flex: Flex,
+    pub node: Node,
+}
+
+/// A positive, finite share weight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flex(f32);
+
+impl Flex {
+    pub const EVEN: Flex = Flex(1.0);
+
+    pub fn new(weight: f32) -> Option<Flex> {
+        match weight.is_finite() && weight > 0.0 {
+            true => Some(Flex(weight)),
+            false => None,
+        }
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Child {
+    pub fn even(node: Node) -> Child {
+        Child {
+            flex: Flex::EVEN,
+            node,
+        }
+    }
+}
+
+/// Child indices leading from the root to a split.
+pub type SplitPath = SmallVec<[usize; 4]>;
+
+/// Smallest share of a split a dragged divider leaves either neighbour.
+pub const MIN_SHARE: f32 = 0.05;
 
 /// Fraction of the editor area occupied by a pane.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,6 +70,15 @@ pub struct Rect {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+impl Rect {
+    pub const FULL: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,7 +98,7 @@ impl Layout {
         }
     }
 
-    /// Places `pane` next to the focused pane along `axis` and focuses it.
+    /// Places `pane` next to the focused pane along `axis`, halving its space, and focuses it.
     pub fn split(&mut self, axis: Axis, pane: Pane) -> PaneId {
         let id = self.panes.insert(pane);
         split_node(&mut self.root, self.focus, axis, id);
@@ -98,17 +148,47 @@ impl Layout {
 
     pub fn rects(&self) -> Vec<(PaneId, Rect)> {
         let mut out = Vec::with_capacity(self.panes.len());
-        collect_rects(
-            &self.root,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                h: 1.0,
-            },
-            &mut out,
-        );
+        collect_rects(&self.root, Rect::FULL, &mut out);
         out
+    }
+
+    /// Moves the divider after child `divider` of the split at `path` to `at`, a fraction of
+    /// the editor area along the split's axis; stale paths are ignored.
+    pub fn drag_divider(&mut self, path: &[usize], divider: usize, at: f32) {
+        let mut area = Rect::FULL;
+        let mut node = &mut self.root;
+        for &step in path {
+            let Node::Split { axis, children } = node else {
+                return;
+            };
+            let Some(rect) = child_rects(*axis, children, area).nth(step) else {
+                return;
+            };
+            area = rect;
+            node = &mut children[step].node;
+        }
+        let Node::Split { axis, children } = node else {
+            return;
+        };
+        let (start, extent) = match axis {
+            Axis::Row => (area.x, area.w),
+            Axis::Column => (area.y, area.h),
+        };
+        match (divider + 1 < children.len(), at.is_finite()) {
+            (true, true) => {}
+            (false, _) | (_, false) => return,
+        }
+        let total: f32 = children.iter().map(|child| child.flex.0).sum();
+        let before: f32 = children[..divider]
+            .iter()
+            .map(|child| child.flex.0)
+            .sum::<f32>()
+            / total;
+        let pair = (children[divider].flex.0 + children[divider + 1].flex.0) / total;
+        let margin = MIN_SHARE.min(pair / 2.0);
+        let first = ((at - start) / extent - before).clamp(margin, pair - margin);
+        children[divider].flex = Flex(first * total);
+        children[divider + 1].flex = Flex((pair - first) * total);
     }
 
     /// Nearest pane touching the focused pane's `side` that overlaps it across that side.
@@ -160,7 +240,10 @@ fn split_node(node: &mut Node, target: PaneId, axis: Axis, new: PaneId) -> bool 
         Node::Pane(id) if *id == target => {
             *node = Node::Split {
                 axis,
-                children: vec![Node::Pane(target), Node::Pane(new)],
+                children: vec![
+                    Child::even(Node::Pane(target)),
+                    Child::even(Node::Pane(new)),
+                ],
             };
             true
         }
@@ -171,15 +254,23 @@ fn split_node(node: &mut Node, target: PaneId, axis: Axis, new: PaneId) -> bool 
         } => {
             let direct = children
                 .iter()
-                .position(|child| *child == Node::Pane(target));
+                .position(|child| child.node == Node::Pane(target));
             match (direct, *own == axis) {
                 (Some(i), true) => {
-                    children.insert(i + 1, Node::Pane(new));
+                    let half = Flex(children[i].flex.0 / 2.0);
+                    children[i].flex = half;
+                    children.insert(
+                        i + 1,
+                        Child {
+                            flex: half,
+                            node: Node::Pane(new),
+                        },
+                    );
                     true
                 }
                 (Some(_), false) | (None, _) => children
                     .iter_mut()
-                    .any(|child| split_node(child, target, axis, new)),
+                    .any(|child| split_node(&mut child.node, target, axis, new)),
             }
         }
     }
@@ -189,27 +280,38 @@ fn remove_node(node: &mut Node, target: PaneId) -> bool {
     match node {
         Node::Pane(_) => false,
         Node::Split { axis, children } => {
-            let removed = match children.iter().position(|c| *c == Node::Pane(target)) {
+            let removed = match children.iter().position(|c| c.node == Node::Pane(target)) {
                 Some(i) => {
                     children.remove(i);
                     true
                 }
-                None => children.iter_mut().any(|child| remove_node(child, target)),
+                None => children
+                    .iter_mut()
+                    .any(|child| remove_node(&mut child.node, target)),
             };
             // Re-establish the invariants: no single-child splits, no same-axis nesting.
             let axis = *axis;
             let mut flat = Vec::with_capacity(children.len());
             for child in children.drain(..) {
-                match child {
+                match child.node {
                     Node::Split {
                         axis: inner,
                         children: grand,
-                    } if inner == axis => flat.extend(grand),
-                    other => flat.push(other),
+                    } if inner == axis => {
+                        let total: f32 = grand.iter().map(|g| g.flex.0).sum();
+                        flat.extend(grand.into_iter().map(|g| Child {
+                            flex: Flex(child.flex.0 * g.flex.0 / total),
+                            node: g.node,
+                        }));
+                    }
+                    node => flat.push(Child {
+                        flex: child.flex,
+                        node,
+                    }),
                 }
             }
             *node = match flat.len() {
-                1 => flat.pop().expect("one child"),
+                1 => flat.pop().expect("one child").node,
                 _ => Node::Split {
                     axis,
                     children: flat,
@@ -223,30 +325,38 @@ fn remove_node(node: &mut Node, target: PaneId) -> bool {
 fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
     match node {
         Node::Pane(id) => out.push(*id),
-        Node::Split { children, .. } => children.iter().for_each(|c| collect_leaves(c, out)),
+        Node::Split { children, .. } => children.iter().for_each(|c| collect_leaves(&c.node, out)),
     }
+}
+
+/// Areas of a split's children, in order.
+pub fn child_rects(axis: Axis, children: &[Child], area: Rect) -> impl Iterator<Item = Rect> {
+    let total: f32 = children.iter().map(|child| child.flex.0).sum();
+    children.iter().scan(0.0f32, move |offset, child| {
+        let share = child.flex.0 / total;
+        let rect = match axis {
+            Axis::Row => Rect {
+                x: area.x + *offset * area.w,
+                w: share * area.w,
+                ..area
+            },
+            Axis::Column => Rect {
+                y: area.y + *offset * area.h,
+                h: share * area.h,
+                ..area
+            },
+        };
+        *offset += share;
+        Some(rect)
+    })
 }
 
 fn collect_rects(node: &Node, area: Rect, out: &mut Vec<(PaneId, Rect)>) {
     match node {
         Node::Pane(id) => out.push((*id, area)),
         Node::Split { axis, children } => {
-            let share = 1.0 / children.len() as f32;
-            for (i, child) in children.iter().enumerate() {
-                let offset = i as f32 * share;
-                let rect = match axis {
-                    Axis::Row => Rect {
-                        x: area.x + offset * area.w,
-                        w: share * area.w,
-                        ..area
-                    },
-                    Axis::Column => Rect {
-                        y: area.y + offset * area.h,
-                        h: share * area.h,
-                        ..area
-                    },
-                };
-                collect_rects(child, rect, out);
+            for (child, rect) in children.iter().zip(child_rects(*axis, children, area)) {
+                collect_rects(&child.node, rect, out);
             }
         }
     }

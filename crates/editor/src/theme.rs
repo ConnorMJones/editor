@@ -91,6 +91,10 @@ impl Theme {
                 selection: colors[Base16::Base02],
                 unsaved: colors[Base16::Base0A],
                 accent: colors[Base16::Base0D],
+                title: colors[Base16::Base01],
+                title_text: colors[Base16::Base04],
+                hover: colors[Base16::Base02].opacity(0.5),
+                close_hover: colors[Base16::Base08],
                 vcs: [
                     colors[Base16::Base03],
                     colors[Base16::Base0C],
@@ -109,13 +113,18 @@ impl Theme {
     }
 }
 
-// Workspace chrome colours: tab line, tree, pickers.
+// Workspace chrome colours: title bar, tab line, tree, pickers.
 
 pub struct Chrome {
     pub border: Hsla,
     pub selection: Hsla,
     pub unsaved: Hsla,
     pub accent: Hsla,
+    pub title: Hsla,
+    pub title_text: Hsla,
+    /// Background of hovered rows, tabs and window controls.
+    pub hover: Hsla,
+    pub close_hover: Hsla,
     /// Indexed by `GitStatus`.
     pub vcs: [Hsla; GitStatus::COUNT],
 }

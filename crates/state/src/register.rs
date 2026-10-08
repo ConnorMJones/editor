@@ -1,19 +1,29 @@
 use std::collections::HashMap;
 
-use helix_core::NATIVE_LINE_ENDING;
+use helix_core::{NATIVE_LINE_ENDING, Selection};
 use model::command::Paste;
 use model::notice::Notice;
 use model::register::{Clipboard, Register};
 
 use crate::apply::{exit_select_mode, focused};
-use crate::layout::View;
+use crate::layout::{PaneId, View};
 use crate::{Effect, State, edit};
 
 /// What to do with clipboard contents once the host has read them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardUse {
-    Paste { at: Paste, count: usize },
-    Replace { count: usize },
+    Paste {
+        at: Paste,
+        count: usize,
+    },
+    Replace {
+        count: usize,
+    },
+    /// Middle click: focuses `pane` and pastes before char `pos`.
+    PasteAt {
+        pane: PaneId,
+        pos: usize,
+    },
 }
 
 pub struct Registers {
@@ -161,6 +171,16 @@ pub fn clipboard_contents(
     match then {
         ClipboardUse::Paste { at, count } => edit::paste(state, &values, at, count),
         ClipboardUse::Replace { count } => edit::replace_with(state, &values, count),
+        ClipboardUse::PasteAt { pane, pos } => {
+            state.layout.focus = pane;
+            match focused(&mut state.layout, &mut state.buffers) {
+                Some((view, doc)) => {
+                    view.selection = Selection::point(pos.min(doc.text.len_chars()));
+                    edit::paste(state, &values, Paste::Before, 1);
+                }
+                None => {}
+            }
+        }
     }
     exit_select_mode(state);
 }

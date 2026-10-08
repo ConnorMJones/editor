@@ -5,9 +5,9 @@ use helix_core::{Range, Rope, Selection};
 use model::color::Base16;
 use model::mode::Mode;
 use model::theme::{self, Modifiers, Style};
-use state::buffer::{BufferId, TextDoc};
+use state::buffer::TextDoc;
 use state::display::{self, CursorShape, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind};
-use state::layout::{Scroll, TextView, Viewport};
+use state::layout::{Scroll, Viewport};
 
 fn loader() -> Loader {
     let loader = helix_core::config::default_lang_loader();
@@ -20,14 +20,10 @@ fn loader() -> Loader {
     loader
 }
 
-fn view(selection: Selection, rows: u16, cols: u16) -> TextView {
-    TextView {
-        buffer: BufferId::default(),
-        selection,
-        scroll: Scroll {
-            anchor: 0,
-            viewport: Viewport { rows, cols },
-        },
+fn scroll(rows: u16, cols: u16) -> Scroll {
+    Scroll {
+        anchor: 0,
+        viewport: Viewport { rows, cols },
     }
 }
 
@@ -95,7 +91,8 @@ fn whitespace_and_indent_guides() {
     display::layout(
         &mut frame,
         &doc,
-        &view(Selection::point(0), 10, 40),
+        &Selection::point(0),
+        scroll(10, 40),
         &loader,
         Focus::Focused(Mode::Normal),
     );
@@ -120,7 +117,8 @@ fn soft_wrap_marks_continuation_rows() {
     display::layout(
         &mut frame,
         &doc,
-        &view(Selection::point(0), 10, 20),
+        &Selection::point(0),
+        scroll(10, 20),
         &loader,
         Focus::Focused(Mode::Normal),
     );
@@ -150,7 +148,8 @@ fn selections_and_cursors_land_on_cells() {
     display::layout(
         &mut frame,
         &doc,
-        &view(selection, 10, 40),
+        &selection,
+        scroll(10, 40),
         &loader,
         Focus::Focused(Mode::Insert),
     );
@@ -197,7 +196,8 @@ fn rust_captures_fall_back_to_theme_prefixes() {
     display::layout(
         &mut frame,
         &doc,
-        &view(Selection::point(0), 4, 80),
+        &Selection::point(0),
+        scroll(4, 80),
         &loader,
         Focus::Unfocused,
     );

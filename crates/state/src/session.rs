@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::apply::apply;
 use crate::buffer::{BufferId, Content};
 use crate::job::Job;
-use crate::layout::{Layout, Node, Pane, PaneId, Scroll, TextView, View};
+use crate::layout::{Child, Flex, Layout, Node, Pane, PaneId, Scroll, TextView, View};
 use crate::path::RelPath;
 use crate::tree::{self, Dir, Fold, Listing};
-use crate::{Effect, Focus, Sidebar, State};
+use crate::{Effect, Focus, Sidebar, SidebarWidth, State};
 
 /// Workspace layout saved on exit and restored with `session.restore = "last"`.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     /// Open buffers in tab order.
@@ -26,20 +26,36 @@ pub struct Session {
     pub layout: SessionNode,
     pub focus: usize,
     pub sidebar: SessionSidebar,
+    /// Logical pixels; sessions saved before it existed use the default.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
     /// Expanded tree directories relative to the root.
     pub expanded: Vec<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `flex` is the node's weight within its parent split; older sessions split evenly.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionNode {
     Pane {
         pane: usize,
+        #[serde(default = "even")]
+        flex: f32,
     },
     Split {
         axis: Axis,
         children: Vec<SessionNode>,
+        #[serde(default = "even")]
+        flex: f32,
     },
+}
+
+fn even() -> f32 {
+    Flex::EVEN.get()
+}
+
+fn default_sidebar_width() -> f32 {
+    SidebarWidth::DEFAULT.get()
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +92,8 @@ pub enum SessionError {
     EmptySplit,
     #[error("pane {0} is not placed in the layout")]
     UnusedPane(usize),
+    #[error("split weight {0} is not a positive number")]
+    InvalidFlex(f32),
 }
 
 /// Session file for `root` under `dir`, named after the escaped root path.
@@ -140,22 +158,30 @@ pub fn snapshot(state: &State) -> Session {
             .map(|&id| state.buffers[id].path.clone())
             .collect(),
         panes,
-        layout: snapshot_node(&state.layout.root, &index),
+        layout: snapshot_node(&state.layout.root, Flex::EVEN, &index),
         focus: index[&state.layout.focus],
         sidebar: match state.sidebar {
             Sidebar::Hidden => SessionSidebar::Hidden,
             Sidebar::Files(_) => SessionSidebar::Shown,
         },
+        sidebar_width: state.sidebar_width.get(),
         expanded,
     }
 }
 
-fn snapshot_node(node: &Node, index: &HashMap<PaneId, usize>) -> SessionNode {
+fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> SessionNode {
     match node {
-        Node::Pane(pane) => SessionNode::Pane { pane: index[pane] },
+        Node::Pane(pane) => SessionNode::Pane {
+            pane: index[pane],
+            flex: flex.get(),
+        },
         Node::Split { axis, children } => SessionNode::Split {
             axis: *axis,
-            children: children.iter().map(|c| snapshot_node(c, index)).collect(),
+            children: children
+                .iter()
+                .map(|c| snapshot_node(&c.node, c.flex, index))
+                .collect(),
+            flex: flex.get(),
         },
     }
 }
@@ -199,8 +225,10 @@ pub fn restore(
                     scroll,
                 } => match by_path.get(&path) {
                     Some(&buffer) => {
+                        // Loading buffers clamp their views when the text arrives.
                         let len = match &state.buffers[buffer].content {
-                            Content::Text(doc) => doc.text.len_chars(),
+                            Content::Text { doc, .. } => doc.text.len_chars(),
+                            Content::Loading { .. } => usize::MAX,
                         };
                         let ranges: SmallVec<[Range; 1]> = ranges
                             .iter()
@@ -233,7 +261,7 @@ pub fn restore(
         .collect();
     state.layout = match ids.get(focus_slot) {
         Some(&focus) => Layout {
-            root: restore_node(session.layout, &ids),
+            root: restore_node(session.layout, &ids).node,
             panes,
             focus,
         },
@@ -244,6 +272,7 @@ pub fn restore(
         SessionSidebar::Hidden => Sidebar::Hidden,
         SessionSidebar::Shown => Sidebar::Files(Focus::Editor),
     };
+    state.sidebar_width = SidebarWidth::new(session.sidebar_width);
     for dir in session.expanded {
         match RelPath::parse(&dir) {
             Ok(path) if !path.is_root() => {
@@ -266,10 +295,16 @@ pub fn restore(
     Ok(())
 }
 
-/// Every pane index must exist and appear exactly once; splits need two or more children.
+/// Every pane index must exist and appear exactly once; splits need two or more children and
+/// every weight must be positive.
 fn check_node(node: &SessionNode, used: &mut [bool]) -> Result<(), SessionError> {
     match node {
-        SessionNode::Pane { pane } => match used.get_mut(*pane) {
+        SessionNode::Pane { flex, .. } | SessionNode::Split { flex, .. }
+            if Flex::new(*flex).is_none() =>
+        {
+            Err(SessionError::InvalidFlex(*flex))
+        }
+        SessionNode::Pane { pane, .. } => match used.get_mut(*pane) {
             None => Err(SessionError::MissingPane(*pane)),
             Some(true) => Err(SessionError::DuplicatePane(*pane)),
             Some(slot) => {
@@ -286,15 +321,27 @@ fn check_node(node: &SessionNode, used: &mut [bool]) -> Result<(), SessionError>
     }
 }
 
-fn restore_node(node: SessionNode, ids: &[PaneId]) -> Node {
-    match node {
-        SessionNode::Pane { pane } => Node::Pane(ids[pane]),
-        SessionNode::Split { axis, children } => Node::Split {
+/// Builds the layout tree from a node that passed `check_node`.
+fn restore_node(node: SessionNode, ids: &[PaneId]) -> Child {
+    let (flex, node) = match node {
+        SessionNode::Pane { pane, flex } => (flex, Node::Pane(ids[pane])),
+        SessionNode::Split {
             axis,
-            children: children
-                .into_iter()
-                .map(|child| restore_node(child, ids))
-                .collect(),
-        },
+            children,
+            flex,
+        } => (
+            flex,
+            Node::Split {
+                axis,
+                children: children
+                    .into_iter()
+                    .map(|child| restore_node(child, ids))
+                    .collect(),
+            },
+        ),
+    };
+    Child {
+        flex: Flex::new(flex).expect("checked by check_node"),
+        node,
     }
 }

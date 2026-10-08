@@ -4,9 +4,9 @@ use std::path::Path;
 use criterion::{Criterion, criterion_group, criterion_main};
 use helix_core::{Rope, Selection};
 use model::mode::Mode;
-use state::buffer::{BufferId, TextDoc};
+use state::buffer::TextDoc;
 use state::display::{self, Focus, Frame, Indent, text_format};
-use state::layout::{Scroll, TextView, Viewport};
+use state::layout::{Scroll, Viewport};
 use state::scroll;
 
 fn display(c: &mut Criterion) {
@@ -30,13 +30,10 @@ fn display(c: &mut Criterion) {
         cols: 120,
     };
     let middle = doc.text.line_to_char(doc.text.len_lines() / 2);
-    let view = TextView {
-        buffer: BufferId::default(),
-        selection: Selection::point(middle + 4),
-        scroll: Scroll {
-            anchor: middle,
-            viewport,
-        },
+    let selection = Selection::point(middle + 4);
+    let scroll = Scroll {
+        anchor: middle,
+        viewport,
     };
     let mut frame = Frame::default();
     c.bench_function("layout+highlight 60x120 of 20k-line rust", |b| {
@@ -44,7 +41,8 @@ fn display(c: &mut Criterion) {
             display::layout(
                 &mut frame,
                 black_box(&doc),
-                black_box(&view),
+                black_box(&selection),
+                scroll,
                 &loader,
                 Focus::Focused(Mode::Normal),
             );

@@ -29,6 +29,10 @@ pub enum Notice {
     UnsavedBuffers {
         count: usize,
     },
+    /// The buffer's file is still being read.
+    StillLoading {
+        path: PathBuf,
+    },
     NoBuffer,
     UnknownCommand {
         input: String,
@@ -118,6 +122,7 @@ impl std::fmt::Display for Notice {
             Notice::NotUtf8 { path } => write!(f, "{} is not valid UTF-8", path.display()),
             Notice::NotAFile { path } => write!(f, "{} is not a file", path.display()),
             Notice::UnsavedBuffers { count } => write!(f, "{count} buffer(s) have unsaved changes"),
+            Notice::StillLoading { path } => write!(f, "{} is still loading", path.display()),
             Notice::NoBuffer => f.write_str("no buffer open"),
             Notice::UnknownCommand { input } => write!(f, "unknown command: {input}"),
             Notice::MissingArgument { command } => write!(f, "{command}: missing argument"),

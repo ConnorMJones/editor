@@ -10,7 +10,7 @@ use state::picker::Items;
 use state::tree::RowKind;
 use state::{Focus, Overlay, Repo, Sidebar, State};
 
-use crate::harness::Harness;
+use crate::harness::{Harness, disk_of};
 
 fn commit_all(dir: &Path) {
     let repo = git2::Repository::init(dir).unwrap();
@@ -265,12 +265,7 @@ fn external_changes_reload_clean_and_flag_dirty() {
     assert!(!h.doc().is_modified());
     let disk = |h: &Harness, name: &str| {
         let path = canonical(dir.path(), name);
-        h.state
-            .buffers
-            .values()
-            .find(|b| b.path == path)
-            .unwrap()
-            .disk
+        disk_of(h.state.buffers.values().find(|b| b.path == path).unwrap())
     };
     assert_eq!(disk(&h, "clean.txt"), Disk::Synced);
     assert_eq!(disk(&h, "dirty.txt"), Disk::ChangedExternally);
@@ -291,7 +286,7 @@ fn own_writes_do_not_flag_changes() {
     h.keys(":o a.txt<ret>ix<esc>:w<ret>iy<esc>");
     h.changed(vec![canonical(dir.path(), "a.txt")]);
     let buffer = h.state.buffers.values().next().unwrap();
-    assert_eq!(buffer.disk, Disk::Synced);
+    assert_eq!(disk_of(buffer), Disk::Synced);
     assert_eq!(h.doc().text.to_string(), "xya");
 }
 
@@ -310,7 +305,7 @@ fn live_watcher_reloads_and_indexes() {
         let text = state
             .buffers
             .values()
-            .any(|b| matches!(&b.content, state::buffer::Content::Text(doc) if doc.text == "changed on disk\n"));
+            .any(|b| matches!(&b.content, state::buffer::Content::Text { doc, .. } if doc.text == "changed on disk\n"));
         indexed && text
     });
     assert!(reloaded);

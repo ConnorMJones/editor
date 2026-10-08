@@ -5,6 +5,7 @@ use model::git::GitStatus;
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
+use crate::buffer::Content;
 use crate::files::Files;
 use crate::job::{Job, ReloadPolicy};
 use crate::path::RelPath;
@@ -43,14 +44,15 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
     let mut relist: Vec<RelPath> = Vec::new();
     for path in paths {
         for (id, buffer) in state.buffers.iter() {
-            match buffer.path == path {
-                true => out.push(Effect::Job(Job::Reload {
+            // A loading buffer's pending read already sees the change.
+            match (&buffer.content, buffer.path == path) {
+                (Content::Text { mtime, .. }, true) => out.push(Effect::Job(Job::Reload {
                     buffer: id,
                     path: path.clone(),
-                    mtime: buffer.mtime,
+                    mtime: *mtime,
                     policy: ReloadPolicy::KeepEdits,
                 })),
-                false => {}
+                (Content::Text { .. } | Content::Loading { .. }, _) => {}
             }
         }
         match &state.git.repo {

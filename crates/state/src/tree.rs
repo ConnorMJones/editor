@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use slotmap::SlotMap;
+
+use crate::buffer::{Buffer, BufferId};
 use crate::path::RelPath;
 
 /// File explorer data; directories are listed lazily as they are expanded.
@@ -13,6 +16,7 @@ pub struct Tree {
     pub rows: Vec<Row>,
     pub cursor: usize,
     pub edit: TreeEdit,
+    pub unsaved: Unsaved,
 }
 
 pub struct Dir {
@@ -152,5 +156,45 @@ fn push_rows(dirs: &HashMap<RelPath, Dir>, dir: &RelPath, depth: u16, rows: &mut
                 push_rows(dirs, &path, depth + 1, rows);
             }
         }
+    }
+}
+
+/// Files with unsaved edits and every directory above them, for the tree's markers.
+#[derive(Default)]
+pub struct Unsaved {
+    /// Modified buffers as of the last sync.
+    pub buffers: Vec<(BufferId, PathBuf)>,
+    pub paths: HashSet<RelPath>,
+}
+
+/// Brings `unsaved` up to date; it only allocates when the set of modified buffers changed.
+pub fn sync_unsaved(unsaved: &mut Unsaved, root: &Path, buffers: &SlotMap<BufferId, Buffer>) {
+    let modified = buffers
+        .iter()
+        .filter(|(_, buffer)| buffer.content.is_modified());
+    let unchanged = modified.clone().count() == unsaved.buffers.len()
+        && modified.clone().all(|(id, buffer)| {
+            unsaved
+                .buffers
+                .iter()
+                .any(|(known, path)| *known == id && *path == buffer.path)
+        });
+    match unchanged {
+        true => return,
+        false => {}
+    }
+    unsaved.buffers.clear();
+    unsaved
+        .buffers
+        .extend(modified.map(|(id, buffer)| (id, buffer.path.clone())));
+    unsaved.paths.clear();
+    for (_, path) in &unsaved.buffers {
+        let Ok(file) = RelPath::new(root, path) else {
+            continue;
+        };
+        for (end, _) in file.0.match_indices('/') {
+            unsaved.paths.insert(RelPath(file.0[..end].to_owned()));
+        }
+        unsaved.paths.insert(file);
     }
 }

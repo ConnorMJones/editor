@@ -77,7 +77,8 @@ impl Root {
 
 pub struct State {
     pub root: Root,
-    pub languages: Loader,
+    /// Shared with jobs that parse off the UI thread.
+    pub languages: Arc<Loader>,
     pub keymap: Keymap,
     pub buffers: SlotMap<BufferId, Buffer>,
     pub layout: Layout,
@@ -90,6 +91,7 @@ pub struct State {
     /// Open buffers in tab-line order.
     pub tabs: Vec<BufferId>,
     pub sidebar: Sidebar,
+    pub sidebar_width: SidebarWidth,
     /// Kept while the sidebar is hidden so expansion survives toggling.
     pub tree: Tree,
     pub files: Files,
@@ -109,7 +111,7 @@ impl State {
         );
         Ok(State {
             root,
-            languages,
+            languages: Arc::new(languages),
             keymap: Keymap::helix()?,
             buffers: SlotMap::with_key(),
             layout: Layout::new(),
@@ -133,6 +135,7 @@ impl State {
             exit: Exit::Running,
             tabs: Vec::new(),
             sidebar: Sidebar::Hidden,
+            sidebar_width: SidebarWidth::DEFAULT,
             tree: Tree::default(),
             files: Files::Loading,
             git: Git {
@@ -185,6 +188,10 @@ pub enum Overlay {
 pub struct Prompt {
     pub kind: PromptKind,
     pub line: String,
+    /// Byte offset into `line`, on a char boundary.
+    pub cursor: usize,
+    pub history: prompt::History,
+    pub completion: prompt::Completion,
 }
 
 pub enum PromptKind {
@@ -199,6 +206,14 @@ pub enum PromptKind {
 }
 
 impl PromptKind {
+    /// Register keeping submitted lines, browsed with up and down.
+    pub fn history(&self) -> Register {
+        match self {
+            PromptKind::Command => Register::COMMAND,
+            PromptKind::Regex { register, .. } => *register,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             PromptKind::Command => ":",
@@ -267,6 +282,28 @@ pub enum Exit {
 pub enum Sidebar {
     Hidden,
     Files(Focus),
+}
+
+/// Sidebar width in logical pixels, kept within `MIN..=MAX`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SidebarWidth(f32);
+
+impl SidebarWidth {
+    pub const MIN: f32 = 120.0;
+    pub const MAX: f32 = 800.0;
+    pub const DEFAULT: SidebarWidth = SidebarWidth(280.0);
+
+    /// Clamps into range; a non-finite width falls back to the default.
+    pub fn new(width: f32) -> SidebarWidth {
+        match width.is_finite() {
+            true => SidebarWidth(width.clamp(Self::MIN, Self::MAX)),
+            false => Self::DEFAULT,
+        }
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
 }
 
 /// Which side of the window receives keys while the sidebar is shown.

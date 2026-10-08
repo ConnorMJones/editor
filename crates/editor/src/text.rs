@@ -17,10 +17,14 @@ use state::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
 use state::layout::{PaneId, View, Viewport};
-use state::scroll::{self, Click};
+use state::scroll::{self, Gesture, Press, Scrollbar, Unit};
 
-use crate::theme::Colors;
+use crate::theme::{Colors, Theme};
 use crate::workspace::Workspace;
+
+/// Right-edge strip for the scrollbar; a minimap would widen the strip and sit left of the bar.
+const SCROLLBAR_WIDTH: Pixels = px(8.);
+const MIN_THUMB: f32 = 16.;
 
 /// Draws the text view shown in `pane`.
 pub struct TextElement {
@@ -37,14 +41,24 @@ impl IntoElement for TextElement {
 }
 
 /// Buffers kept across frames per pane so drawing reuses its allocations.
+/// Index 0 is this frame and 1 the previous; rows unchanged since then reuse their shaped lines.
 #[derive(Default)]
 pub struct Cache {
-    pub frame: Frame,
-    pub lines: Vec<ShapedLine>,
-    pub numbers: Vec<(u16, ShapedLine)>,
+    pub frames: [Frame; 2],
+    pub lines: [Vec<Rc<ShapedLine>>; 2],
+    pub numbers: [Vec<Number>; 2],
     pub runs: Vec<TextRun>,
     pub label: String,
     pub pointer: Rc<Pointer>,
+}
+
+/// A shaped gutter label; `label`, `mark` and `digits` determine its text and colour.
+pub struct Number {
+    pub row: u16,
+    pub label: usize,
+    pub mark: LineMark,
+    pub digits: u16,
+    pub line: Rc<ShapedLine>,
 }
 
 #[derive(Default)]
@@ -54,11 +68,25 @@ pub struct Pointer {
     pub drag: Cell<Drag>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Drag {
     #[default]
     Idle,
-    Selecting,
+    Selecting(Gesture),
+    /// `grab` is the pointer's offset from the thumb's top.
+    Thumb {
+        grab: Pixels,
+    },
+}
+
+/// Scrollbar geometry of one frame; thumb drags map back to lines through it.
+pub struct Bar {
+    pub hitbox: Hitbox,
+    pub scrollbar: Scrollbar,
+    pub len_lines: usize,
+    /// Document lines on screen.
+    pub shown: usize,
+    pub page: isize,
 }
 
 pub struct Prepaint {
@@ -69,6 +97,7 @@ pub struct Prepaint {
     pub focus: Focus,
     pub handle: FocusHandle,
     pub preedit: Option<(Point<Pixels>, ShapedLine)>,
+    pub bar: Bar,
 }
 
 /// Cell under `position`, clamped to the text area's top-left.
@@ -76,6 +105,46 @@ fn cell_at(origin: Point<Pixels>, cell: Size<Pixels>, position: Point<Pixels>) -
     let row = ((position.y - origin.y) / cell.height).floor().max(0.0);
     let col = ((position.x - origin.x) / cell.width).floor().max(0.0);
     (row as u16, col as u16)
+}
+
+/// How a row reuses the previous frame's shaped lines, by index.
+enum Reuse {
+    Same(usize),
+    /// New colours or decorations over `Glyphs`.
+    Restyle(Glyphs),
+}
+
+enum Glyphs {
+    /// The text and fonts match; only colours differ.
+    Kept(usize),
+    Shape,
+}
+
+/// Byte lengths per font; runs that differ only in colour shape the same glyphs.
+fn fonts(runs: &[display::Run]) -> impl Iterator<Item = (usize, Modifiers)> + '_ {
+    let font = |run: &display::Run| run.style.modifiers & (Modifiers::BOLD | Modifiers::ITALIC);
+    runs.chunk_by(move |a, b| font(a) == font(b))
+        .map(move |chunk| (chunk.iter().map(|run| run.len).sum(), font(&chunk[0])))
+}
+
+pub fn text_run(theme: &Theme, run: &display::Run) -> TextRun {
+    let fg = run.style.fg.map_or(theme.text, |slot| theme.colors[slot]);
+    TextRun {
+        len: run.len,
+        font: theme.mono_font(run.style.modifiers).clone(),
+        color: fg,
+        background_color: None,
+        underline: run
+            .style
+            .modifiers
+            .contains(Modifiers::UNDERLINED)
+            .then(|| UnderlineStyle {
+                color: Some(fg),
+                thickness: px(1.),
+                wavy: false,
+            }),
+        strikethrough: None,
+    }
 }
 
 impl Element for TextElement {
@@ -120,7 +189,8 @@ impl Element for TextElement {
         let cell = workspace.theme.cell;
         let len_lines = match workspace.state.layout.panes.get(pane).map(|p| &p.view) {
             Some(View::Text(view)) => match &workspace.state.buffers[view.buffer].content {
-                Content::Text(doc) => doc.text.len_lines(),
+                Content::Text { doc, .. } => doc.text.len_lines(),
+                Content::Loading { .. } => 1,
             },
             Some(View::Empty) | None => 1,
         };
@@ -129,15 +199,23 @@ impl Element for TextElement {
             bounds.origin.x + cell.width * gutter.cols as f32,
             bounds.origin.y,
         );
+        let text_width = bounds.size.width - SCROLLBAR_WIDTH;
         let viewport = Viewport {
             rows: (bounds.size.height / cell.height).floor().max(0.0) as u16,
-            cols: ((bounds.size.width / cell.width).floor().max(0.0) as u16)
-                .saturating_sub(gutter.cols),
+            cols: ((text_width / cell.width).floor().max(0.0) as u16).saturating_sub(gutter.cols),
         };
         self.workspace.update(cx, |workspace, _| {
             scroll::set_viewport(&mut workspace.state, pane, viewport)
         });
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let hitbox = window.insert_hitbox(
+            Bounds::new(bounds.origin, size(text_width, bounds.size.height)),
+            HitboxBehavior::Normal,
+        );
+        let track = Bounds::new(
+            point(bounds.right() - SCROLLBAR_WIDTH, bounds.origin.y),
+            size(SCROLLBAR_WIDTH, bounds.size.height),
+        );
+        let bar_hitbox = window.insert_hitbox(track, HitboxBehavior::Normal);
         let id = id.expect("text element has an id");
         window.with_element_state(id, |cache: Option<Cache>, window| {
             let mut cache = cache.unwrap_or_default();
@@ -148,11 +226,24 @@ impl Element for TextElement {
                 true => Focus::Focused(state.input.mode),
                 false => Focus::Unfocused,
             };
-            let frame = &mut cache.frame;
+            cache.frames.swap(0, 1);
+            cache.lines.swap(0, 1);
+            cache.numbers.swap(0, 1);
+            let [frame, previous] = &mut cache.frames;
             match state.layout.panes.get(pane).map(|p| &p.view) {
                 Some(View::Text(view)) => match &state.buffers[view.buffer].content {
-                    Content::Text(doc) => {
-                        display::layout(frame, doc, view, &state.languages, focus)
+                    Content::Text { doc, .. } => display::layout(
+                        frame,
+                        doc,
+                        &view.selection,
+                        view.scroll,
+                        &state.languages,
+                        focus,
+                    ),
+                    Content::Loading { .. } => {
+                        frame.rows.clear();
+                        frame.selections.clear();
+                        frame.cursors.clear();
                     }
                 },
                 Some(View::Empty) | None => {
@@ -162,73 +253,136 @@ impl Element for TextElement {
                 }
             }
 
+            let span = tracing::trace_span!("shape rows").entered();
             let text_system = window.text_system();
-            cache.lines.clear();
+            let [lines, old_lines] = &mut cache.lines;
+            lines.clear();
+            // Rows usually shift together, so the match after the last one is tried first.
+            let mut hint = 0;
             for row in &frame.rows {
-                cache.runs.clear();
-                cache
-                    .runs
-                    .extend(frame.runs[row.runs.clone()].iter().map(|run| {
-                        let fg = run.style.fg.map_or(theme.text, |slot| theme.colors[slot]);
-                        TextRun {
-                            len: run.len,
-                            font: theme.mono_font(run.style.modifiers).clone(),
-                            color: fg,
-                            background_color: None,
-                            underline: run.style.modifiers.contains(Modifiers::UNDERLINED).then(
-                                || UnderlineStyle {
-                                    color: Some(fg),
-                                    thickness: px(1.),
-                                    wavy: false,
-                                },
-                            ),
-                            strikethrough: None,
+                let text = &frame.text[row.text.clone()];
+                let runs = &frame.runs[row.runs.clone()];
+                let same = |old: &display::Row| {
+                    &previous.text[old.text.clone()] == text
+                        && &previous.runs[old.runs.clone()] == runs
+                };
+                let same_glyphs = |old: &display::Row| {
+                    &previous.text[old.text.clone()] == text
+                        && fonts(&previous.runs[old.runs.clone()]).eq(fonts(runs))
+                };
+                let reuse = match previous.rows.get(hint) {
+                    Some(old) if same(old) => Reuse::Same(hint),
+                    Some(_) | None => match previous.rows.iter().position(same) {
+                        Some(at) => Reuse::Same(at),
+                        None => Reuse::Restyle(
+                            previous
+                                .rows
+                                .iter()
+                                .position(same_glyphs)
+                                .map_or(Glyphs::Shape, Glyphs::Kept),
+                        ),
+                    },
+                };
+                let line = match reuse {
+                    Reuse::Same(at) => {
+                        hint = at + 1;
+                        old_lines[at].clone()
+                    }
+                    Reuse::Restyle(glyphs) => {
+                        cache.runs.clear();
+                        cache
+                            .runs
+                            .extend(runs.iter().map(|run| text_run(theme, run)));
+                        match glyphs {
+                            Glyphs::Kept(at) => {
+                                hint = at + 1;
+                                Rc::new(old_lines[at].with_runs(&cache.runs))
+                            }
+                            Glyphs::Shape => Rc::new(text_system.shape_line(
+                                SharedString::from(text.to_owned()),
+                                theme.mono_size,
+                                &cache.runs,
+                                None,
+                            )),
                         }
-                    }));
-                let text = SharedString::from(frame.text[row.text.clone()].to_owned());
-                cache
-                    .lines
-                    .push(text_system.shape_line(text, theme.mono_size, &cache.runs, None));
+                    }
+                };
+                lines.push(line);
             }
 
             let numbering = match focus {
                 Focus::Focused(Mode::Normal | Mode::Select) => Numbering::Relative,
                 Focus::Focused(Mode::Insert) | Focus::Unfocused => Numbering::Absolute,
             };
-            cache.numbers.clear();
+            let [numbers, old_numbers] = &mut cache.numbers;
+            numbers.clear();
             for (index, row) in frame.rows.iter().enumerate() {
                 match row.kind {
                     RowKind::First => {
-                        cache.label.clear();
-                        let number = display::line_label(row.line, frame.primary_line, numbering);
-                        let _ = write!(
-                            cache.label,
-                            "{number:>width$}",
-                            width = gutter.digits as usize
-                        );
-                        let slot = match row.mark {
-                            LineMark::Cursor => roles::LINENR_SELECTED,
-                            LineMark::Plain => roles::LINENR,
+                        let label = display::line_label(row.line, frame.primary_line, numbering);
+                        let old = old_numbers.iter().find(|old| {
+                            old.label == label
+                                && old.mark == row.mark
+                                && old.digits == gutter.digits
+                        });
+                        let line = match old {
+                            Some(old) => old.line.clone(),
+                            None => {
+                                cache.label.clear();
+                                let _ = write!(
+                                    cache.label,
+                                    "{label:>width$}",
+                                    width = gutter.digits as usize
+                                );
+                                let slot = match row.mark {
+                                    LineMark::Cursor => roles::LINENR_SELECTED,
+                                    LineMark::Plain => roles::LINENR,
+                                };
+                                let run = TextRun {
+                                    len: cache.label.len(),
+                                    font: theme.mono[0].clone(),
+                                    color: theme.colors[slot],
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                };
+                                Rc::new(text_system.shape_line(
+                                    SharedString::from(cache.label.clone()),
+                                    theme.mono_size,
+                                    &[run],
+                                    None,
+                                ))
+                            }
                         };
-                        let run = TextRun {
-                            len: cache.label.len(),
-                            font: theme.mono[0].clone(),
-                            color: theme.colors[slot],
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        let line = text_system.shape_line(
-                            SharedString::from(cache.label.clone()),
-                            theme.mono_size,
-                            &[run],
-                            None,
-                        );
-                        cache.numbers.push((index as u16, line));
+                        numbers.push(Number {
+                            row: index as u16,
+                            label,
+                            mark: row.mark,
+                            digits: gutter.digits,
+                            line,
+                        });
                     }
                     RowKind::Wrapped => {}
                 }
             }
+            drop(span);
+
+            let visible = match (frame.rows.first(), frame.rows.last()) {
+                (Some(first), Some(last)) => first.line..last.line + 1,
+                (None, _) | (_, None) => 0..len_lines,
+            };
+            let bar = Bar {
+                hitbox: bar_hitbox,
+                scrollbar: scroll::scrollbar(
+                    len_lines,
+                    visible.clone(),
+                    f32::from(track.size.height),
+                    MIN_THUMB,
+                ),
+                len_lines,
+                shown: visible.len(),
+                page: viewport.rows as isize,
+            };
 
             let primary = frame.cursors.iter().find(|c| c.rank == Rank::Primary);
             let preedit = match (focus, workspace.preedit.is_empty(), primary) {
@@ -267,6 +421,7 @@ impl Element for TextElement {
                 focus,
                 handle: workspace.focus.clone(),
                 preedit,
+                bar,
             };
             (prepaint, cache)
         })
@@ -290,6 +445,7 @@ impl Element for TextElement {
             focus,
             handle,
             preedit,
+            bar,
         } = prepaint;
         let (origin, cell, gutter, focus) = (*text_origin, *cell, *gutter, *focus);
         let colors = Colors(self.workspace.read(cx).theme.colors.0);
@@ -299,10 +455,10 @@ impl Element for TextElement {
         let id = id.expect("text element has an id");
         let pointer = window.with_element_state(id, |cache: Option<Cache>, window| {
             let cache = cache.unwrap_or_default();
-            let frame = &cache.frame;
+            let frame = &cache.frames[0];
             let y = |row: u16| origin.y + cell.height * row as f32;
             let x = |col: u16| origin.x + cell.width * col as f32;
-            let text_width = bounds.right() - origin.x;
+            let text_width = hitbox.bounds.right() - origin.x;
 
             match focus {
                 Focus::Focused(_) => {
@@ -349,7 +505,7 @@ impl Element for TextElement {
                     CursorShape::Bar | CursorShape::Underline => {}
                 }
             }
-            for (index, line) in cache.lines.iter().enumerate() {
+            for (index, line) in cache.lines[0].iter().enumerate() {
                 let _ = line.paint(
                     point(origin.x, y(index as u16)),
                     cell.height,
@@ -375,9 +531,9 @@ impl Element for TextElement {
             }
 
             let number_x = bounds.origin.x + cell.width * Gutter::NUMBER_COL as f32;
-            for (row, line) in &cache.numbers {
-                let _ = line.paint(
-                    point(number_x, y(*row)),
+            for number in &cache.numbers[0] {
+                let _ = number.line.paint(
+                    point(number_x, y(number.row)),
                     cell.height,
                     TextAlign::Left,
                     None,
@@ -403,6 +559,25 @@ impl Element for TextElement {
                 }
             }
 
+            let track = bar.hitbox.bounds;
+            match bar.scrollbar {
+                Scrollbar::Hidden => {}
+                Scrollbar::Shown(thumb) => {
+                    window.paint_quad(fill(track, colors[roles::SCROLLBAR_TRACK]));
+                    let slot = match cache.pointer.drag.get() {
+                        Drag::Thumb { .. } => roles::SCROLLBAR_THUMB_ACTIVE,
+                        Drag::Idle | Drag::Selecting(_) => roles::SCROLLBAR_THUMB,
+                    };
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(track.origin.x, track.origin.y + px(thumb.top)),
+                            size(track.size.width, px(thumb.height)),
+                        ),
+                        colors[slot],
+                    ));
+                }
+            }
+
             match preedit.take() {
                 Some((at, line)) => {
                     let _ = line.paint(at, cell.height, TextAlign::Left, None, window, cx);
@@ -421,23 +596,64 @@ impl Element for TextElement {
             Focus::Unfocused => {}
         }
 
+        let track = bar.hitbox.bounds;
+        let (scrollbar, len_lines, shown, page) =
+            (bar.scrollbar, bar.len_lines, bar.shown, bar.page);
         window.on_mouse_event({
             let workspace = self.workspace.clone();
             let hitbox = hitbox.clone();
+            let bar_hitbox = bar.hitbox.clone();
             let pointer = pointer.clone();
             move |event: &MouseDownEvent, phase, window, cx| match (
                 phase,
                 event.button,
                 hitbox.is_hovered(window),
+                bar_hitbox.is_hovered(window),
+                scrollbar,
             ) {
-                (DispatchPhase::Bubble, MouseButton::Left, true) => {
+                (DispatchPhase::Bubble, MouseButton::Left, true, _, _) => {
                     let (row, col) = cell_at(origin, cell, event.position);
-                    pointer.drag.set(Drag::Selecting);
+                    let press = match event.modifiers.alt {
+                        true => Press::AddCursor,
+                        false => Press::Select(Unit::from_clicks(event.click_count)),
+                    };
                     workspace.update(cx, |workspace, cx| {
-                        scroll::click(&mut workspace.state, pane, row, col, Click::Place);
+                        let gesture = scroll::press(&mut workspace.state, pane, row, col, press);
+                        pointer
+                            .drag
+                            .set(gesture.map_or(Drag::Idle, Drag::Selecting));
                         window.focus(&workspace.focus, cx);
                         cx.notify();
                     });
+                }
+                (DispatchPhase::Bubble, MouseButton::Middle, true, _, _) => {
+                    let (row, col) = cell_at(origin, cell, event.position);
+                    workspace.update(cx, |workspace, cx| {
+                        scroll::middle_click(
+                            &mut workspace.state,
+                            pane,
+                            row,
+                            col,
+                            &mut workspace.effects,
+                        );
+                        workspace.flush(cx);
+                        window.focus(&workspace.focus, cx);
+                        cx.notify();
+                    });
+                }
+                (DispatchPhase::Bubble, MouseButton::Left, _, true, Scrollbar::Shown(thumb)) => {
+                    let offset = event.position.y - track.origin.y - px(thumb.top);
+                    match (offset < px(0.), offset > px(thumb.height)) {
+                        (false, false) => pointer.drag.set(Drag::Thumb { grab: offset }),
+                        (true, _) => workspace.update(cx, |workspace, cx| {
+                            scroll::wheel(&mut workspace.state, pane, -page);
+                            cx.notify();
+                        }),
+                        (false, true) => workspace.update(cx, |workspace, cx| {
+                            scroll::wheel(&mut workspace.state, pane, page);
+                            cx.notify();
+                        }),
+                    }
                 }
                 _ => {}
             }
@@ -449,11 +665,31 @@ impl Element for TextElement {
                 phase,
                 event.pressed_button,
                 pointer.drag.get(),
+                scrollbar,
             ) {
-                (DispatchPhase::Bubble, Some(MouseButton::Left), Drag::Selecting) => {
+                (DispatchPhase::Bubble, Some(MouseButton::Left), Drag::Selecting(gesture), _) => {
                     let (row, col) = cell_at(origin, cell, event.position);
                     workspace.update(cx, |workspace, cx| {
-                        scroll::click(&mut workspace.state, pane, row, col, Click::Extend);
+                        scroll::drag(&mut workspace.state, pane, row, col, gesture);
+                        cx.notify();
+                    });
+                }
+                (
+                    DispatchPhase::Bubble,
+                    Some(MouseButton::Left),
+                    Drag::Thumb { grab },
+                    Scrollbar::Shown(thumb),
+                ) => {
+                    let top = event.position.y - track.origin.y - grab;
+                    let line = scroll::line_at_thumb(
+                        len_lines,
+                        shown,
+                        thumb.height,
+                        f32::from(track.size.height),
+                        f32::from(top),
+                    );
+                    workspace.update(cx, |workspace, cx| {
+                        scroll::scroll_to_line(&mut workspace.state, pane, line);
                         cx.notify();
                     });
                 }
@@ -461,18 +697,34 @@ impl Element for TextElement {
             }
         });
         window.on_mouse_event({
+            let workspace = self.workspace.clone();
             let pointer = pointer.clone();
-            move |event: &MouseUpEvent, phase, _window, _cx| match (phase, event.button) {
-                (DispatchPhase::Bubble, MouseButton::Left) => pointer.drag.set(Drag::Idle),
+            move |event: &MouseUpEvent, phase, _window, cx| match (
+                phase,
+                event.button,
+                pointer.drag.get(),
+            ) {
+                (DispatchPhase::Bubble, MouseButton::Left, Drag::Selecting(_)) => {
+                    pointer.drag.set(Drag::Idle);
+                    workspace.update(cx, |workspace, cx| {
+                        scroll::release(&mut workspace.state, pane, &mut workspace.effects);
+                        workspace.flush(cx);
+                    })
+                }
+                (DispatchPhase::Bubble, MouseButton::Left, Drag::Thumb { .. }) => {
+                    pointer.drag.set(Drag::Idle);
+                    workspace.update(cx, |_, cx| cx.notify())
+                }
                 _ => {}
             }
         });
         window.on_mouse_event({
             let workspace = self.workspace.clone();
             let hitbox = hitbox.clone();
+            let bar_hitbox = bar.hitbox.clone();
             move |event: &ScrollWheelEvent, phase, window, cx| match (
                 phase,
-                hitbox.is_hovered(window),
+                hitbox.is_hovered(window) || bar_hitbox.is_hovered(window),
             ) {
                 (DispatchPhase::Bubble, true) => {
                     let delta = match event.delta {

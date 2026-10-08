@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,7 +10,7 @@ use model::window::{Axis, PickerKind, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 
-use crate::buffer::BufferId;
+use crate::buffer::{BufferId, TextDoc};
 use crate::path::RelPath;
 
 pub struct Picker {
@@ -20,6 +21,7 @@ pub struct Picker {
     pub cursor: usize,
     /// Scratch for ranking: (score, haystack length, index).
     pub scored: Vec<(Reverse<u32>, u32, u32)>,
+    pub previews: Previews,
 }
 
 pub enum Items {
@@ -100,6 +102,7 @@ impl Picker {
             matches,
             cursor: 0,
             scored: Vec::new(),
+            previews: Previews::default(),
         }
     }
 }
@@ -296,3 +299,65 @@ pub static PALETTE: &[(&str, Command)] = &[
     ("undo", Command::Undo),
     ("redo", Command::Redo),
 ];
+
+/// Previews kept per picker; loads beyond this evict the oldest.
+pub const PREVIEW_SLOTS: usize = 8;
+/// Larger files are not previewed, as in helix.
+pub const MAX_PREVIEW_BYTES: u64 = 10 * 1024 * 1024;
+
+pub struct Previews {
+    pub slots: [Option<(RelPath, Preview)>; PREVIEW_SLOTS],
+    /// Slot the next load replaces.
+    pub next: usize,
+}
+
+impl Default for Previews {
+    fn default() -> Previews {
+        Previews {
+            slots: [const { None }; PREVIEW_SLOTS],
+            next: 0,
+        }
+    }
+}
+
+impl Previews {
+    pub fn get(&self, path: &RelPath) -> Option<&Preview> {
+        self.slots.iter().find_map(|slot| match slot {
+            Some((cached, preview)) if cached == path => Some(preview),
+            Some(_) | None => None,
+        })
+    }
+}
+
+/// Contents of a file that is not open, read for the picker preview.
+pub enum Preview {
+    Loading,
+    Text(TextDoc),
+    Binary,
+    TooLarge,
+    Failed(io::Error),
+}
+
+/// What the picker's highlighted item previews.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewSource<'a> {
+    Buffer(BufferId),
+    File { path: &'a RelPath, line: usize },
+}
+
+pub fn preview_source(picker: &Picker) -> Option<PreviewSource<'_>> {
+    let &index = picker.matches.get(picker.cursor)?;
+    let index = index as usize;
+    match &picker.items {
+        Items::Files(files) => Some(PreviewSource::File {
+            path: &files[index],
+            line: 0,
+        }),
+        Items::Buffers(buffers) => Some(PreviewSource::Buffer(buffers[index].0)),
+        Items::Grep(grep) => grep.hits.get(index).map(|hit| PreviewSource::File {
+            path: &hit.path,
+            line: hit.line as usize,
+        }),
+        Items::Commands => None,
+    }
+}

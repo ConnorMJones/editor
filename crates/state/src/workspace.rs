@@ -9,12 +9,14 @@ use model::window::PickerKind;
 use slotmap::SlotMap;
 
 use crate::apply::apply;
-use crate::buffer::{Buffer, BufferId, Content};
+use crate::buffer::{Buffer, BufferId, Content, Position};
 use crate::files::Files;
 use crate::job::{FsOp, Job};
 use crate::layout::{LastPane, Layout, Pane, PaneId, Scroll, TextView, View};
 use crate::path::RelPath;
-use crate::picker::{self, Grep, Items, Narrowing, PALETTE, Picker, Search};
+use crate::picker::{
+    self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource, Search,
+};
 use crate::tree::{self, Dir, EntryKind, Fold, Listing, RowKind, TreeEdit};
 use crate::{Effect, Focus, Overlay, Sidebar, State};
 
@@ -32,8 +34,10 @@ pub fn show(
         View::Text(view) if view.buffer == buffer => return,
         View::Text(_) | View::Empty => {}
     }
+    // A loading buffer clamps its views once the text arrives.
     let len = match &target.content {
-        Content::Text(doc) => doc.text.len_chars(),
+        Content::Text { doc, .. } => doc.text.len_chars(),
+        Content::Loading { .. } => usize::MAX,
     };
     let view = match pane.parked.iter().position(|view| view.buffer == buffer) {
         // Parked selections are not mapped through edits made elsewhere, so clamp them.
@@ -334,29 +338,22 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                 }
                 Items::Grep(grep) => {
                     let hit = &grep.hits[index];
-                    apply(state, Command::Open(PathBuf::from(hit.path.as_str())), out);
+                    crate::apply::open(
+                        state,
+                        PathBuf::from(hit.path.as_str()),
+                        Some(Position {
+                            line: hit.line as usize,
+                            column: hit.column as usize,
+                        }),
+                        out,
+                    );
                     focus_editor(state);
-                    let State {
-                        layout, buffers, ..
-                    } = state;
-                    let Some(View::Text(view)) =
-                        layout.panes.get_mut(layout.focus).map(|p| &mut p.view)
-                    else {
-                        return;
-                    };
-                    let Some(Content::Text(doc)) = buffers.get(view.buffer).map(|b| &b.content)
-                    else {
-                        return;
-                    };
-                    let line = (hit.line as usize).min(doc.text.len_lines().saturating_sub(1));
-                    let start = doc.text.line_to_char(line);
-                    let end = doc.text.line_to_char((line + 1).min(doc.text.len_lines()));
-                    view.selection = Selection::point((start + hit.column as usize).min(end));
                 }
                 Items::Commands => apply(state, PALETTE[index].1.clone(), out),
             }
         }
     }
+    request_preview(state, out);
 }
 
 fn move_cursor(state: &mut State, cycle: Cycle) {
@@ -404,4 +401,98 @@ fn edit_query(state: &mut State, edit: impl FnOnce(&mut String), out: &mut Vec<E
             picker::filter(picker, &mut state.matcher, narrowing);
         }
     }
+}
+
+/// Starts loading the highlighted picker item's file unless it is open or cached.
+pub fn request_preview(state: &mut State, out: &mut Vec<Effect>) {
+    let Overlay::Picker(open) = &mut state.overlay else {
+        return;
+    };
+    let path = match picker::preview_source(open) {
+        Some(PreviewSource::File { path, .. }) => path.clone(),
+        Some(PreviewSource::Buffer(_)) | None => return,
+    };
+    let full = path.to_path(state.root.path());
+    let buffered = state.buffers.values().any(|buffer| buffer.path == full);
+    match (buffered, open.previews.get(&path)) {
+        (true, _) | (false, Some(_)) => {}
+        (false, None) => {
+            let slot = open.previews.next;
+            open.previews.slots[slot] = Some((path.clone(), Preview::Loading));
+            open.previews.next = (slot + 1) % PREVIEW_SLOTS;
+            out.push(Effect::Job(Job::Preview {
+                root: state.root.path().to_owned(),
+                path,
+                languages: state.languages.clone(),
+            }));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Close {
+    Allowed,
+    Refused,
+}
+
+/// Window close from `:q`, the title bar or the compositor; refused while buffers have
+/// unsaved edits, leaving the editor focused with a notice.
+pub fn request_close(state: &mut State) -> Close {
+    match state
+        .buffers
+        .values()
+        .filter(|b| b.content.is_modified())
+        .count()
+    {
+        0 => Close::Allowed,
+        count => {
+            state.notice = Some(Notice::UnsavedBuffers { count });
+            match state.overlay {
+                Overlay::Picker(_) => state.overlay = Overlay::None,
+                Overlay::None | Overlay::Prompt(_) => {}
+            }
+            focus_editor(state);
+            Close::Refused
+        }
+    }
+}
+
+/// Tab click: shows `buffer` in the focused pane.
+pub fn select_tab(state: &mut State, buffer: BufferId) {
+    let focus = state.layout.focus;
+    show(&mut state.layout, &state.buffers, focus, buffer);
+    focus_editor(state);
+}
+
+/// Mouse focus of a pane, including empty panes and statuslines.
+pub fn focus_pane(state: &mut State, pane: PaneId) {
+    match state.layout.panes.contains_key(pane) {
+        true => state.layout.focus = pane,
+        false => return,
+    }
+    focus_editor(state);
+}
+
+/// Tree click: selects row `index` and focuses the sidebar; a directory toggles and a file
+/// opens in the focused pane, moving focus to the editor.
+pub fn click_tree(state: &mut State, index: usize, out: &mut Vec<Effect>) {
+    match index < state.tree.rows.len() {
+        true => state.tree.cursor = index,
+        false => return,
+    }
+    state.tree.edit = TreeEdit::None;
+    state.sidebar = Sidebar::Files(Focus::Sidebar);
+    tree(state, TreeCommand::Open, out);
+}
+
+/// Picker click: opens match `index`.
+pub fn click_picker(state: &mut State, index: usize, out: &mut Vec<Effect>) {
+    let Overlay::Picker(open) = &mut state.overlay else {
+        return;
+    };
+    match index < open.matches.len() {
+        true => open.cursor = index,
+        false => return,
+    }
+    picker(state, PickerCommand::Submit, out);
 }

@@ -6,22 +6,31 @@ use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
 use helix_core::regex::bytes::Regex;
-use helix_core::{Rope, Selection};
+use helix_core::syntax::Loader;
+use helix_core::{Range, Rope, Selection};
 use model::command::{Command, Dirs};
 use model::notice::Notice;
 
-use crate::apply::map_views;
-use crate::buffer::{BufferId, Content, Disk};
+use crate::apply::{line_column, map_views};
+use crate::buffer::{BufferId, Content, Disk, TextDoc};
 use crate::files::{self, Files, Rescan, Walked};
 use crate::git::{self, GitSnapshot};
 use crate::layout::View;
 use crate::path::RelPath;
-use crate::picker::{self, Hit, Items, Search};
+use crate::picker::{self, Hit, Items, Preview, Search};
 use crate::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
-use crate::{Effect, Exit, Focus, Overlay, Refresh, Repo, Sidebar, State, request_git, watch};
+use crate::{
+    Effect, Exit, Focus, Overlay, Refresh, Repo, Sidebar, State, request_git, scroll, watch,
+};
 
 /// Blocking work run off the UI thread.
 pub enum Job {
+    /// Reads a new buffer's file and builds its document, including the first parse.
+    Open {
+        buffer: BufferId,
+        path: PathBuf,
+        languages: Arc<Loader>,
+    },
     Write {
         buffer: BufferId,
         path: PathBuf,
@@ -63,6 +72,11 @@ pub enum Job {
         generation: u64,
         current: Arc<AtomicU64>,
     },
+    Preview {
+        root: PathBuf,
+        path: RelPath,
+        languages: Arc<Loader>,
+    },
 }
 
 /// What a reload does to a buffer with unsaved edits.
@@ -82,6 +96,10 @@ pub enum FsOp {
 }
 
 pub enum JobResult {
+    Opened {
+        buffer: BufferId,
+        read: OpenRead,
+    },
     Written {
         buffer: BufferId,
         path: PathBuf,
@@ -111,6 +129,21 @@ pub enum JobResult {
         hits: Vec<Hit>,
         search: Search,
     },
+    Previewed {
+        path: RelPath,
+        preview: Preview,
+    },
+}
+
+pub enum OpenRead {
+    Text {
+        doc: TextDoc,
+        disk: Disk,
+        mtime: Option<SystemTime>,
+    },
+    NotUtf8,
+    NotAFile,
+    Failed(io::Error),
 }
 
 pub enum DiskRead {
@@ -126,6 +159,30 @@ pub enum DiskRead {
 
 pub fn run(job: Job) -> JobResult {
     match job {
+        Job::Open {
+            buffer,
+            path,
+            languages,
+        } => {
+            let read = match std::fs::read(&path) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => OpenRead::Text {
+                        doc: TextDoc::new(Rope::from(text), &path, &languages),
+                        disk: Disk::Synced,
+                        mtime: std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+                    },
+                    Err(_) => OpenRead::NotUtf8,
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => OpenRead::Text {
+                    doc: TextDoc::new(Rope::new(), &path, &languages),
+                    disk: Disk::New,
+                    mtime: None,
+                },
+                Err(error) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
+                Err(error) => OpenRead::Failed(error),
+            };
+            JobResult::Opened { buffer, read }
+        }
         Job::Write {
             buffer,
             path,
@@ -244,11 +301,111 @@ pub fn run(job: Job) -> JobResult {
                 search,
             }
         }
+        Job::Preview {
+            root,
+            path,
+            languages,
+        } => {
+            let full = path.to_path(&root);
+            let bytes = std::fs::metadata(&full).and_then(|meta| {
+                match meta.len() > picker::MAX_PREVIEW_BYTES {
+                    true => Ok(None),
+                    false => std::fs::read(&full).map(Some),
+                }
+            });
+            // Binary files are detected as ripgrep does, by a NUL near the start.
+            let preview = match bytes {
+                Err(error) => Preview::Failed(error),
+                Ok(None) => Preview::TooLarge,
+                Ok(Some(bytes)) => match bytes[..bytes.len().min(8192)].contains(&0) {
+                    true => Preview::Binary,
+                    false => match String::from_utf8(bytes) {
+                        Ok(text) => {
+                            Preview::Text(TextDoc::new(Rope::from(text), &full, &languages))
+                        }
+                        Err(_) => Preview::Binary,
+                    },
+                },
+            };
+            JobResult::Previewed { path, preview }
+        }
     }
 }
 
 pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
     match result {
+        JobResult::Opened { buffer, read } => {
+            let Some(entry) = state.buffers.get_mut(buffer) else {
+                return;
+            };
+            let jump = match &entry.content {
+                Content::Loading { jump } => *jump,
+                Content::Text { .. } => return,
+            };
+            let notice = match read {
+                OpenRead::Text { doc, disk, mtime } => {
+                    let len = doc.text.len_chars();
+                    let jump = jump.map(|jump| (jump.pane, line_column(&doc.text, jump.to)));
+                    entry.content = Content::Text { doc, disk, mtime };
+                    // Views restored from a session were placed before the length was known.
+                    for pane in state.layout.panes.values_mut() {
+                        let active = match &mut pane.view {
+                            View::Text(view) => Some(view),
+                            View::Empty => None,
+                        };
+                        for view in active.into_iter().chain(pane.parked.iter_mut()) {
+                            match view.buffer == buffer {
+                                true => {
+                                    view.selection = view.selection.clone().transform(|range| {
+                                        Range::new(range.anchor.min(len), range.head.min(len))
+                                    });
+                                    view.scroll.anchor = view.scroll.anchor.min(len);
+                                }
+                                false => {}
+                            }
+                        }
+                    }
+                    match jump {
+                        Some((pane, at)) => {
+                            match state.layout.panes.get_mut(pane).map(|p| &mut p.view) {
+                                Some(View::Text(view)) if view.buffer == buffer => {
+                                    view.selection = Selection::point(at);
+                                    scroll::follow_cursor(state, pane);
+                                }
+                                Some(View::Text(_) | View::Empty) | None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                    return;
+                }
+                OpenRead::NotUtf8 => Notice::NotUtf8 {
+                    path: entry.path.clone(),
+                },
+                OpenRead::NotAFile => Notice::NotAFile {
+                    path: entry.path.clone(),
+                },
+                OpenRead::Failed(error) => Notice::OpenFailed {
+                    path: entry.path.clone(),
+                    error,
+                },
+            };
+            state.notice = Some(notice);
+            crate::apply::remove_buffer(state, buffer);
+        }
+        JobResult::Previewed { path, preview } => match &mut state.overlay {
+            Overlay::Picker(picker) => {
+                let waiting = picker.previews.slots.iter_mut().find(|slot| match slot {
+                    Some((cached, Preview::Loading)) => *cached == path,
+                    Some(_) | None => false,
+                });
+                match waiting {
+                    Some(slot) => *slot = Some((path, preview)),
+                    None => {}
+                }
+            }
+            Overlay::None | Overlay::Prompt(_) => {}
+        },
         JobResult::Written {
             buffer,
             path,
@@ -256,12 +413,21 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             result: Ok(bytes),
             mtime,
         } => {
-            if let Some(entry) = state.buffers.get_mut(buffer) {
-                match &mut entry.content {
-                    Content::Text(doc) => doc.saved_revision = revision,
+            match state
+                .buffers
+                .get_mut(buffer)
+                .map(|entry| &mut entry.content)
+            {
+                Some(Content::Text {
+                    doc,
+                    disk,
+                    mtime: known,
+                }) => {
+                    doc.saved_revision = revision;
+                    *disk = Disk::Synced;
+                    *known = mtime;
                 }
-                entry.disk = Disk::Synced;
-                entry.mtime = mtime;
+                Some(Content::Loading { .. }) | None => {}
             }
             state.notice = Some(Notice::Written { path, bytes });
             request_git(state, out);
@@ -306,6 +472,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 Overlay::None | Overlay::Prompt(_) => {}
             }
             state.files = Files::Ready(files);
+            crate::workspace::request_preview(state, out);
         }
         JobResult::Listed { dir, result } => {
             let entries = match result {
@@ -393,7 +560,15 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             let Some(entry) = buffers.get_mut(buffer) else {
                 return;
             };
-            let Content::Text(doc) = &mut entry.content;
+            // The pending open reads the file itself.
+            let Content::Text {
+                doc,
+                disk,
+                mtime: known,
+            } = &mut entry.content
+            else {
+                return;
+            };
             let keep = match (doc.is_modified(), policy) {
                 (true, ReloadPolicy::KeepEdits) => true,
                 (false, _) | (true, ReloadPolicy::Discard) => false,
@@ -401,7 +576,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             match (read, keep) {
                 (DiskRead::Unchanged, _) => {}
                 (DiskRead::Missing, _) => {
-                    entry.disk = Disk::Deleted;
+                    *disk = Disk::Deleted;
                     *notice = Some(Notice::DeletedOnDisk {
                         path: entry.path.clone(),
                     });
@@ -419,7 +594,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     });
                 }
                 (DiskRead::Changed { .. }, true) => {
-                    entry.disk = Disk::ChangedExternally;
+                    *disk = Disk::ChangedExternally;
                     *notice = Some(Notice::ChangedOnDisk {
                         path: entry.path.clone(),
                     });
@@ -442,8 +617,8 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     map_views(layout, buffer, tx.changes(), doc.text.slice(..));
                     doc.commit(&selection.map(tx.changes()));
                     doc.saved_revision = doc.history.current_revision();
-                    entry.disk = Disk::Synced;
-                    entry.mtime = mtime;
+                    *disk = Disk::Synced;
+                    *known = mtime;
                 }
             }
         }
@@ -516,18 +691,21 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             generation,
             hits,
             search,
-        } => match &mut state.overlay {
-            Overlay::Picker(picker) => match &mut picker.items {
-                Items::Grep(grep) if grep.generation == generation => {
-                    grep.hits = hits;
-                    grep.search = search;
-                    picker.matches.clear();
-                    picker.matches.extend(0..grep.hits.len() as u32);
-                    picker.cursor = 0;
-                }
-                Items::Grep(_) | Items::Files(_) | Items::Buffers(_) | Items::Commands => {}
-            },
-            Overlay::None | Overlay::Prompt(_) => {}
-        },
+        } => {
+            match &mut state.overlay {
+                Overlay::Picker(picker) => match &mut picker.items {
+                    Items::Grep(grep) if grep.generation == generation => {
+                        grep.hits = hits;
+                        grep.search = search;
+                        picker.matches.clear();
+                        picker.matches.extend(0..grep.hits.len() as u32);
+                        picker.cursor = 0;
+                    }
+                    Items::Grep(_) | Items::Files(_) | Items::Buffers(_) | Items::Commands => {}
+                },
+                Overlay::None | Overlay::Prompt(_) => {}
+            }
+            crate::workspace::request_preview(state, out);
+        }
     }
 }

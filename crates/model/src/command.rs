@@ -100,7 +100,7 @@ pub enum Command {
     CommandMode,
     RegexPrompt(RegexOp),
     PromptInsert(char),
-    PromptBackspace,
+    Prompt(PromptCommand),
     PromptSubmit,
     PromptCancel,
 
@@ -283,6 +283,27 @@ pub enum Join {
     Plain,
     /// `A-J`: select the inserted spaces.
     SelectSpace,
+}
+
+/// Line editing in the `:` and regex prompts, as in helix's prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptCommand {
+    Move(PromptMotion),
+    /// Deletes from the cursor to where the motion would move it.
+    Delete(PromptMotion),
+    /// `Backward` steps to older history entries.
+    History(Direction),
+    Complete(Direction),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptMotion {
+    CharBackward,
+    CharForward,
+    WordBackward,
+    WordForward,
+    Start,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

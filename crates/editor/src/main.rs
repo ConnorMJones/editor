@@ -1,4 +1,6 @@
 mod input;
+mod preview;
+mod prompt;
 mod text;
 mod theme;
 mod workspace;
@@ -8,18 +10,20 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, anyhow};
 use clap::Parser as _;
 use gpui::{
-    App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowOptions, font, px, size,
+    App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowDecorations,
+    WindowOptions, font, px, size,
 };
 use model::color::Palette;
 use model::config::{Config, Restore};
 use model::notice::Notice;
+use state::workspace::{self as commands, Close};
 use state::{Root, State, session, watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::theme::Theme;
-use crate::workspace::{SessionFile, Workspace};
+use crate::workspace::{Drag, SessionFile, Workspace};
 
 fn main() -> anyhow::Result<()> {
     let registry = tracing_subscriber::registry()
@@ -94,6 +98,8 @@ fn main() -> anyhow::Result<()> {
                     ..Default::default()
                 }),
                 app_id: Some("editor".to_owned()),
+                window_decorations: Some(WindowDecorations::Client),
+                window_min_size: Some(size(px(360.), px(240.))),
                 ..Default::default()
             },
             |window, cx| {
@@ -108,7 +114,11 @@ fn main() -> anyhow::Result<()> {
                         preedit: String::new(),
                         watcher,
                         tree_scroll: UniformListScrollHandle::new(),
+                        picker_scroll: UniformListScrollHandle::new(),
                         session: session_file,
+                        drag: Drag::Idle,
+                        resize_edge: None,
+                        areas: Default::default(),
                     }
                 });
                 workspace.update(cx, |workspace, cx| {
@@ -146,11 +156,25 @@ fn main() -> anyhow::Result<()> {
                     })
                     .detach();
                 });
+                // The compositor's close and Alt+F4 get `:q` semantics.
                 window.on_window_should_close(cx, {
                     let workspace = workspace.downgrade();
-                    move |_, cx| {
-                        let _ = workspace.update(cx, |workspace, _| workspace.save_session());
-                        true
+                    move |window, cx| {
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                match commands::request_close(&mut workspace.state) {
+                                    Close::Allowed => {
+                                        workspace.save_session();
+                                        true
+                                    }
+                                    Close::Refused => {
+                                        window.focus(&workspace.focus, cx);
+                                        cx.notify();
+                                        false
+                                    }
+                                }
+                            })
+                            .unwrap_or(true)
                     }
                 });
                 workspace
