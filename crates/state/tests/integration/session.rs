@@ -1,0 +1,130 @@
+use std::fs;
+
+use state::layout::View;
+use state::session::{self, Session, SessionError};
+use state::{Focus, Sidebar};
+
+use crate::harness::Harness;
+
+fn round_trip(saved: &Session) -> Session {
+    toml::from_str(&toml::to_string(saved).expect("serializes")).expect("parses")
+}
+
+#[test]
+fn restores_tabs_splits_selections_and_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    fs::write(dir.path().join("src/b.rs"), "fn b() {}\n").unwrap();
+
+    let mut before = Harness::new(dir.path());
+    before.keys(":o src/b.rs<ret>:o a.txt<ret>jjl<C-w>v:o src/b.rs<ret>w");
+    before.keys("<space>e");
+    let root_row = before
+        .state
+        .tree
+        .rows
+        .iter()
+        .position(|row| row.path.as_str() == "src")
+        .expect("src listed");
+    before.state.tree.cursor = root_row;
+    before.keys("l<esc>");
+    let saved = session::snapshot(&before.state);
+    assert_eq!(saved.panes.len(), 2);
+    assert_eq!(saved.expanded, vec!["src".to_owned()]);
+
+    let mut after = Harness::new(dir.path());
+    after
+        .run(|state, out| session::restore(state, round_trip(&saved), out))
+        .expect("valid session");
+    assert_eq!(session::snapshot(&after.state), saved);
+    assert_eq!(after.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert!(
+        after
+            .state
+            .tree
+            .rows
+            .iter()
+            .any(|row| row.path.as_str() == "src/b.rs"),
+        "expanded directory is listed again"
+    );
+}
+
+#[test]
+fn deleted_files_leave_empty_panes() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("keep.txt"), "k").unwrap();
+    fs::write(dir.path().join("gone.txt"), "g").unwrap();
+
+    let mut before = Harness::new(dir.path());
+    before.keys(":o keep.txt<ret><C-w>v:o gone.txt<ret>");
+    let saved = session::snapshot(&before.state);
+    fs::remove_file(dir.path().join("gone.txt")).unwrap();
+
+    let mut after = Harness::new(dir.path());
+    after
+        .run(|state, out| session::restore(state, saved, out))
+        .expect("valid session");
+    assert_eq!(after.state.tabs.len(), 1);
+    let views: Vec<bool> = after
+        .state
+        .layout
+        .leaves()
+        .iter()
+        .map(|&pane| matches!(after.state.layout.panes[pane].view, View::Text(_)))
+        .collect();
+    assert_eq!(views, vec![true, false]);
+}
+
+#[test]
+fn selections_are_clamped_to_shorter_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "0123456789\n").unwrap();
+
+    let mut before = Harness::new(dir.path());
+    before.keys(":o a.txt<ret>gl");
+    let saved = session::snapshot(&before.state);
+    fs::write(dir.path().join("a.txt"), "01\n").unwrap();
+
+    let mut after = Harness::new(dir.path());
+    after
+        .run(|state, out| session::restore(state, saved, out))
+        .expect("valid session");
+    let View::Text(view) = &after.state.layout.panes[after.state.layout.focus].view else {
+        panic!("pane shows a.txt");
+    };
+    assert!(view.selection.primary().head <= 3);
+}
+
+#[test]
+fn invalid_layouts_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    let parse = |text: &str| toml::from_str::<Session>(text).expect("well-formed toml");
+    let header = "tabs = []\nfocus = 0\nsidebar = \"hidden\"\nexpanded = []\n";
+
+    let missing = parse(&format!(
+        "{header}panes = [{{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 3 }}\n"
+    ));
+    assert!(matches!(
+        h.run(|state, out| session::restore(state, missing, out)),
+        Err(SessionError::MissingPane(3))
+    ));
+
+    let unused = parse(&format!(
+        "{header}panes = [{{ kind = \"empty\" }}, {{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 0 }}\n"
+    ));
+    assert!(matches!(
+        h.run(|state, out| session::restore(state, unused, out)),
+        Err(SessionError::UnusedPane(1))
+    ));
+}
+
+#[test]
+fn load_distinguishes_missing_from_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.toml");
+    assert!(matches!(session::load(&path), Ok(None)));
+    fs::write(&path, "tabs = 3").unwrap();
+    assert!(matches!(session::load(&path), Err(SessionError::Parse(_))));
+}

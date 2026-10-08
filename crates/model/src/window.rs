@@ -1,5 +1,6 @@
 /// Direction panes are laid out along inside a split.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Axis {
     /// Side by side (helix `vsplit`).
     Row,

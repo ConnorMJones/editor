@@ -11,14 +11,15 @@ use gpui::{
     App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowOptions, font, px, size,
 };
 use model::color::Palette;
-use model::config::Config;
-use state::{Root, State, watch};
+use model::config::{Config, Restore};
+use model::notice::Notice;
+use state::{Root, State, session, watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::theme::Theme;
-use crate::workspace::Workspace;
+use crate::workspace::{SessionFile, Workspace};
 
 fn main() -> anyhow::Result<()> {
     let registry = tracing_subscriber::registry()
@@ -32,7 +33,7 @@ fn main() -> anyhow::Result<()> {
     let root = Root::open(&args.path)?;
     let config = match args.config {
         Some(path) => read_config(&path)?,
-        None => match default_config_path()? {
+        None => match xdg_dir("XDG_CONFIG_HOME", ".config")?.join("editor/config.toml") {
             path if path.exists() => read_config(&path)?,
             _ => Config::default(),
         },
@@ -41,6 +42,13 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("reading palette {:?}", config.theme.palette))?;
     let palette: Palette = serde_json::from_slice(&palette_bytes)
         .with_context(|| format!("parsing palette {:?}", config.theme.palette))?;
+    let session_file = match config.session.restore {
+        Restore::Off => SessionFile::Disabled,
+        Restore::Last => SessionFile::At(session::file(
+            &xdg_dir("XDG_STATE_HOME", ".local/state")?.join("editor/sessions"),
+            root.path(),
+        )),
+    };
     let title = root.path().display().to_string();
     let state = State::new(root, helix_core::config::default_lang_loader())?;
     let (changed_tx, changed_rx) = async_channel::unbounded::<Vec<PathBuf>>();
@@ -100,10 +108,33 @@ fn main() -> anyhow::Result<()> {
                         preedit: String::new(),
                         watcher,
                         tree_scroll: UniformListScrollHandle::new(),
+                        session: session_file,
                     }
                 });
                 workspace.update(cx, |workspace, cx| {
                     state::boot(&mut workspace.state, &mut workspace.effects);
+                    match &workspace.session {
+                        SessionFile::At(path) => {
+                            let restored = session::load(path).and_then(|saved| match saved {
+                                Some(saved) => session::restore(
+                                    &mut workspace.state,
+                                    saved,
+                                    &mut workspace.effects,
+                                ),
+                                None => Ok(()),
+                            });
+                            match restored {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    workspace.state.notice = Some(Notice::SessionInvalid {
+                                        path: path.clone(),
+                                        reason: error.to_string(),
+                                    })
+                                }
+                            }
+                        }
+                        SessionFile::Disabled => {}
+                    }
                     workspace.flush(cx);
                     cx.spawn(async move |this, cx| {
                         while let Ok(paths) = changed_rx.recv().await {
@@ -114,6 +145,13 @@ fn main() -> anyhow::Result<()> {
                         }
                     })
                     .detach();
+                });
+                window.on_window_should_close(cx, {
+                    let workspace = workspace.downgrade();
+                    move |_, cx| {
+                        let _ = workspace.update(cx, |workspace, _| workspace.save_session());
+                        true
+                    }
                 });
                 workspace
             },
@@ -134,14 +172,11 @@ fn read_config(path: &Path) -> anyhow::Result<Config> {
     toml::from_str(&text).with_context(|| format!("parsing config {path:?}"))
 }
 
-fn default_config_path() -> anyhow::Result<PathBuf> {
-    let base = match (
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-    ) {
-        (Some(xdg), _) => PathBuf::from(xdg),
-        (None, Some(home)) => PathBuf::from(home).join(".config"),
-        (None, None) => return Err(anyhow!("neither XDG_CONFIG_HOME nor HOME is set")),
-    };
-    Ok(base.join("editor").join("config.toml"))
+/// `$var`, else `$HOME/fallback`.
+fn xdg_dir(var: &str, fallback: &str) -> anyhow::Result<PathBuf> {
+    match (std::env::var_os(var), std::env::var_os("HOME")) {
+        (Some(dir), _) => Ok(PathBuf::from(dir)),
+        (None, Some(home)) => Ok(PathBuf::from(home).join(fallback)),
+        (None, None) => Err(anyhow!("neither {var} nor HOME is set")),
+    }
 }

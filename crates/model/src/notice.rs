@@ -86,6 +86,11 @@ pub enum Notice {
     InvalidPath {
         input: String,
     },
+    /// The saved session could not be read; the editor started fresh.
+    SessionInvalid {
+        path: PathBuf,
+        reason: String,
+    },
 }
 
 /// Mirrors `helix_core::surround::Error`.
@@ -165,6 +170,9 @@ impl std::fmt::Display for Notice {
             Notice::FileOpFailed { path, error } => write!(f, "{}: {error}", path.display()),
             Notice::DeleteNotConfirmed => f.write_str("delete cancelled"),
             Notice::InvalidPath { input } => write!(f, "invalid path: {input}"),
+            Notice::SessionInvalid { path, reason } => {
+                write!(f, "ignored session {}: {reason}", path.display())
+            }
         }
     }
 }

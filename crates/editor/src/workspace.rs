@@ -19,7 +19,7 @@ use state::path::RelPath;
 use state::picker::{Items, PALETTE, Search};
 use state::tree::{Fold, RowKind, TreeEdit};
 use state::watch::{self, Watcher};
-use state::{Effect, Focus, Overlay, Repo, Sidebar, State, input, register};
+use state::{Effect, Focus, Overlay, Repo, Sidebar, State, input, register, session};
 
 use crate::text::TextElement;
 use crate::theme::Theme;
@@ -33,6 +33,13 @@ pub struct Workspace {
     pub tree_scroll: UniformListScrollHandle,
     /// Uncommitted IME composition, drawn at the primary cursor.
     pub preedit: String,
+    pub session: SessionFile,
+}
+
+/// Where the session is saved on exit, per `session.restore`.
+pub enum SessionFile {
+    Disabled,
+    At(PathBuf),
 }
 
 const SIDEBAR_WIDTH: f32 = 280.0;
@@ -74,6 +81,16 @@ impl Workspace {
         cx.notify();
     }
 
+    pub fn save_session(&self) {
+        match &self.session {
+            SessionFile::At(path) => match session::save(path, &session::snapshot(&self.state)) {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(?path, %error, "saving session failed"),
+            },
+            SessionFile::Disabled => {}
+        }
+    }
+
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         // Clipboard reads apply synchronously and may queue more effects.
         while !self.effects.is_empty() {
@@ -87,7 +104,10 @@ impl Workspace {
                         })
                         .detach();
                     }
-                    Effect::Quit => cx.quit(),
+                    Effect::Quit => {
+                        self.save_session();
+                        cx.quit()
+                    }
                     Effect::Watch(dirs) => watch::watch(&mut self.watcher, &dirs),
                     Effect::WriteClipboard { clipboard, text } => {
                         let item = ClipboardItem::new_string(text);

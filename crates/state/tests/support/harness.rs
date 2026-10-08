@@ -47,6 +47,13 @@ impl Harness {
         harness
     }
 
+    /// Runs a state operation that may queue effects, then drains them.
+    pub fn run<R>(&mut self, f: impl FnOnce(&mut State, &mut Vec<Effect>) -> R) -> R {
+        let result = f(&mut self.state, &mut self.effects);
+        self.drain();
+        result
+    }
+
     /// Boots like the host does: index, root listing and git status run to completion.
     pub fn new(root: &Path) -> Harness {
         Harness::boot(root, None)

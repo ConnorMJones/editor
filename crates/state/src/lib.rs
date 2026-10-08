@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod register;
 pub mod scroll;
 pub mod select;
+pub mod session;
 pub mod tree;
 pub mod watch;
 pub mod workspace;

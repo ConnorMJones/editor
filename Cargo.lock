@@ -5945,9 +5945,11 @@ dependencies = [
  "notify-debouncer-mini",
  "nucleo",
  "ropey",
+ "serde",
  "slotmap",
  "tempfile",
  "thiserror 2.0.21",
+ "toml",
  "tracing",
 ]
 

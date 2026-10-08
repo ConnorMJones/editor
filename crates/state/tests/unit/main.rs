@@ -11,6 +11,7 @@ mod picker;
 mod prompt;
 mod scroll;
 mod selection;
+mod session;
 mod tree;
 mod vcs;
 mod view;

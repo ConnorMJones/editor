@@ -16,11 +16,13 @@ helix-core.workspace = true
 helix-stdx.workspace = true
 ignore.workspace = true
 model.workspace = true
+serde.workspace = true
 notify-debouncer-mini.workspace = true
 nucleo.workspace = true
 ropey.workspace = true
 slotmap.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
