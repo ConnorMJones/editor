@@ -251,12 +251,10 @@ fn pane_text<'a>(
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
 ) -> Option<(&'a mut TextView, &'a TextDoc)> {
-    match layout.panes.get_mut(pane).map(|pane| &mut pane.view) {
-        Some(View::Text(view)) => match buffers.get(view.buffer).map(|b| &b.content) {
-            Some(Content::Text { doc, .. }) => Some((view, doc)),
-            Some(Content::Loading { .. }) | None => None,
-        },
-        Some(View::Empty) | None => None,
+    let View::Text(view) = layout.panes.get_mut(pane)?.active_mut()?;
+    match buffers.get(view.buffer()).map(|b| &b.content) {
+        Some(Content::Text { doc, .. }) => Some((view, doc)),
+        Some(Content::Loading { .. }) | None => None,
     }
 }
 

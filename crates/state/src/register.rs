@@ -6,7 +6,7 @@ use model::notice::Notice;
 use model::register::{Clipboard, Register};
 
 use crate::apply::{exit_select_mode, focused};
-use crate::layout::{PaneId, View};
+use crate::layout::{Pane, PaneId};
 use crate::{Effect, State, edit};
 
 /// What to do with clipboard contents once the host has read them.
@@ -119,13 +119,13 @@ pub fn read(state: &mut State, register: Register) -> Values {
             })
         }
         Register::DocumentPath => {
-            let path = match state.layout.panes.get(state.layout.focus).map(|p| &p.view) {
-                Some(View::Text(view)) => state.buffers.get(view.buffer).map(|buffer| {
+            let path = (state.layout.panes.get(state.layout.focus))
+                .and_then(Pane::active)
+                .and_then(|view| state.buffers.get(view.buffer()))
+                .map(|buffer| {
                     let path = buffer.path.strip_prefix(state.root.path());
                     path.unwrap_or(&buffer.path).display().to_string()
-                }),
-                Some(View::Empty) | None => None,
-            };
+                });
             Values::Ready(path.into_iter().collect())
         }
         Register::Clipboard(clipboard) => Values::Clipboard(clipboard),

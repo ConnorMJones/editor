@@ -4,12 +4,12 @@ use std::path::Path;
 use model::command::{Command, PickerCommand};
 use model::notice::Notice;
 use model::window::PickerKind;
-use state::apply::{self, Force};
+use state::apply::Force;
 use state::job::Job;
 use state::path::RelPath;
 use state::picker::{PREVIEW_SLOTS, Preview, Previews};
 use state::tree::{self, Fold, RowKind};
-use state::workspace;
+use state::workspace::{self, Click};
 use state::{Effect, Focus, Overlay, Sidebar};
 
 use crate::harness::Harness;
@@ -37,21 +37,21 @@ fn tree_clicks_toggle_directories_and_open_files() {
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 
     let src = row(&h, "src");
-    h.run(|state, out| workspace::click_tree(state, src, out));
+    h.run(|state, out| workspace::click_tree(state, src, Click::Single, out));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Sidebar));
     assert_eq!(h.state.tree.cursor, src);
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Expanded));
 
     let lib = row(&h, "src/lib.rs");
-    h.run(|state, out| workspace::click_tree(state, lib, out));
+    h.run(|state, out| workspace::click_tree(state, lib, Click::Single, out));
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "src/lib.rs")));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 
-    h.run(|state, out| workspace::click_tree(state, src, out));
+    h.run(|state, out| workspace::click_tree(state, src, Click::Single, out));
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Collapsed));
     // Rows past the end are ignored.
     let rows = h.state.tree.rows.len();
-    h.run(|state, out| workspace::click_tree(state, rows, out));
+    h.run(|state, out| workspace::click_tree(state, rows, Click::Single, out));
     assert_eq!(h.state.tree.cursor, src);
 }
 
@@ -82,23 +82,25 @@ fn tab_clicks_show_and_close_through_the_close_guard() {
     fs::write(dir.path().join("b.txt"), "b\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>:o b.txt<ret><space>e");
-    let (a, b) = (h.state.tabs[0], h.state.tabs[1]);
+    let pane = h.state.layout.focus;
+    assert_eq!(h.focused_tabs(), ["a.txt", "b.txt"]);
 
-    workspace::select_tab(&mut h.state, a);
+    workspace::click_tab(&mut h.state, pane, 0, Click::Single);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 
     h.keys("ix<esc>");
-    apply::close_buffer(&mut h.state, a, Force::No);
+    workspace::close_tab(&mut h.state, pane, 0, Force::No);
     assert!(matches!(
         h.state.notice,
         Some(Notice::UnsavedBuffers { count: 1 })
     ));
-    assert_eq!(h.state.tabs, [a, b]);
+    assert_eq!(h.focused_tabs(), ["a.txt", "b.txt"]);
 
-    // Closing a tab that is not focused leaves the focused pane alone.
-    apply::close_buffer(&mut h.state, b, Force::No);
-    assert_eq!(h.state.tabs, [a]);
+    // Closing a tab that is not active leaves the active one alone.
+    workspace::close_tab(&mut h.state, pane, 1, Force::No);
+    assert_eq!(h.focused_tabs(), ["a.txt"]);
+    assert_eq!(h.state.buffers.len(), 1);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
 }
 
@@ -215,6 +217,6 @@ fn unsaved_markers_cover_ancestors_and_clear_on_save() {
     h.keys(":w<ret>");
     sync(&mut h);
     assert!(h.state.tree.unsaved.paths.is_empty());
-    h.run(|state, out| apply::apply(state, Command::Quit, out));
+    h.run(|state, out| state::apply::apply(state, Command::Quit, out));
     assert!(h.quit);
 }

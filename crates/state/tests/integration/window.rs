@@ -82,7 +82,7 @@ fn sessions_without_weights_or_width_still_load() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
     let saved: Session = toml::from_str(
-        "tabs = []\nfocus = 0\nsidebar = \"shown\"\nexpanded = []\n\
+        "focus = 0\nsidebar = \"shown\"\nexpanded = []\n\
          panes = [{ kind = \"empty\" }, { kind = \"empty\" }]\n\
          [layout]\nkind = \"split\"\naxis = \"row\"\n\
          children = [{ kind = \"pane\", pane = 0 }, { kind = \"pane\", pane = 1 }]\n",
@@ -105,7 +105,7 @@ fn non_positive_weights_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
     let saved: Session = toml::from_str(
-        "tabs = []\nfocus = 0\nsidebar = \"hidden\"\nexpanded = []\n\
+        "focus = 0\nsidebar = \"hidden\"\nexpanded = []\n\
          panes = [{ kind = \"empty\" }, { kind = \"empty\" }]\n\
          [layout]\nkind = \"split\"\naxis = \"column\"\n\
          children = [{ kind = \"pane\", pane = 0, flex = 0.0 }, { kind = \"pane\", pane = 1 }]\n",

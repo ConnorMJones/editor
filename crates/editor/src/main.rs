@@ -1,6 +1,7 @@
 mod input;
 mod preview;
 mod prompt;
+mod tabs;
 mod text;
 mod theme;
 mod workspace;
@@ -54,7 +55,7 @@ fn main() -> anyhow::Result<()> {
         )),
     };
     let title = root.path().display().to_string();
-    let state = State::new(root, helix_core::config::default_lang_loader())?;
+    let state = State::new(root, helix_core::config::default_lang_loader(), config.tabs)?;
     let (changed_tx, changed_rx) = async_channel::unbounded::<Vec<PathBuf>>();
     let watcher = watch::start(move |paths| {
         // A closed channel means the window is gone; nothing left to notify.
@@ -109,6 +110,7 @@ fn main() -> anyhow::Result<()> {
                     Workspace {
                         state,
                         theme,
+                        title_bar: config.window.title_bar,
                         effects: Vec::new(),
                         focus,
                         preedit: String::new(),
@@ -119,6 +121,8 @@ fn main() -> anyhow::Result<()> {
                         drag: Drag::Idle,
                         resize_edge: None,
                         areas: Default::default(),
+                        tab_scroll: Default::default(),
+                        shown_tab: None,
                     }
                 });
                 workspace.update(cx, |workspace, cx| {
@@ -147,7 +151,13 @@ fn main() -> anyhow::Result<()> {
                     }
                     workspace.flush(cx);
                     cx.spawn(async move |this, cx| {
-                        while let Ok(paths) = changed_rx.recv().await {
+                        while let Ok(mut paths) = changed_rx.recv().await {
+                            cx.background_executor().timer(watch::DEBOUNCE).await;
+                            while let Ok(more) = changed_rx.try_recv() {
+                                paths.extend(more);
+                            }
+                            paths.sort_unstable();
+                            paths.dedup();
                             match this.update(cx, |workspace, cx| workspace.on_paths(paths, cx)) {
                                 Ok(()) => {}
                                 Err(_) => break,

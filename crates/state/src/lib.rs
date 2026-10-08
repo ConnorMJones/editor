@@ -29,6 +29,7 @@ use std::sync::atomic::AtomicU64;
 use helix_core::Selection;
 use helix_core::syntax::Loader;
 use model::command::{Command, Pending, RegexOp};
+use model::config::TabsConfig;
 use model::key::{Key, KeySeq};
 use model::mode::Mode;
 use model::notice::Notice;
@@ -88,8 +89,7 @@ pub struct State {
     pub notice: Option<Notice>,
     pub exit: Exit,
 
-    /// Open buffers in tab-line order.
-    pub tabs: Vec<BufferId>,
+    pub tab_config: TabsConfig,
     pub sidebar: Sidebar,
     pub sidebar_width: SidebarWidth,
     /// Kept while the sidebar is hidden so expansion survives toggling.
@@ -102,7 +102,11 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(root: Root, languages: Loader) -> Result<State, KeymapError> {
+    pub fn new(
+        root: Root,
+        languages: Loader,
+        tab_config: TabsConfig,
+    ) -> Result<State, KeymapError> {
         languages.set_scopes(
             model::theme::SCOPES
                 .iter()
@@ -133,7 +137,7 @@ impl State {
             registers: Registers::default(),
             notice: None,
             exit: Exit::Running,
-            tabs: Vec::new(),
+            tab_config,
             sidebar: Sidebar::Hidden,
             sidebar_width: SidebarWidth::DEFAULT,
             tree: Tree::default(),

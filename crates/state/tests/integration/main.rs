@@ -5,5 +5,6 @@ mod harness;
 mod loading;
 mod mouse;
 mod session;
+mod tabs;
 mod window;
 mod workspace;

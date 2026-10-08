@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use model::config::TabsConfig;
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
-use state::buffer::{Buffer, Content, Disk, TextDoc};
-use state::layout::View;
+use state::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
+use state::layout::{PaneId, TextView, View};
 use state::watch::{self, Watcher};
 use state::{Effect, Root, State, input, job, register};
 
@@ -32,8 +33,12 @@ fn slot(clipboard: Clipboard) -> usize {
 impl Harness {
     fn boot(root: &Path, watcher: Option<(Watcher, mpsc::Receiver<Vec<PathBuf>>)>) -> Harness {
         let root = Root::open(root).expect("temp dir is a directory");
-        let state =
-            State::new(root, helix_core::config::default_lang_loader()).expect("keymap builds");
+        let state = State::new(
+            root,
+            helix_core::config::default_lang_loader(),
+            TabsConfig::default(),
+        )
+        .expect("keymap builds");
         let mut harness = Harness {
             state,
             quit: false,
@@ -76,10 +81,7 @@ impl Harness {
         std::fs::write(dir.path().join(name), text).expect("write fixture");
         let mut harness = Harness::new(dir.path());
         harness.keys(&format!(":o {name}<ret>"));
-        match &mut harness.state.layout.panes[harness.state.layout.focus].view {
-            View::Text(view) => view.selection = selection,
-            View::Empty => panic!("fixture did not open"),
-        }
+        harness.view_mut().selection = selection;
         harness._dir = Some(dir);
         harness
     }
@@ -124,6 +126,14 @@ impl Harness {
         done(&self.state)
     }
 
+    /// True when any watcher batch arrives within half a second.
+    pub fn events_arrive(&mut self) -> bool {
+        match &self.watcher {
+            Some((_, rx)) => rx.recv_timeout(Duration::from_millis(500)).is_ok(),
+            None => panic!("harness has no watcher"),
+        }
+    }
+
     /// Runs queued effects synchronously, as the host would.
     fn drain(&mut self) {
         while let Some(effect) = self.effects.pop() {
@@ -148,29 +158,73 @@ impl Harness {
         }
     }
 
+    /// Active view of the focused pane.
+    pub fn view(&self) -> &TextView {
+        match self.state.layout.panes[self.state.layout.focus].active() {
+            Some(View::Text(view)) => view,
+            None => panic!("focused pane has no tab"),
+        }
+    }
+
+    pub fn view_mut(&mut self) -> &mut TextView {
+        let focus = self.state.layout.focus;
+        match self.state.layout.panes[focus].active_mut() {
+            Some(View::Text(view)) => view,
+            None => panic!("focused pane has no tab"),
+        }
+    }
+
     pub fn doc(&self) -> &TextDoc {
-        match &self.state.layout.panes[self.state.layout.focus].view {
-            View::Text(view) => match &self.state.buffers[view.buffer].content {
-                Content::Text { doc, .. } => doc,
-                Content::Loading { .. } => panic!("focused buffer is still loading"),
-            },
-            View::Empty => panic!("focused pane has no buffer"),
+        match &self.state.buffers[self.view().buffer()].content {
+            Content::Text { doc, .. } => doc,
+            Content::Loading { .. } => panic!("focused buffer is still loading"),
         }
     }
 
     pub fn focused_path(&self) -> Option<PathBuf> {
-        match &self.state.layout.panes[self.state.layout.focus].view {
-            View::Text(view) => Some(self.state.buffers[view.buffer].path.clone()),
-            View::Empty => None,
-        }
+        let pane = &self.state.layout.panes[self.state.layout.focus];
+        pane.active()
+            .map(|view| self.state.buffers[view.buffer()].path.clone())
+    }
+
+    /// File names of `pane`'s tabs in bar order, with the preview marked `*`.
+    pub fn tabs(&self, pane: PaneId) -> Vec<String> {
+        let target = &self.state.layout.panes[pane];
+        let preview = target.tabs.as_ref().and_then(|tabs| tabs.preview());
+        target
+            .items()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let path = &self.state.buffers[item.view.buffer()].path;
+                let name = path.file_name().unwrap().to_string_lossy();
+                match preview == Some(index) {
+                    true => format!("{name}*"),
+                    false => name.into_owned(),
+                }
+            })
+            .collect()
+    }
+
+    /// Tabs of the focused pane; see `tabs`.
+    pub fn focused_tabs(&self) -> Vec<String> {
+        self.tabs(self.state.layout.focus)
+    }
+
+    /// The open buffer at `path` relative to the root.
+    pub fn buffer(&self, name: &str) -> BufferId {
+        let path = self.state.root.path().join(name);
+        self.state
+            .buffers
+            .iter()
+            .find(|(_, buffer)| buffer.path == path)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("{name} is not open"))
     }
 
     /// Text and selection in helix test notation.
     pub fn plain(&self) -> String {
-        match &self.state.layout.panes[self.state.layout.focus].view {
-            View::Text(view) => helix_core::test::plain(self.doc().text.clone(), &view.selection),
-            View::Empty => panic!("focused pane has no buffer"),
-        }
+        helix_core::test::plain(self.doc().text.clone(), &self.view().selection)
     }
 }
 

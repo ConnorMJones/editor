@@ -68,3 +68,19 @@ fn select_mode_shares_normal_bindings() {
         Resolved::Command(Command::DeleteWordBackward)
     ));
 }
+
+#[test]
+fn keymap_reference_is_current() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymap.md");
+    let generated = state::keymap::reference();
+    match std::env::var_os("UPDATE_DOCS") {
+        Some(_) => std::fs::write(&path, &generated).expect("write docs/keymap.md"),
+        None => {
+            let saved = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                saved == generated,
+                "docs/keymap.md is stale; run UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference"
+            );
+        }
+    }
+}

@@ -105,7 +105,7 @@ fn click_maps_cells_to_chars() {
 
 mod mouse {
     use helix_core::{Range, Rope};
-    use state::layout::{View, Viewport};
+    use state::layout::Viewport;
     use state::scroll::{self, Gesture, Press, Unit};
 
     use crate::harness::Harness;
@@ -203,16 +203,12 @@ mod mouse {
         let mut h = harness(&format!("#[0|]#{}", &text[1..]));
         let focus = h.state.layout.focus;
         h.run(|state, _| scroll::scroll_to_line(state, focus, 50));
-        let (line, top) = match &h.state.layout.panes[focus].view {
-            View::Text(view) => {
-                let text = h.doc().text.slice(..);
-                (
-                    text.char_to_line(view.selection.primary().cursor(text)),
-                    text.char_to_line(view.scroll.anchor),
-                )
-            }
-            View::Empty => panic!("no view"),
-        };
+        let view = h.view();
+        let text = h.doc().text.slice(..);
+        let (line, top) = (
+            text.char_to_line(view.selection.primary().cursor(text)),
+            text.char_to_line(view.scroll.anchor),
+        );
         // A 10-row view narrows the scrolloff band to 4 rows.
         assert_eq!((line, top), (54, 50));
     }

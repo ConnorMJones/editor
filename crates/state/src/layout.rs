@@ -1,4 +1,7 @@
+use std::cmp::Ordering;
+
 use helix_core::{Selection, SmallVec};
+use model::config::OpenAs;
 use model::window::{Axis, Side};
 use slotmap::{SlotMap, new_key_type};
 
@@ -13,6 +16,8 @@ pub struct Layout {
     pub panes: SlotMap<PaneId, Pane>,
     pub root: Node,
     pub focus: PaneId,
+    /// Last stamp handed to an activated tab.
+    pub clock: Tick,
 }
 
 /// A split always has at least two children, none of which is a split along the same axis.
@@ -87,14 +92,33 @@ pub struct LastPane;
 impl Layout {
     pub fn new() -> Layout {
         let mut panes = SlotMap::with_key();
-        let focus = panes.insert(Pane {
-            view: View::Empty,
-            parked: Vec::new(),
-        });
+        let focus = panes.insert(Pane::EMPTY);
         Layout {
             panes,
             root: Node::Pane(focus),
             focus,
+            clock: Tick::default(),
+        }
+    }
+
+    pub fn tick(&mut self) -> Tick {
+        self.clock.0 += 1;
+        self.clock
+    }
+
+    /// Makes every preview tab of `buffer` permanent.
+    pub fn keep(&mut self, buffer: BufferId) {
+        for pane in self.panes.values_mut() {
+            match &mut pane.tabs {
+                Some(tabs)
+                    if tabs
+                        .preview
+                        .is_some_and(|preview| tabs.items[preview].view.buffer() == buffer) =>
+                {
+                    tabs.keep()
+                }
+                Some(_) | None => {}
+            }
         }
     }
 
@@ -362,22 +386,254 @@ fn collect_rects(node: &Node, area: Rect, out: &mut Vec<(PaneId, Rect)>) {
     }
 }
 
+/// A pane's tabs; `None` is an empty pane.
 pub struct Pane {
-    pub view: View,
-    /// Views of buffers this pane showed before, restored when switching back.
-    pub parked: Vec<TextView>,
+    pub tabs: Option<Tabs>,
 }
 
+impl Pane {
+    pub const EMPTY: Pane = Pane { tabs: None };
+
+    pub fn active(&self) -> Option<&View> {
+        self.tabs.as_ref().map(|tabs| &tabs.items[tabs.active].view)
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut View> {
+        self.tabs
+            .as_mut()
+            .map(|tabs| &mut tabs.items[tabs.active].view)
+    }
+
+    pub fn items(&self) -> &[Item] {
+        match &self.tabs {
+            Some(tabs) => &tabs.items,
+            None => &[],
+        }
+    }
+
+    pub fn items_mut(&mut self) -> &mut [Item] {
+        match &mut self.tabs {
+            Some(tabs) => &mut tabs.items,
+            None => &mut [],
+        }
+    }
+}
+
+/// A non-empty tab list in bar order, private so its indices stay valid and buffers distinct.
+pub struct Tabs {
+    items: Vec<Item>,
+    active: usize,
+    preview: Option<usize>,
+}
+
+pub struct Item {
+    pub view: View,
+    /// Last activation; closing the active tab activates the most recent other one.
+    pub used: Tick,
+}
+
+/// What a tab shows.
+#[derive(Clone)]
 pub enum View {
-    Empty,
     Text(TextView),
+}
+
+impl View {
+    /// Identifies the view within its pane.
+    pub fn buffer(&self) -> BufferId {
+        let View::Text(view) = self;
+        view.buffer
+    }
 }
 
 #[derive(Clone)]
 pub struct TextView {
-    pub buffer: BufferId,
+    /// Fixed for the view's lifetime so a pane's items keep distinct buffers.
+    buffer: BufferId,
     pub selection: Selection,
     pub scroll: Scroll,
+}
+
+impl TextView {
+    pub(crate) fn new(buffer: BufferId) -> TextView {
+        TextView {
+            buffer,
+            selection: Selection::point(0),
+            scroll: Scroll::default(),
+        }
+    }
+
+    pub fn buffer(&self) -> BufferId {
+        self.buffer
+    }
+}
+
+/// Activation order across all panes; larger is more recent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Tick(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidTabs {
+    #[error("a tab list needs at least one tab")]
+    Empty,
+    #[error("active tab {0} does not exist")]
+    Active(usize),
+    #[error("preview tab {0} does not exist")]
+    Preview(usize),
+    #[error("tab {0} repeats an earlier tab")]
+    Duplicate(usize),
+}
+
+impl Tabs {
+    pub(crate) fn new(view: View, open: OpenAs, now: Tick) -> Tabs {
+        Tabs {
+            items: vec![Item { view, used: now }],
+            active: 0,
+            preview: match open {
+                OpenAs::Preview => Some(0),
+                OpenAs::Permanent => None,
+            },
+        }
+    }
+
+    pub(crate) fn from_parts(
+        items: Vec<Item>,
+        active: usize,
+        preview: Option<usize>,
+    ) -> Result<Tabs, InvalidTabs> {
+        let duplicate = items.iter().enumerate().find_map(|(index, item)| {
+            let buffer = item.view.buffer();
+            items[..index]
+                .iter()
+                .any(|earlier| earlier.view.buffer() == buffer)
+                .then_some(index)
+        });
+        match (items.len(), duplicate, preview) {
+            (0, _, _) => Err(InvalidTabs::Empty),
+            (_, Some(index), _) => Err(InvalidTabs::Duplicate(index)),
+            (len, None, _) if active >= len => Err(InvalidTabs::Active(active)),
+            (len, None, Some(preview)) if preview >= len => Err(InvalidTabs::Preview(preview)),
+            (_, None, _) => Ok(Tabs {
+                items,
+                active,
+                preview,
+            }),
+        }
+    }
+
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    pub fn items_mut(&mut self) -> &mut [Item] {
+        &mut self.items
+    }
+
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    pub fn preview(&self) -> Option<usize> {
+        self.preview
+    }
+
+    pub fn find(&self, buffer: BufferId) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|item| item.view.buffer() == buffer)
+    }
+
+    /// Stale indices are ignored.
+    pub fn activate(&mut self, index: usize, now: Tick) {
+        match self.items.get_mut(index) {
+            Some(item) => {
+                item.used = now;
+                self.active = index;
+            }
+            None => {}
+        }
+    }
+
+    /// Makes the preview tab, if any, permanent.
+    pub fn keep(&mut self) {
+        self.preview = None;
+    }
+
+    /// Zed's rule: activates an open item, replaces an active preview in place, else inserts
+    /// after the active tab; returns the displaced preview.
+    pub(crate) fn open(&mut self, view: View, open: OpenAs, now: Tick) -> Option<Item> {
+        let item = Item { view, used: now };
+        match (self.find(item.view.buffer()), open, self.preview) {
+            (Some(index), OpenAs::Permanent, _) => {
+                match self.preview == Some(index) {
+                    true => self.preview = None,
+                    false => {}
+                }
+                self.activate(index, now);
+                None
+            }
+            (Some(index), OpenAs::Preview, _) => {
+                self.activate(index, now);
+                None
+            }
+            (None, OpenAs::Permanent, _) => {
+                self.insert_after_active(item);
+                None
+            }
+            (None, OpenAs::Preview, Some(preview)) if preview == self.active => {
+                Some(std::mem::replace(&mut self.items[preview], item))
+            }
+            (None, OpenAs::Preview, Some(preview)) => {
+                let old = self.items.remove(preview);
+                match preview < self.active {
+                    true => self.active -= 1,
+                    false => {}
+                }
+                self.preview = Some(self.insert_after_active(item));
+                Some(old)
+            }
+            (None, OpenAs::Preview, None) => {
+                self.preview = Some(self.insert_after_active(item));
+                None
+            }
+        }
+    }
+
+    fn insert_after_active(&mut self, item: Item) -> usize {
+        let index = self.active + 1;
+        self.items.insert(index, item);
+        match self.preview {
+            Some(preview) if preview >= index => self.preview = Some(preview + 1),
+            Some(_) | None => {}
+        }
+        self.active = index;
+        index
+    }
+
+    /// Removes tab `index`, activating the most recently used tab if it was active; `None`
+    /// once empty.
+    pub(crate) fn remove(mut self, index: usize, now: Tick) -> (Option<Tabs>, Item) {
+        let item = self.items.remove(index);
+        self.preview = match self.preview {
+            Some(preview) if preview == index => None,
+            Some(preview) if preview > index => Some(preview - 1),
+            other => other,
+        };
+        let recent = self
+            .items
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, item)| item.used)
+            .map(|(index, _)| index);
+        let active = match (self.active.cmp(&index), recent) {
+            (_, None) => return (None, item),
+            (Ordering::Less, Some(_)) => self.active,
+            (Ordering::Greater, Some(_)) => self.active - 1,
+            (Ordering::Equal, Some(recent)) => recent,
+        };
+        self.activate(active, now);
+        (Some(self), item)
+    }
 }
 
 /// Visible window of a text view; `anchor` is the first char of the top visual row.

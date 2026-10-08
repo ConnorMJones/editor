@@ -125,3 +125,6 @@ I also use a kindle from time to time with calibre. All the books are kept toget
 calibre currently, but don't have a great way to organize those on top of everything else.
 I could also use zotero or something for keeping track of what I've read and references but
 haven't done any of that yet and before.
+
+
+- vs code minimap

@@ -349,12 +349,9 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     entry.content = Content::Text { doc, disk, mtime };
                     // Views restored from a session were placed before the length was known.
                     for pane in state.layout.panes.values_mut() {
-                        let active = match &mut pane.view {
-                            View::Text(view) => Some(view),
-                            View::Empty => None,
-                        };
-                        for view in active.into_iter().chain(pane.parked.iter_mut()) {
-                            match view.buffer == buffer {
+                        for item in pane.items_mut() {
+                            let View::Text(view) = &mut item.view;
+                            match view.buffer() == buffer {
                                 true => {
                                     view.selection = view.selection.clone().transform(|range| {
                                         Range::new(range.anchor.min(len), range.head.min(len))
@@ -367,12 +364,16 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     }
                     match jump {
                         Some((pane, at)) => {
-                            match state.layout.panes.get_mut(pane).map(|p| &mut p.view) {
-                                Some(View::Text(view)) if view.buffer == buffer => {
+                            let target = (state.layout.panes.get_mut(pane)).and_then(|target| {
+                                let index = target.tabs.as_ref()?.find(buffer)?;
+                                Some(&mut target.items_mut()[index].view)
+                            });
+                            match target {
+                                Some(View::Text(view)) => {
                                     view.selection = Selection::point(at);
                                     scroll::follow_cursor(state, pane);
                                 }
-                                Some(View::Text(_) | View::Empty) | None => {}
+                                None => {}
                             }
                         }
                         None => {}
@@ -604,11 +605,10 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     let selection = layout
                         .panes
                         .values()
-                        .find_map(|pane| match &pane.view {
-                            View::Text(view) if view.buffer == buffer => {
-                                Some(view.selection.clone())
-                            }
-                            View::Text(_) | View::Empty => None,
+                        .flat_map(|pane| pane.items())
+                        .find_map(|item| {
+                            let View::Text(view) = &item.view;
+                            (view.buffer() == buffer).then(|| view.selection.clone())
                         })
                         .unwrap_or_else(|| Selection::point(0));
                     // Unsaved edits stay their own undo step below the reload.

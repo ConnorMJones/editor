@@ -8,7 +8,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-tracy = ["dep:tracing-tracy"]
+tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 
 [dependencies]
 anyhow.workspace = true
@@ -26,3 +26,4 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }
+tracy-client = { workspace = true, optional = true }

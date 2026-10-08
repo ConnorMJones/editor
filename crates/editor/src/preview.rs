@@ -10,7 +10,7 @@ use model::theme as roles;
 use state::Overlay;
 use state::buffer::{Content, TextDoc};
 use state::display::{self, CursorShape, Focus, Frame};
-use state::layout::{Scroll, View, Viewport};
+use state::layout::{Pane, Scroll, View, Viewport};
 use state::picker::{self, Preview, PreviewSource};
 
 use crate::workspace::Workspace;
@@ -100,17 +100,13 @@ impl Element for PreviewElement {
                     Some(PreviewSource::Buffer(buffer)) => {
                         match state.buffers.get(buffer).map(|b| &b.content) {
                             Some(Content::Text { doc, .. }) => {
-                                let cursor = state.layout.panes.values().find_map(|pane| {
-                                    let active = match &pane.view {
-                                        View::Text(view) => Some(view),
-                                        View::Empty => None,
-                                    };
-                                    active
-                                        .into_iter()
-                                        .chain(&pane.parked)
-                                        .find(|view| view.buffer == buffer)
-                                        .map(|view| view.selection.primary().head)
-                                });
+                                let cursor = (state.layout.panes.values())
+                                    .flat_map(Pane::items)
+                                    .find_map(|item| {
+                                        let View::Text(view) = &item.view;
+                                        (view.buffer() == buffer)
+                                            .then(|| view.selection.primary().head)
+                                    });
                                 Shown::Doc {
                                     doc,
                                     line: doc.text.char_to_line(

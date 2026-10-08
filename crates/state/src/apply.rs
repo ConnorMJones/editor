@@ -13,6 +13,7 @@ use helix_core::{
 };
 use helix_stdx::rope::RopeSliceExt;
 use model::command::{Command, Direction, Dirs, Motion, Paste};
+use model::config::OpenAs;
 use model::mode::Mode;
 use model::notice::Notice;
 use model::register::Register;
@@ -22,7 +23,7 @@ use crate::buffer::{
     Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, TextDoc, Uncommitted,
 };
 use crate::job::{Job, ReloadPolicy};
-use crate::layout::{Layout, PaneId, TextView, View};
+use crate::layout::{Layout, Pane, Tabs, TextView, View};
 use crate::prompt::{Candidate, Chosen};
 use crate::register::{self, ClipboardUse, Values};
 use crate::{
@@ -684,7 +685,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             }
         },
 
-        Command::Open(path) => open(state, path, None, out),
+        Command::Open(path) => open(state, path, None, OpenAs::Permanent, out),
         Command::Write => match focused_buffer(state) {
             Some(id) => out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job)),
             None => state.notice = Some(Notice::NoBuffer),
@@ -744,14 +745,8 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             workspace::Close::Refused => {}
         },
         Command::ForceQuit => out.push(Effect::Quit),
-        Command::CloseBuffer => match focused_buffer(state) {
-            Some(id) => close_buffer(state, id, Force::No),
-            None => state.notice = Some(Notice::NoBuffer),
-        },
-        Command::ForceCloseBuffer => match focused_buffer(state) {
-            Some(id) => close_buffer(state, id, Force::Yes),
-            None => state.notice = Some(Notice::NoBuffer),
-        },
+        Command::CloseBuffer => close_active(state, Force::No),
+        Command::ForceCloseBuffer => close_active(state, Force::Yes),
         Command::Reload => match focused_buffer(state) {
             Some(id) => out.extend(reload_job(state, id).map(Effect::Job)),
             None => state.notice = Some(Notice::NoBuffer),
@@ -781,7 +776,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::StickyView => state.input.sticky = Sticky::View,
 
         Command::Window(command) => workspace::window(state, command, out),
-        Command::CycleBuffer(cycle) => workspace::cycle_buffer(state, cycle),
+        Command::CycleBuffer(cycle) => workspace::cycle_tab(state, cycle),
         Command::Tree(command) => workspace::tree(state, command, out),
         Command::Picker(command) => workspace::picker(state, command, out),
     }
@@ -853,6 +848,18 @@ pub enum Force {
     Yes,
 }
 
+/// Closes the focused pane's active tab.
+fn close_active(state: &mut State, force: Force) {
+    let focus = state.layout.focus;
+    match (state.layout.panes.get(focus))
+        .and_then(|pane| pane.tabs.as_ref())
+        .map(Tabs::active)
+    {
+        Some(index) => workspace::close_tab(state, focus, index, force),
+        None => state.notice = Some(Notice::NoBuffer),
+    }
+}
+
 pub(crate) fn count_of(state: &State) -> usize {
     state.input.count.map_or(1, NonZeroUsize::get)
 }
@@ -876,26 +883,20 @@ pub(crate) fn focused<'a, 'b>(
     layout: &'a mut Layout,
     buffers: &'b mut SlotMap<BufferId, Buffer>,
 ) -> Option<(&'a mut TextView, &'b mut TextDoc)> {
-    let focus = layout.focus;
-    match layout.panes.get_mut(focus).map(|pane| &mut pane.view) {
-        Some(View::Text(view)) => match buffers.get_mut(view.buffer).map(|b| &mut b.content) {
-            Some(Content::Text { doc, .. }) => Some((view, doc)),
-            Some(Content::Loading { .. }) | None => None,
-        },
-        Some(View::Empty) | None => None,
+    let View::Text(view) = layout.panes.get_mut(layout.focus)?.active_mut()?;
+    match buffers.get_mut(view.buffer()).map(|b| &mut b.content) {
+        Some(Content::Text { doc, .. }) => Some((view, doc)),
+        Some(Content::Loading { .. }) | None => None,
     }
 }
 
 fn focused_buffer(state: &State) -> Option<BufferId> {
-    match state
+    state
         .layout
         .panes
-        .get(state.layout.focus)
-        .map(|pane| &pane.view)
-    {
-        Some(View::Text(view)) => Some(view.buffer),
-        Some(View::Empty) | None => None,
-    }
+        .get(state.layout.focus)?
+        .active()
+        .map(View::buffer)
 }
 
 fn modified_buffers(buffers: &SlotMap<BufferId, Buffer>) -> Vec<BufferId> {
@@ -906,7 +907,8 @@ fn modified_buffers(buffers: &SlotMap<BufferId, Buffer>) -> Vec<BufferId> {
         .collect()
 }
 
-/// Maps every view of `buffer` through `changes`, keeping helix's selection invariants.
+/// Maps every view of `buffer` in every tab through `changes`, keeping helix's selection
+/// invariants.
 pub(crate) fn map_views(
     layout: &mut Layout,
     buffer: BufferId,
@@ -914,12 +916,15 @@ pub(crate) fn map_views(
     text: RopeSlice,
 ) {
     for pane in layout.panes.values_mut() {
-        match &mut pane.view {
-            View::Text(view) if view.buffer == buffer => {
-                view.selection = view.selection.clone().map(changes).ensure_invariants(text);
-                view.scroll.anchor = changes.map_pos(view.scroll.anchor, Assoc::Before);
+        for item in pane.items_mut() {
+            let View::Text(view) = &mut item.view;
+            match view.buffer() == buffer {
+                true => {
+                    view.selection = view.selection.clone().map(changes).ensure_invariants(text);
+                    view.scroll.anchor = changes.map_pos(view.scroll.anchor, Assoc::Before);
+                }
+                false => {}
             }
-            View::Text(_) | View::Empty => {}
         }
     }
 }
@@ -960,7 +965,8 @@ pub(crate) fn reselect(state: &mut State, mut f: impl FnMut(RopeSlice, Range) ->
     });
 }
 
-/// Applies the transaction `f` builds to the focused buffer and maps every view of it.
+/// Applies the transaction `f` builds to the focused buffer, maps every view of it and
+/// keeps its preview tabs.
 pub(crate) fn try_edit(
     state: &mut State,
     f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Result<Transaction, Notice>,
@@ -984,18 +990,22 @@ pub(crate) fn try_edit(
             return;
         }
     };
-    let buffer = view.buffer;
+    let buffer = view.buffer();
     doc.apply(&tx, &view.selection, languages);
     let text = doc.text.slice(..);
     map_views(layout, buffer, tx.changes(), text);
+    match tx.changes().is_empty() {
+        true => {}
+        false => layout.keep(buffer),
+    }
     match (
         tx.selection(),
-        layout.panes.get_mut(focus).map(|pane| &mut pane.view),
+        layout.panes.get_mut(focus).and_then(Pane::active_mut),
     ) {
         (Some(selection), Some(View::Text(view))) => {
             view.selection = selection.clone().ensure_invariants(text);
         }
-        (Some(_), Some(View::Empty) | None) | (None, _) => {}
+        (Some(_), None) | (None, _) => {}
     }
 }
 
@@ -1033,36 +1043,39 @@ fn step_history(state: &mut State, step: HistoryStep, exhausted: Notice) {
             return;
         };
         doc.commit(&view.selection);
-        let buffer = view.buffer;
+        let buffer = view.buffer();
         let txs = doc.step_history(step, languages);
         if txs.is_empty() {
             *notice = Some(exhausted);
             return;
         }
         let text = doc.text.slice(..);
+        layout.keep(buffer);
         for tx in &txs {
             map_views(layout, buffer, tx.changes(), text);
             match (
                 tx.selection(),
-                layout.panes.get_mut(focus).map(|pane| &mut pane.view),
+                layout.panes.get_mut(focus).and_then(Pane::active_mut),
             ) {
                 (Some(selection), Some(View::Text(view))) => {
                     view.selection = selection.clone().ensure_invariants(text);
                 }
-                (Some(_), Some(View::Empty) | None) | (None, _) => {}
+                (Some(_), None) | (None, _) => {}
             }
         }
     }
 }
 
+/// Commits `id` with the selection of a view showing it.
 fn commit(state: &mut State, id: BufferId) {
     let selection = state
         .layout
         .panes
         .values()
-        .find_map(|pane| match &pane.view {
-            View::Text(view) if view.buffer == id => Some(view.selection.clone()),
-            View::Text(_) | View::Empty => None,
+        .flat_map(|pane| pane.items())
+        .find_map(|item| {
+            let View::Text(view) = &item.view;
+            (view.buffer() == id).then(|| view.selection.clone())
         })
         .unwrap_or_else(|| Selection::point(0));
     match state.buffers.get_mut(id).map(|b| &mut b.content) {
@@ -1071,18 +1084,21 @@ fn commit(state: &mut State, id: BufferId) {
     }
 }
 
-/// `None` with a notice while the buffer is still loading.
+/// `None` with a notice while the buffer is still loading; saving keeps its previews.
 fn write_job(state: &mut State, id: BufferId, dirs: Dirs) -> Option<Job> {
     commit(state, id);
     let buffer = state.buffers.get(id)?;
     match &buffer.content {
-        Content::Text { doc, .. } => Some(Job::Write {
-            buffer: id,
-            path: buffer.path.clone(),
-            text: doc.text.clone(),
-            revision: doc.history.current_revision(),
-            dirs,
-        }),
+        Content::Text { doc, .. } => {
+            state.layout.keep(id);
+            Some(Job::Write {
+                buffer: id,
+                path: buffer.path.clone(),
+                text: doc.text.clone(),
+                revision: doc.history.current_revision(),
+                dirs,
+            })
+        }
         Content::Loading { .. } => {
             state.notice = Some(Notice::StillLoading {
                 path: buffer.path.clone(),
@@ -1114,14 +1130,14 @@ pub(crate) fn line_column(text: &Rope, to: Position) -> usize {
     (start + to.column).min(line_end_char_index(&text.slice(..), line))
 }
 
-/// Shows `path` in the focused pane, reading it as a job when no buffer has it yet; `to`
-/// places the cursor, once the text arrives if need be.
-pub(crate) fn open(state: &mut State, path: PathBuf, to: Option<Position>, out: &mut Vec<Effect>) {
+/// The buffer of `path`, read as a job when none has it yet; `None` with a notice when the
+/// path cannot be opened.
+pub(crate) fn load(state: &mut State, path: PathBuf, out: &mut Vec<Effect>) -> Option<BufferId> {
     let joined = helix_stdx::path::normalize(state.root.path().join(&path));
     let path = match joined.canonicalize() {
         Ok(path) if path.is_dir() => {
             state.notice = Some(Notice::NotAFile { path });
-            return;
+            return None;
         }
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => joined,
@@ -1130,7 +1146,7 @@ pub(crate) fn open(state: &mut State, path: PathBuf, to: Option<Position>, out: 
                 path: joined,
                 error,
             });
-            return;
+            return None;
         }
     };
     let existing = state
@@ -1138,76 +1154,60 @@ pub(crate) fn open(state: &mut State, path: PathBuf, to: Option<Position>, out: 
         .iter()
         .find(|(_, buffer)| buffer.path == path)
         .map(|(id, _)| id);
-    let id = match existing {
-        Some(id) => id,
+    match existing {
+        Some(id) => Some(id),
         None => {
             let id = state.buffers.insert(Buffer {
                 path: path.clone(),
                 content: Content::Loading { jump: None },
             });
-            state.tabs.push(id);
             out.push(Effect::Job(Job::Open {
                 buffer: id,
                 path,
                 languages: state.languages.clone(),
             }));
-            id
+            Some(id)
         }
-    };
-    if let Some(current) = focused_buffer(state) {
-        commit(state, current);
     }
+}
+
+/// Shows `path` in the focused pane; `to` places the cursor, once the text arrives if need be.
+pub(crate) fn open(
+    state: &mut State,
+    path: PathBuf,
+    to: Option<Position>,
+    open: OpenAs,
+    out: &mut Vec<Effect>,
+) {
+    let Some(id) = load(state, path, out) else {
+        return;
+    };
     let focus = state.layout.focus;
-    workspace::show(&mut state.layout, &state.buffers, focus, id);
+    workspace::show(state, focus, id, open);
     let Some(to) = to else {
         return;
     };
     match (
         &mut state.buffers[id].content,
-        state.layout.panes.get_mut(focus).map(|pane| &mut pane.view),
+        state.layout.panes.get_mut(focus).and_then(Pane::active_mut),
     ) {
         (Content::Loading { jump }, _) => *jump = Some(Jump { pane: focus, to }),
-        (Content::Text { doc, .. }, Some(View::Text(view))) => {
+        (Content::Text { doc, .. }, Some(View::Text(view))) if view.buffer() == id => {
             view.selection = Selection::point(line_column(&doc.text, to));
         }
-        (Content::Text { .. }, Some(View::Empty) | None) => {}
+        (Content::Text { .. }, Some(_) | None) => {}
     }
 }
 
-/// Closes `id` everywhere unless it has unsaved edits and `force` is `No`.
-pub fn close_buffer(state: &mut State, id: BufferId, force: Force) {
-    match (
-        state.buffers.get(id).map(|b| b.content.is_modified()),
-        force,
-    ) {
-        (None, _) => {}
-        (Some(true), Force::No) => state.notice = Some(Notice::UnsavedBuffers { count: 1 }),
-        (Some(false), _) | (Some(true), Force::Yes) => remove_buffer(state, id),
-    }
-}
-
-/// Drops `id`; panes showing it fall back to their previous buffer, then the last tab.
+/// Drops `id` and every tab showing it.
 pub(crate) fn remove_buffer(state: &mut State, id: BufferId) {
     state.buffers.remove(id);
-    state.tabs.retain(|&tab| tab != id);
-    let pane_ids: Vec<PaneId> = state.layout.panes.keys().collect();
-    for pane_id in pane_ids {
-        let pane = &mut state.layout.panes[pane_id];
-        pane.parked.retain(|view| view.buffer != id);
-        match &pane.view {
-            View::Text(view) if view.buffer == id => {
-                pane.view = View::Empty;
-                let next = pane
-                    .parked
-                    .last()
-                    .map(|view| view.buffer)
-                    .or_else(|| state.tabs.last().copied());
-                match next {
-                    Some(next) => workspace::show(&mut state.layout, &state.buffers, pane_id, next),
-                    None => {}
-                }
-            }
-            View::Text(_) | View::Empty => {}
+    let now = state.layout.tick();
+    for pane in state.layout.panes.values_mut() {
+        let index = pane.tabs.as_ref().and_then(|tabs| tabs.find(id));
+        match (pane.tabs.take(), index) {
+            (Some(tabs), Some(index)) => pane.tabs = tabs.remove(index, now).0,
+            (tabs, _) => pane.tabs = tabs,
         }
     }
 }

@@ -175,3 +175,23 @@ fn search_selection() {
     check("#[on|]#e on", "*n", "one #[on|]#");
     check("#[on|]#e on", "<A-*>n", "one #[on|]#");
 }
+
+#[test]
+fn goto_arrow_aliases() {
+    check(
+        "one\nt#[w|]#o\nthree\n",
+        "g<right>",
+        "one\ntw#[o|]#\nthree\n",
+    );
+    check(
+        "one\nt#[w|]#o\nthree\n",
+        "g<left>",
+        "one\n#[t|]#wo\nthree\n",
+    );
+    check("one\nt#[w|]#o\nthree\n", "g<up>", "#[o|]#ne\ntwo\nthree\n");
+    check(
+        "one\nt#[w|]#o\nthree\n",
+        "g<down>",
+        "one\ntwo\n#[t|]#hree\n",
+    );
+}

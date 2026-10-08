@@ -30,6 +30,7 @@ fn keystroke(c: &mut Criterion) {
     let mut state = State::new(
         Root::open(dir.path()).unwrap(),
         helix_core::config::default_lang_loader(),
+        model::config::TabsConfig::default(),
     )
     .unwrap();
     let mut out = Vec::new();

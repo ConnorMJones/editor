@@ -169,6 +169,23 @@ const COMMON: Bindings = &[
         &[Key::char('g'), Key::char('.')],
         Command::Move(Motion::LastModification),
     ),
+    // Arrow aliases for `gh` `gl` `gg` `ge`; not in helix.
+    (
+        &[Key::char('g'), Key::code(KeyCode::Left)],
+        Command::Move(Motion::LineStart),
+    ),
+    (
+        &[Key::char('g'), Key::code(KeyCode::Right)],
+        Command::Move(Motion::LineEnd),
+    ),
+    (
+        &[Key::char('g'), Key::code(KeyCode::Up)],
+        Command::Move(Motion::FileStart),
+    ),
+    (
+        &[Key::char('g'), Key::code(KeyCode::Down)],
+        Command::Move(Motion::LastLine),
+    ),
     (&[Key::char(':')], Command::CommandMode),
     (&[Key::char('i')], Command::InsertMode),
     (&[Key::char('I')], Command::InsertAtLineStart),
@@ -701,6 +718,10 @@ macro_rules! window_bindings {
             (&[$($prefix,)+ Key::char('j')], Command::Window(WindowCommand::Focus(Side::Down))),
             (&[$($prefix,)+ Key::char('k')], Command::Window(WindowCommand::Focus(Side::Up))),
             (&[$($prefix,)+ Key::char('l')], Command::Window(WindowCommand::Focus(Side::Right))),
+            (&[$($prefix,)+ Key::code(KeyCode::Left)], Command::Window(WindowCommand::Focus(Side::Left))),
+            (&[$($prefix,)+ Key::code(KeyCode::Down)], Command::Window(WindowCommand::Focus(Side::Down))),
+            (&[$($prefix,)+ Key::code(KeyCode::Up)], Command::Window(WindowCommand::Focus(Side::Up))),
+            (&[$($prefix,)+ Key::code(KeyCode::Right)], Command::Window(WindowCommand::Focus(Side::Right))),
             (&[$($prefix,)+ Key::char('q')], Command::Window(WindowCommand::Close)),
             (&[$($prefix,)+ Key::char('o')], Command::Window(WindowCommand::Only)),
         ]
@@ -728,8 +749,8 @@ const WORKSPACE: Bindings = &[
     ),
 ];
 
-const WINDOW: &[(&[Key], Command); 9] = &window_bindings!(CTRL_W);
-const SPACE_WINDOW: &[(&[Key], Command); 9] = &window_bindings!(SPACE, Key::char('w'));
+const WINDOW: &[(&[Key], Command); 13] = &window_bindings!(CTRL_W);
+const SPACE_WINDOW: &[(&[Key], Command); 13] = &window_bindings!(SPACE, Key::char('w'));
 
 const GOTO_BUFFER: Bindings = &[
     (
@@ -935,4 +956,42 @@ impl Keymap {
             Trie::Node(_) => Resolved::Pending,
         }
     }
+}
+
+/// Bindings this editor adds or changes relative to helix; kept by hand next to the tables.
+const CUSTOM: &str = "\
+## Custom bindings (not helix defaults)
+
+| Keys | Context | Action |
+| --- | --- | --- |
+| `C-k C-s` | normal, insert, select, tree | Save all modified buffers. Shadows helix's insert-mode `C-k` (kill to line end). |
+| `g left` / `g right` | normal, select | Line start / end (aliases of `gh` / `gl`). |
+| `g up` / `g down` | normal, select | File start / last line (aliases of `gg` / `ge`). |
+| `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
+| `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
+| `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
+";
+
+/// Markdown listing of every binding, generated from the tables; `docs/keymap.md` holds a copy.
+pub fn reference() -> String {
+    let mut out = String::from(
+        "# Keymap\n\nGenerated from `crates/state/src/keymap.rs`; regenerate with \
+         `UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference`.\n\n",
+    );
+    out.push_str(CUSTOM);
+    out.push_str("\n## Typed commands (`:`)\n\n| Names |\n| --- |\n");
+    for (names, _) in crate::prompt::COMMANDS {
+        let names: Vec<String> = names.iter().map(|name| format!("`:{name}`")).collect();
+        out.push_str(&format!("| {} |\n", names.join(", ")));
+    }
+    for context in Context::ALL {
+        out.push_str(&format!(
+            "\n## {context:?}\n\n| Keys | Command |\n| --- | --- |\n"
+        ));
+        for (keys, command) in tables(context).iter().copied().flatten() {
+            let keys: Vec<String> = keys.iter().map(|key| key.to_string()).collect();
+            out.push_str(&format!("| `{}` | `{command:?}` |\n", keys.join(" ")));
+        }
+    }
+    out
 }

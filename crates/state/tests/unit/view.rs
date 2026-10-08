@@ -14,16 +14,12 @@ fn numbered(rows: u16) -> Harness {
 
 /// Line of the primary cursor and of the first visible row.
 fn lines(h: &Harness) -> (usize, usize) {
-    match &h.state.layout.panes[h.state.layout.focus].view {
-        View::Text(view) => {
-            let text = h.doc().text.slice(..);
-            (
-                text.char_to_line(view.selection.primary().cursor(text)),
-                text.char_to_line(view.scroll.anchor),
-            )
-        }
-        View::Empty => panic!("no view"),
-    }
+    let view = h.view();
+    let text = h.doc().text.slice(..);
+    (
+        text.char_to_line(view.selection.primary().cursor(text)),
+        text.char_to_line(view.scroll.anchor),
+    )
 }
 
 #[test]
@@ -107,14 +103,11 @@ fn visual_line_motion_follows_soft_wrap() {
 fn edits_elsewhere_shift_other_views_anchor() {
     let mut h = numbered(10);
     h.keys("51Gzt");
-    let before = match &h.state.layout.panes[h.state.layout.focus].view {
-        View::Text(view) => view.scroll.anchor,
-        View::Empty => panic!("no view"),
-    };
+    let before = h.view().scroll.anchor;
     let original = h.state.layout.focus;
     h.keys("<C-w>vggxd");
-    match &h.state.layout.panes[original].view {
-        View::Text(view) => assert_eq!(view.scroll.anchor, before - 2),
-        View::Empty => panic!("no view"),
+    match h.state.layout.panes[original].active() {
+        Some(View::Text(view)) => assert_eq!(view.scroll.anchor, before - 2),
+        None => panic!("no view"),
     }
 }

@@ -1698,7 +1698,8 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "tracing-tracy 0.12.0",
+ "tracing-tracy",
+ "tracy-client",
 ]
 
 [[package]]
@@ -2113,15 +2114,6 @@ dependencies = [
  "cc",
  "libc",
  "pkg-config",
-]
-
-[[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -3957,7 +3949,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3"
 dependencies = [
  "bitflags 2.13.2",
- "fsevent-sys",
  "inotify",
  "kqueue",
  "libc",
@@ -3966,18 +3957,6 @@ dependencies = [
  "notify-types",
  "walkdir",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "notify-debouncer-mini"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17849edfaabd9a5fef1c606d99cfc615a8e99f7ac4366406d86c7942a3184cf2"
-dependencies = [
- "log",
- "notify",
- "notify-types",
- "tempfile",
 ]
 
 [[package]]
@@ -5942,7 +5921,7 @@ dependencies = [
  "helix-stdx",
  "ignore",
  "model",
- "notify-debouncer-mini",
+ "notify",
  "nucleo",
  "ropey",
  "serde",
@@ -6544,60 +6523,28 @@ checksum = "0eaa1852afa96e0fe9e44caa53dc0bd2d9d05e0f2611ce09f97f8677af56e4ba"
 dependencies = [
  "tracing-core",
  "tracing-subscriber",
- "tracy-client 0.18.5",
-]
-
-[[package]]
-name = "tracing-tracy"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b326790213b869d948a5d1ea56472ed5b20c7cefde07684ee35d6b7a980fef1"
-dependencies = [
- "tracing-core",
- "tracing-subscriber",
- "tracy-client 0.19.0",
+ "tracy-client",
 ]
 
 [[package]]
 name = "tracy-client"
-version = "0.18.5"
+version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6131992ff3e2cb96f407eb4eb005427ba15e2687260d99089b90e60e33169ce0"
+checksum = "a4f6fc3baeac5d86ab90c772e9e30620fc653bf1864295029921a15ef478e6a5"
 dependencies = [
  "loom",
  "once_cell",
- "tracy-client-sys 0.29.0",
-]
-
-[[package]]
-name = "tracy-client"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d93fd676d8946eaeaff4881d26d2240a8d106fcaccbd47cb9f1389e3561ba490"
-dependencies = [
- "loom",
- "once_cell",
- "tracy-client-sys 0.30.0",
+ "tracy-client-sys",
 ]
 
 [[package]]
 name = "tracy-client-sys"
-version = "0.29.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab27f167b093214c68413a2e0bcd318f0591af475597405ff68138ba0a433379"
+checksum = "c5f7c95348f20c1c913d72157b3c6dee6ea3e30b3d19502c5a7f6d3f160dacbf"
 dependencies = [
  "cc",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "tracy-client-sys"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eef8a023d2b19f44e430da334f7dfb5e5db219bb83e2b4f56a09c1cb12abe915"
-dependencies = [
- "cc",
- "windows-targets 0.53.5",
 ]
 
 [[package]]
@@ -8336,8 +8283,8 @@ dependencies = [
  "js-sys",
  "tracing",
  "tracing-subscriber",
- "tracing-tracy 0.11.4",
- "tracy-client 0.18.5",
+ "tracing-tracy",
+ "tracy-client",
  "wasm-bindgen",
  "web-sys",
  "zlog",

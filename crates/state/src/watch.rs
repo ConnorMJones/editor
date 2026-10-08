@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use model::git::GitStatus;
-use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::buffer::Content;
 use crate::files::Files;
@@ -12,16 +11,20 @@ use crate::path::RelPath;
 use crate::{Effect, Repo, State, request_git};
 
 /// Long-lived watcher owned by the host; dropping it stops events.
-pub type Watcher = Debouncer<RecommendedWatcher>;
+pub type Watcher = RecommendedWatcher;
 
-const DEBOUNCE: Duration = Duration::from_millis(100);
+/// How long the host waits for more events before handling a batch.
+pub const DEBOUNCE: Duration = Duration::from_millis(100);
 
-/// `sink` runs on the watcher's thread with each debounced batch of absolute paths.
-pub fn start(
-    sink: impl Fn(Vec<PathBuf>) + Send + 'static,
-) -> Result<Watcher, notify_debouncer_mini::notify::Error> {
-    new_debouncer(DEBOUNCE, move |result: DebounceEventResult| match result {
-        Ok(events) => sink(events.into_iter().map(|event| event.path).collect()),
+/// `sink` runs on the watcher's thread with the paths of each change; hosts batch them.
+pub fn start(sink: impl Fn(Vec<PathBuf>) + Send + 'static) -> notify::Result<Watcher> {
+    notify::recommended_watcher(move |result: notify::Result<Event>| match result {
+        // Our own reads (listing, git status, previews) would otherwise retrigger refreshes.
+        Ok(Event {
+            kind: EventKind::Access(_),
+            ..
+        }) => {}
+        Ok(event) => sink(event.paths),
         Err(error) => tracing::warn!(%error, "file watcher error"),
     })
 }
@@ -29,7 +32,7 @@ pub fn start(
 /// Directories are watched one level deep so ignored trees such as `target/` cost nothing.
 pub fn watch(watcher: &mut Watcher, dirs: &[PathBuf]) {
     for dir in dirs {
-        match watcher.watcher().watch(dir, RecursiveMode::NonRecursive) {
+        match watcher.watch(dir, RecursiveMode::NonRecursive) {
             Ok(()) => {}
             Err(error) => tracing::warn!(%error, ?dir, "cannot watch directory"),
         }

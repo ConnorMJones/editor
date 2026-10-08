@@ -2,17 +2,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use helix_core::{Range, Selection};
 use model::command::{Command, Cycle, PickerCommand, TreeCommand, WindowCommand};
+use model::config::OpenAs;
 use model::notice::Notice;
 use model::window::PickerKind;
-use slotmap::SlotMap;
 
-use crate::apply::apply;
-use crate::buffer::{Buffer, BufferId, Content, Position};
+use crate::apply::{Force, apply};
+use crate::buffer::{BufferId, Content, Position};
 use crate::files::Files;
 use crate::job::{FsOp, Job};
-use crate::layout::{LastPane, Layout, Pane, PaneId, Scroll, TextView, View};
+use crate::layout::{LastPane, Layout, Pane, PaneId, Tabs, TextView, Tick, View};
 use crate::path::RelPath;
 use crate::picker::{
     self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource, Search,
@@ -20,61 +19,127 @@ use crate::picker::{
 use crate::tree::{self, Dir, EntryKind, Fold, Listing, RowKind, TreeEdit};
 use crate::{Effect, Focus, Overlay, Sidebar, State};
 
-/// Shows `buffer` in `pane`, parking the pane's current view and restoring a parked one.
-pub fn show(
-    layout: &mut Layout,
-    buffers: &SlotMap<BufferId, Buffer>,
-    pane: PaneId,
-    buffer: BufferId,
-) {
-    let (Some(pane), Some(target)) = (layout.panes.get_mut(pane), buffers.get(buffer)) else {
+/// Shows `buffer` in `pane` by zed's preview rules, committing the pane's current edits; a
+/// modified buffer always opens permanently and a modified preview is never replaced.
+pub fn show(state: &mut State, pane: PaneId, buffer: BufferId, open: OpenAs) {
+    let open = match state.buffers.get(buffer).map(|b| b.content.is_modified()) {
+        None => return,
+        Some(true) => OpenAs::Permanent,
+        Some(false) => open,
+    };
+    let now = state.layout.tick();
+    let State {
+        layout, buffers, ..
+    } = state;
+    let Some(target) = layout.panes.get_mut(pane) else {
         return;
     };
-    match &pane.view {
-        View::Text(view) if view.buffer == buffer => return,
-        View::Text(_) | View::Empty => {}
-    }
-    // A loading buffer clamps its views once the text arrives.
-    let len = match &target.content {
-        Content::Text { doc, .. } => doc.text.len_chars(),
-        Content::Loading { .. } => usize::MAX,
-    };
-    let view = match pane.parked.iter().position(|view| view.buffer == buffer) {
-        // Parked selections are not mapped through edits made elsewhere, so clamp them.
-        Some(index) => {
-            let mut view = pane.parked.swap_remove(index);
-            view.selection = view
-                .selection
-                .transform(|range| Range::new(range.anchor.min(len), range.head.min(len)));
-            view
-        }
-        None => TextView {
-            buffer,
-            selection: Selection::point(0),
-            scroll: Scroll::default(),
+    match target.active() {
+        Some(View::Text(view)) => match buffers.get_mut(view.buffer()).map(|b| &mut b.content) {
+            Some(Content::Text { doc, .. }) => doc.commit(&view.selection),
+            Some(Content::Loading { .. }) | None => {}
         },
+        None => {}
+    }
+    let view = View::Text(TextView::new(buffer));
+    let displaced = match &mut target.tabs {
+        Some(tabs) => {
+            let preview = tabs.preview().map(|p| tabs.items()[p].view.buffer());
+            match preview
+                .and_then(|b| buffers.get(b))
+                .map(|b| b.content.is_modified())
+            {
+                Some(true) => tabs.keep(),
+                Some(false) | None => {}
+            }
+            tabs.open(view, open, now)
+        }
+        None => {
+            target.tabs = Some(Tabs::new(view, open, now));
+            None
+        }
     };
-    match std::mem::replace(&mut pane.view, View::Text(view)) {
-        View::Text(old) => pane.parked.push(old),
-        View::Empty => {}
+    // The replaced preview's buffer goes once no pane shows it.
+    let Some(displaced) = displaced.map(|item| item.view.buffer()) else {
+        return;
+    };
+    let shown = (layout.panes.values()).any(|pane| {
+        pane.items()
+            .iter()
+            .any(|item| item.view.buffer() == displaced)
+    });
+    match (
+        shown,
+        buffers.get(displaced).map(|b| b.content.is_modified()),
+    ) {
+        (false, Some(false)) => {
+            buffers.remove(displaced);
+        }
+        (false, Some(true) | None) | (true, _) => {}
+    }
+}
+
+/// Closes tab `index` of `pane`, dropping the buffer with its last view unless unsaved edits
+/// refuse it.
+pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
+    let Some(buffer) = (state.layout.panes.get(pane))
+        .and_then(|target| target.items().get(index))
+        .map(|item| item.view.buffer())
+    else {
+        return;
+    };
+    let elsewhere = state.layout.panes.iter().any(|(id, other)| {
+        id != pane
+            && other
+                .items()
+                .iter()
+                .any(|item| item.view.buffer() == buffer)
+    });
+    let modified = (state.buffers.get(buffer)).is_some_and(|b| b.content.is_modified());
+    match (elsewhere, modified, force) {
+        (false, true, Force::No) => {
+            state.notice = Some(Notice::UnsavedBuffers { count: 1 });
+            return;
+        }
+        (true, _, _) | (false, false, _) | (false, true, Force::Yes) => {}
+    }
+    let now = state.layout.tick();
+    let target = &mut state.layout.panes[pane];
+    target.tabs = match target.tabs.take() {
+        Some(tabs) => tabs.remove(index, now).0,
+        None => None,
+    };
+    match elsewhere {
+        true => {}
+        false => {
+            state.buffers.remove(buffer);
+        }
+    }
+}
+
+/// Stamps the focused pane's active tab as most recently used.
+fn touch(layout: &mut Layout) {
+    let now = layout.tick();
+    match layout
+        .panes
+        .get_mut(layout.focus)
+        .and_then(|p| p.tabs.as_mut())
+    {
+        Some(tabs) => tabs.activate(tabs.active(), now),
+        None => {}
     }
 }
 
 pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) {
     let layout = &mut state.layout;
     match command {
+        // Like zed, the new pane holds a copy of the active item only.
         WindowCommand::Split(axis) => {
-            let view = match layout.panes.get(layout.focus).map(|pane| &pane.view) {
-                Some(View::Text(view)) => View::Text(view.clone()),
-                Some(View::Empty) | None => View::Empty,
-            };
-            layout.split(
-                axis,
-                Pane {
-                    view,
-                    parked: Vec::new(),
-                },
-            );
+            let now = layout.tick();
+            let tabs = (layout.panes.get(layout.focus))
+                .and_then(Pane::active)
+                .map(|view| Tabs::new(view.clone(), OpenAs::Permanent, now));
+            layout.split(axis, Pane { tabs });
         }
         WindowCommand::Focus(side) => match layout.neighbour(side) {
             Some(pane) => layout.focus = pane,
@@ -87,23 +152,23 @@ pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) 
         },
         WindowCommand::Only => layout.only(),
     }
+    touch(&mut state.layout);
     focus_editor(state);
 }
 
-pub fn cycle_buffer(state: &mut State, cycle: Cycle) {
+/// Activates the next or previous tab of the focused pane, wrapping around.
+pub fn cycle_tab(state: &mut State, cycle: Cycle) {
+    let now = state.layout.tick();
     let focus = state.layout.focus;
-    let current = match state.layout.panes.get(focus).map(|pane| &pane.view) {
-        Some(View::Text(view)) => state.tabs.iter().position(|&id| id == view.buffer),
-        Some(View::Empty) | None => None,
+    let Some(tabs) = (state.layout.panes.get_mut(focus)).and_then(|pane| pane.tabs.as_mut()) else {
+        return;
     };
-    let count = state.tabs.len();
-    let next = match (current, cycle, count) {
-        (_, _, 0) => return,
-        (None, _, _) => 0,
-        (Some(i), Cycle::Next, _) => (i + 1) % count,
-        (Some(i), Cycle::Previous, _) => (i + count - 1) % count,
+    let (active, count) = (tabs.active(), tabs.items().len());
+    let next = match cycle {
+        Cycle::Next => (active + 1) % count,
+        Cycle::Previous => (active + count - 1) % count,
     };
-    show(&mut state.layout, &state.buffers, focus, state.tabs[next]);
+    tabs.activate(next, now);
 }
 
 fn focus_editor(state: &mut State) {
@@ -132,7 +197,8 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
             None => {}
             Some(row) => match row.kind {
                 RowKind::File => {
-                    apply(state, Command::Open(row.path.to_path(&root)), out);
+                    let open = state.tab_config.open_from_tree;
+                    crate::apply::open(state, row.path.to_path(&root), None, open, out);
                     focus_editor(state);
                 }
                 RowKind::Dir(Fold::Expanded) => {
@@ -282,17 +348,33 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                     Files::Ready(files) => files.clone(),
                     Files::Loading => Arc::new(Vec::new()),
                 }),
-                PickerKind::Buffers => Items::Buffers(
-                    state
-                        .tabs
-                        .iter()
-                        .map(|&id| {
-                            let path = &state.buffers[id].path;
-                            let label = path.strip_prefix(state.root.path()).unwrap_or(path);
-                            (id, label.display().to_string())
+                // Most recently activated first; buffers no pane shows come last.
+                PickerKind::Buffers => {
+                    let mut recent: Vec<(Tick, BufferId)> = state
+                        .buffers
+                        .keys()
+                        .map(|id| {
+                            let used = (state.layout.panes.values())
+                                .flat_map(Pane::items)
+                                .filter(|item| item.view.buffer() == id)
+                                .map(|item| item.used)
+                                .max()
+                                .unwrap_or_default();
+                            (used, id)
                         })
-                        .collect(),
-                ),
+                        .collect();
+                    recent.sort_unstable_by_key(|&(used, _)| std::cmp::Reverse(used));
+                    Items::Buffers(
+                        recent
+                            .into_iter()
+                            .map(|(_, id)| {
+                                let path = &state.buffers[id].path;
+                                let label = path.strip_prefix(state.root.path()).unwrap_or(path);
+                                (id, label.display().to_string())
+                            })
+                            .collect(),
+                    )
+                }
                 PickerKind::Grep => Items::Grep(Grep {
                     generation: state.grep.load(Ordering::Relaxed),
                     search: Search::Idle,
@@ -324,20 +406,19 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
             let index = index as usize;
             match picker.items {
                 Items::Files(files) => {
-                    apply(
-                        state,
-                        Command::Open(PathBuf::from(files[index].as_str())),
-                        out,
-                    );
+                    let path = PathBuf::from(files[index].as_str());
+                    let open = state.tab_config.open_from_picker;
+                    crate::apply::open(state, path, None, open, out);
                     focus_editor(state);
                 }
                 Items::Buffers(buffers) => {
                     let focus = state.layout.focus;
-                    show(&mut state.layout, &state.buffers, focus, buffers[index].0);
+                    show(state, focus, buffers[index].0, OpenAs::Permanent);
                     focus_editor(state);
                 }
                 Items::Grep(grep) => {
                     let hit = &grep.hits[index];
+                    let open = state.tab_config.open_from_picker;
                     crate::apply::open(
                         state,
                         PathBuf::from(hit.path.as_str()),
@@ -345,6 +426,7 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                             line: hit.line as usize,
                             column: hit.column as usize,
                         }),
+                        open,
                         out,
                     );
                     focus_editor(state);
@@ -457,10 +539,26 @@ pub fn request_close(state: &mut State) -> Close {
     }
 }
 
-/// Tab click: shows `buffer` in the focused pane.
-pub fn select_tab(state: &mut State, buffer: BufferId) {
-    let focus = state.layout.focus;
-    show(&mut state.layout, &state.buffers, focus, buffer);
+/// Number of a mouse click within a multi-click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    Single,
+    Double,
+}
+
+/// Tab click: activates tab `index` and focuses its pane; a double click keeps a preview.
+pub fn click_tab(state: &mut State, pane: PaneId, index: usize, click: Click) {
+    let now = state.layout.tick();
+    let Some(tabs) = (state.layout.panes.get_mut(pane)).and_then(|target| target.tabs.as_mut())
+    else {
+        return;
+    };
+    tabs.activate(index, now);
+    match (click, tabs.preview() == Some(index)) {
+        (Click::Double, true) => tabs.keep(),
+        (Click::Double, false) | (Click::Single, _) => {}
+    }
+    state.layout.focus = pane;
     focus_editor(state);
 }
 
@@ -470,19 +568,29 @@ pub fn focus_pane(state: &mut State, pane: PaneId) {
         true => state.layout.focus = pane,
         false => return,
     }
+    touch(&mut state.layout);
     focus_editor(state);
 }
 
-/// Tree click: selects row `index` and focuses the sidebar; a directory toggles and a file
-/// opens in the focused pane, moving focus to the editor.
-pub fn click_tree(state: &mut State, index: usize, out: &mut Vec<Effect>) {
-    match index < state.tree.rows.len() {
-        true => state.tree.cursor = index,
-        false => return,
-    }
+/// Tree click: selects row `index`; a directory toggles, a file opens in the focused pane,
+/// and a double click keeps the file's tab.
+pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<Effect>) {
+    let Some(kind) = state.tree.rows.get(index).map(|row| row.kind) else {
+        return;
+    };
+    state.tree.cursor = index;
     state.tree.edit = TreeEdit::None;
     state.sidebar = Sidebar::Files(Focus::Sidebar);
-    tree(state, TreeCommand::Open, out);
+    match (click, kind) {
+        (Click::Single, _) => tree(state, TreeCommand::Open, out),
+        (Click::Double, RowKind::File) => {
+            let path = state.tree.rows[index].path.to_path(state.root.path());
+            crate::apply::open(state, path, None, OpenAs::Permanent, out);
+            focus_editor(state);
+        }
+        // The first click already toggled the directory.
+        (Click::Double, RowKind::Dir(_)) => {}
+    }
 }
 
 /// Picker click: opens match `index`.

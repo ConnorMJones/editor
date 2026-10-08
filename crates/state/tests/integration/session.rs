@@ -1,6 +1,5 @@
 use std::fs;
 
-use state::layout::View;
 use state::session::{self, Session, SessionError};
 use state::{Focus, Sidebar};
 
@@ -57,7 +56,8 @@ fn deleted_files_leave_empty_panes() {
     fs::write(dir.path().join("gone.txt"), "g").unwrap();
 
     let mut before = Harness::new(dir.path());
-    before.keys(":o keep.txt<ret><C-w>v:o gone.txt<ret>");
+    before.keys(":o keep.txt<ret><C-w>v:o gone.txt<ret>gp:bc<ret>");
+    assert_eq!(before.focused_tabs(), ["gone.txt"]);
     let saved = session::snapshot(&before.state);
     fs::remove_file(dir.path().join("gone.txt")).unwrap();
 
@@ -65,15 +65,10 @@ fn deleted_files_leave_empty_panes() {
     after
         .run(|state, out| session::restore(state, saved, out))
         .expect("valid session");
-    assert_eq!(after.state.tabs.len(), 1);
-    let views: Vec<bool> = after
-        .state
-        .layout
-        .leaves()
-        .iter()
-        .map(|&pane| matches!(after.state.layout.panes[pane].view, View::Text(_)))
-        .collect();
-    assert_eq!(views, vec![true, false]);
+    assert_eq!(after.state.buffers.len(), 1);
+    let leaves = after.state.layout.leaves();
+    assert_eq!(after.tabs(leaves[0]), ["keep.txt"]);
+    assert!(after.state.layout.panes[leaves[1]].tabs.is_none());
 }
 
 #[test]
@@ -90,10 +85,7 @@ fn selections_are_clamped_to_shorter_files() {
     after
         .run(|state, out| session::restore(state, saved, out))
         .expect("valid session");
-    let View::Text(view) = &after.state.layout.panes[after.state.layout.focus].view else {
-        panic!("pane shows a.txt");
-    };
-    assert!(view.selection.primary().head <= 3);
+    assert!(after.view().selection.primary().head <= 3);
 }
 
 #[test]
@@ -101,7 +93,7 @@ fn invalid_layouts_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
     let parse = |text: &str| toml::from_str::<Session>(text).expect("well-formed toml");
-    let header = "tabs = []\nfocus = 0\nsidebar = \"hidden\"\nexpanded = []\n";
+    let header = "focus = 0\nsidebar = \"hidden\"\nexpanded = []\n";
 
     let missing = parse(&format!(
         "{header}panes = [{{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 3 }}\n"

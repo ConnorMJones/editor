@@ -8,7 +8,6 @@ use model::window::PickerKind;
 use state::apply::apply;
 use state::buffer::{Content, Disk, Jump, Position};
 use state::job::{self, Job};
-use state::layout::View;
 use state::{Effect, State};
 
 use crate::harness::{Harness, disk_of};
@@ -61,7 +60,7 @@ fn open_reads_and_parses_in_a_job() {
 
     let held = apply_held(&mut h.state, Command::Open("a.rs".into()));
     assert_eq!(open_jobs(&held), 1);
-    let id = h.state.tabs[0];
+    let id = h.state.buffers.keys().next().unwrap();
     assert!(matches!(
         h.state.buffers[id].content,
         Content::Loading { jump: None }
@@ -112,7 +111,7 @@ fn loading_buffers_ignore_edits_and_cannot_be_written() {
     );
     assert_eq!(jobs(&write_as), 0);
     assert_eq!(
-        h.state.buffers[h.state.tabs[0]].path,
+        h.state.buffers.values().next().unwrap().path,
         canonical(dir.path(), "a.txt")
     );
     // Nothing is modified, so quitting is allowed while loading.
@@ -131,7 +130,7 @@ fn missing_files_open_as_new() {
     let mut h = Harness::new(dir.path());
     h.keys(":o new.txt<ret>");
     assert_eq!(h.doc().text, "");
-    assert_eq!(disk_of(&h.state.buffers[h.state.tabs[0]]), Disk::New);
+    assert_eq!(disk_of(h.state.buffers.values().next().unwrap()), Disk::New);
 }
 
 #[test]
@@ -143,12 +142,12 @@ fn failed_open_drops_the_buffer_and_restores_the_pane() {
     h.keys(":o a.txt<ret>");
 
     let held = apply_held(&mut h.state, Command::Open("bad.bin".into()));
-    assert_eq!(h.state.tabs.len(), 2);
+    assert_eq!(h.state.buffers.len(), 2);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "bad.bin")));
     finish(&mut h, held);
 
     assert!(matches!(h.state.notice, Some(Notice::NotUtf8 { .. })));
-    assert_eq!(h.state.tabs.len(), 1);
+    assert_eq!(h.state.buffers.len(), 1);
     assert_eq!(h.state.buffers.len(), 1);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
 }
@@ -173,7 +172,7 @@ fn grep_jump_waits_for_the_text() {
 
     let held = apply_held(&mut h.state, Command::Picker(PickerCommand::Submit));
     let focus = h.state.layout.focus;
-    let id = h.state.tabs[0];
+    let id = h.state.buffers.keys().next().unwrap();
     assert_eq!(
         match &h.state.buffers[id].content {
             Content::Loading { jump } => *jump,
@@ -185,10 +184,8 @@ fn grep_jump_waits_for_the_text() {
         })
     );
     finish(&mut h, held);
-    match &h.state.layout.panes[focus].view {
-        View::Text(view) => assert_eq!(view.selection, Selection::point(8)),
-        View::Empty => panic!("pane lost its buffer"),
-    }
+    assert_eq!(h.state.layout.focus, focus);
+    assert_eq!(h.view().selection, Selection::point(8));
 }
 
 #[test]

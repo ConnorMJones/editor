@@ -1,11 +1,8 @@
 use model::window::{Axis, Side};
-use state::layout::{Child, Flex, LastPane, Layout, MIN_SHARE, Node, Pane, Rect, View};
+use state::layout::{Child, Flex, LastPane, Layout, MIN_SHARE, Node, Pane, Rect};
 
 fn pane() -> Pane {
-    Pane {
-        view: View::Empty,
-        parked: Vec::new(),
-    }
+    Pane::EMPTY
 }
 
 fn split<const N: usize>(axis: Axis, children: [(f32, Node); N]) -> Node {

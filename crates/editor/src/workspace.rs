@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations,
-    Div, ElementId, ElementInputHandler, EntityInputHandler, HitboxBehavior, Hsla, IntoElement,
-    KeyDownEvent, MouseButton, MouseMoveEvent, Pixels, Point, Render, ResizeEdge, ScrollStrategy,
+    Div, ElementInputHandler, EntityInputHandler, HitboxBehavior, Hsla, IntoElement, KeyDownEvent,
+    MouseButton, MouseMoveEvent, Pixels, Point, Render, ResizeEdge, ScrollHandle, ScrollStrategy,
     Size, Stateful, Tiling, UTF16Selection, UniformListScrollHandle, Window, WindowButton,
     WindowButtonLayout, WindowControlArea, canvas, div, point, prelude::*, px, size,
     transparent_black, uniform_list,
@@ -14,14 +14,15 @@ use gpui::{
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::visual_offset_from_anchor;
 use model::command::{Command, PickerCommand};
+use model::config::TitleBar;
 use model::register::Clipboard;
 use model::window::Axis;
-use slotmap::Key as _;
+use slotmap::SecondaryMap;
 use state::buffer::{Content, Disk};
 use state::display::{self, Gutter, Indent};
 use state::job::{self, JobResult};
 use state::keymap::{self, Context as KeyContext};
-use state::layout::{Node, PaneId, SplitPath, View};
+use state::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
 use state::picker::{Items, PALETTE, Search};
 use state::tree::{self, Fold, RowKind, TreeEdit};
 use state::watch::{self, Watcher};
@@ -37,6 +38,7 @@ use crate::theme::Theme;
 pub struct Workspace {
     pub state: State,
     pub theme: Theme,
+    pub title_bar: TitleBar,
     pub effects: Vec<Effect>,
     pub focus: gpui::FocusHandle,
     pub watcher: Watcher,
@@ -50,6 +52,10 @@ pub struct Workspace {
     pub resize_edge: Option<ResizeEdge>,
     /// Bounds drawn last frame, which drags measure against.
     pub areas: Rc<Areas>,
+    /// Horizontal scroll of each pane's tab bar.
+    pub tab_scroll: SecondaryMap<PaneId, ScrollHandle>,
+    /// Focused pane and active tab last scrolled into view.
+    pub shown_tab: Option<(PaneId, usize)>,
 }
 
 /// Where the session is saved on exit, per `session.restore`.
@@ -165,7 +171,7 @@ impl Workspace {
     }
 
     /// Runs queued effects, keeps list cursors in view and redraws after a state change.
-    fn changed(&mut self, cx: &mut Context<Self>) {
+    pub fn changed(&mut self, cx: &mut Context<Self>) {
         self.tree_scroll
             .scroll_to_item(self.state.tree.cursor, ScrollStrategy::Nearest);
         match &self.state.overlay {
@@ -173,6 +179,17 @@ impl Workspace {
                 .picker_scroll
                 .scroll_to_item(picker.cursor, ScrollStrategy::Nearest),
             Overlay::None | Overlay::Prompt(_) => {}
+        }
+        let focus = self.state.layout.focus;
+        let active = (self.state.layout.panes.get(focus))
+            .and_then(|pane| pane.tabs.as_ref())
+            .map(Tabs::active);
+        match (active, self.tab_scroll.get(focus)) {
+            (Some(index), Some(scroll)) if self.shown_tab != Some((focus, index)) => {
+                scroll.scroll_to_item(index);
+                self.shown_tab = Some((focus, index));
+            }
+            (Some(_) | None, _) => {}
         }
         self.flush(cx);
         cx.notify();
@@ -558,9 +575,9 @@ impl Workspace {
         let focused = pane == state.layout.focus;
         let mode = state.input.mode;
         let (file, flags, selections, position) =
-            match state.layout.panes.get(pane).map(|pane| &pane.view) {
+            match state.layout.panes.get(pane).and_then(Pane::active) {
                 Some(View::Text(view)) => {
-                    let buffer = &state.buffers[view.buffer];
+                    let buffer = &state.buffers[view.buffer()];
                     let name = buffer
                         .path
                         .strip_prefix(state.root.path())
@@ -597,7 +614,7 @@ impl Workspace {
                         }
                     }
                 }
-                Some(View::Empty) | None => (
+                None => (
                     "[scratch]".to_owned(),
                     String::new(),
                     String::new(),
@@ -650,9 +667,17 @@ impl Workspace {
         match node {
             Node::Pane(pane) => {
                 let pane = *pane;
-                let body =
-                    match self.state.layout.panes.get(pane).map(|pane| &pane.view) {
-                        Some(View::Text(view)) => match &self.state.buffers[view.buffer].content {
+                let target = self.state.layout.panes.get(pane);
+                let bar = match (
+                    target.and_then(|target| target.tabs.as_ref()),
+                    self.tab_scroll.get(pane),
+                ) {
+                    (Some(tabs), Some(scroll)) => Some(self.tab_bar(pane, tabs, scroll, cx)),
+                    (Some(_) | None, _) => None,
+                };
+                let body = match target.and_then(Pane::active) {
+                    Some(View::Text(view)) => {
+                        match &self.state.buffers[view.buffer()].content {
                             Content::Text { .. } => div()
                                 .flex_1()
                                 .min_h_0()
@@ -666,9 +691,10 @@ impl Workspace {
                                 .p_2()
                                 .text_color(self.theme.text_muted)
                                 .child("loading…"),
-                        },
-                        Some(View::Empty) | None => div().flex_1(),
-                    };
+                        }
+                    }
+                    None => div().flex_1(),
+                };
                 div()
                     .flex_1()
                     .flex()
@@ -684,6 +710,7 @@ impl Workspace {
                             this.changed(cx);
                         }),
                     )
+                    .children(bar)
                     .child(body)
                     .child(self.statusline(pane))
                     .into_any_element()
@@ -734,97 +761,6 @@ impl Workspace {
                 container.into_any_element()
             }
         }
-    }
-
-    /// One tab per open buffer: click shows it, middle-click or × closes it.
-    fn tabline(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let theme = &self.theme;
-        let state = &self.state;
-        match state.tabs.len() {
-            0 => return None,
-            _ => {}
-        }
-        let current = match state.layout.panes.get(state.layout.focus).map(|p| &p.view) {
-            Some(View::Text(view)) => Some(view.buffer),
-            Some(View::Empty) | None => None,
-        };
-        let tabs: Vec<_> = state
-            .tabs
-            .iter()
-            .map(|&id| {
-                let buffer = &state.buffers[id];
-                let name = buffer
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let (bg, fg) = match current == Some(id) {
-                    true => (theme.background, theme.text),
-                    false => (theme.surface, theme.text_muted),
-                };
-                let marker = match &buffer.content {
-                    Content::Text { doc, .. } => match doc.is_modified() {
-                        true => "●",
-                        false => "",
-                    },
-                    Content::Loading { .. } => "…",
-                };
-                let key = id.data().as_ffi();
-                div()
-                    .id(ElementId::NamedInteger("tab".into(), key))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .pl_2()
-                    .pr_1()
-                    .bg(bg)
-                    .text_color(fg)
-                    .border_r_1()
-                    .border_color(theme.chrome.border)
-                    .hover(|style| style.bg(theme.chrome.hover))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        workspace::select_tab(&mut this.state, id);
-                        window.focus(&this.focus, cx);
-                        this.changed(cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _, _, cx| {
-                            apply::close_buffer(&mut this.state, id, apply::Force::No);
-                            this.changed(cx);
-                        }),
-                    )
-                    .child(name)
-                    .child(div().text_color(theme.chrome.unsaved).child(marker))
-                    .child(
-                        div()
-                            .id(ElementId::NamedInteger("tab-close".into(), key))
-                            .px_1()
-                            .rounded(px(3.))
-                            .text_color(theme.text_muted)
-                            .hover(|style| style.bg(theme.chrome.hover).text_color(theme.text))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                apply::close_buffer(&mut this.state, id, apply::Force::No);
-                                this.changed(cx);
-                            }))
-                            .child("×"),
-                    )
-            })
-            .collect();
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .bg(theme.surface)
-                .border_b_1()
-                .border_color(theme.chrome.border)
-                .font(theme.ui.clone())
-                .text_size(theme.ui_size)
-                .children(tabs),
-        )
     }
 
     fn sidebar(&self, focus: Focus, cx: &mut Context<Self>) -> Div {
@@ -902,10 +838,15 @@ impl Workspace {
                                             .pr_2()
                                             .text_color(color)
                                             .on_click(cx.listener(
-                                                move |this, _: &ClickEvent, window, cx| {
+                                                move |this, event: &ClickEvent, window, cx| {
+                                                    let click = match event.click_count() {
+                                                        2 => workspace::Click::Double,
+                                                        _ => workspace::Click::Single,
+                                                    };
                                                     workspace::click_tree(
                                                         &mut this.state,
                                                         index,
+                                                        click,
                                                         &mut this.effects,
                                                     );
                                                     window.focus(&this.focus, cx);
@@ -1175,11 +1116,8 @@ impl EntityInputHandler for Workspace {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let state = &self.state;
-        let view = match &state.layout.panes.get(state.layout.focus)?.view {
-            View::Text(view) => view,
-            View::Empty => return None,
-        };
-        let doc = match &state.buffers.get(view.buffer)?.content {
+        let View::Text(view) = state.layout.panes.get(state.layout.focus)?.active()?;
+        let doc = match &state.buffers.get(view.buffer())?.content {
             Content::Text { doc, .. } => doc,
             Content::Loading { .. } => return None,
         };
@@ -1229,6 +1167,16 @@ impl Render for Workspace {
             ..
         } = &mut self.state;
         tree::sync_unsaved(&mut tree.unsaved, root.path(), buffers);
+        let panes = &self.state.layout.panes;
+        self.tab_scroll.retain(|pane, _| panes.contains_key(pane));
+        for pane in panes.keys() {
+            match self.tab_scroll.contains_key(pane) {
+                true => {}
+                false => {
+                    self.tab_scroll.insert(pane, ScrollHandle::new());
+                }
+            }
+        }
         let state = &self.state;
         let bottom = match (&state.overlay, &state.tree.edit, &state.notice) {
             (Overlay::Prompt(_), _, _) => String::new(),
@@ -1306,8 +1254,10 @@ impl Render for Workspace {
                 .absolute()
                 .size_full(),
             )
-            .child(self.titlebar(window, cx))
-            .children(self.tabline(cx))
+            .children(match self.title_bar {
+                TitleBar::Shown => Some(self.titlebar(window, cx)),
+                TitleBar::Hidden => None,
+            })
             .child(main)
             .child(div().flex_none().px_2().h(line_height).child(bottom))
             .children(self.picker(window, cx))

@@ -3,14 +3,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use helix_core::{Range, Selection, SmallVec};
-use model::command::Command;
 use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
-use crate::apply::apply;
-use crate::buffer::{BufferId, Content};
+use crate::apply;
+use crate::buffer::Content;
 use crate::job::Job;
-use crate::layout::{Child, Flex, Layout, Node, Pane, PaneId, Scroll, TextView, View};
+use crate::layout::{
+    Child, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs, TextView, View,
+};
 use crate::path::RelPath;
 use crate::tree::{self, Dir, Fold, Listing};
 use crate::{Effect, Focus, Sidebar, SidebarWidth, State};
@@ -19,8 +20,6 @@ use crate::{Effect, Focus, Sidebar, SidebarWidth, State};
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
-    /// Open buffers in tab order.
-    pub tabs: Vec<PathBuf>,
     /// Panes in reading order; `layout` and `focus` index into it.
     pub panes: Vec<SessionPane>,
     pub layout: SessionNode,
@@ -58,10 +57,22 @@ fn default_sidebar_width() -> f32 {
     SidebarWidth::DEFAULT.get()
 }
 
+/// `active` and `preview` index into `tabs`.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionPane {
     Empty,
+    Tabs {
+        tabs: Vec<SessionItem>,
+        active: usize,
+        #[serde(default)]
+        preview: Option<usize>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum SessionItem {
     Text {
         path: PathBuf,
         /// `[anchor, head]` char offsets.
@@ -94,6 +105,8 @@ pub enum SessionError {
     UnusedPane(usize),
     #[error("split weight {0} is not a positive number")]
     InvalidFlex(f32),
+    #[error("pane {pane}: {reason}")]
+    Tabs { pane: usize, reason: InvalidTabs },
 }
 
 /// Session file for `root` under `dir`, named after the escaped root path.
@@ -128,19 +141,30 @@ pub fn snapshot(state: &State) -> Session {
     let index: HashMap<PaneId, usize> = leaves.iter().enumerate().map(|(i, &p)| (p, i)).collect();
     let panes = leaves
         .iter()
-        .map(|&pane| match &state.layout.panes[pane].view {
-            View::Text(view) => SessionPane::Text {
-                path: state.buffers[view.buffer].path.clone(),
-                ranges: view
-                    .selection
-                    .ranges()
+        .map(|&pane| match &state.layout.panes[pane].tabs {
+            None => SessionPane::Empty,
+            Some(tabs) => SessionPane::Tabs {
+                tabs: tabs
+                    .items()
                     .iter()
-                    .map(|range| [range.anchor, range.head])
+                    .map(|item| {
+                        let View::Text(view) = &item.view;
+                        SessionItem::Text {
+                            path: state.buffers[view.buffer()].path.clone(),
+                            ranges: view
+                                .selection
+                                .ranges()
+                                .iter()
+                                .map(|range| [range.anchor, range.head])
+                                .collect(),
+                            primary: view.selection.primary_index(),
+                            scroll: view.scroll.anchor,
+                        }
+                    })
                     .collect(),
-                primary: view.selection.primary_index(),
-                scroll: view.scroll.anchor,
+                active: tabs.active(),
+                preview: tabs.preview(),
             },
-            View::Empty => SessionPane::Empty,
         })
         .collect();
     let mut expanded: Vec<String> = state
@@ -152,11 +176,6 @@ pub fn snapshot(state: &State) -> Session {
         .collect();
     expanded.sort_unstable();
     Session {
-        tabs: state
-            .tabs
-            .iter()
-            .map(|&id| state.buffers[id].path.clone())
-            .collect(),
         panes,
         layout: snapshot_node(&state.layout.root, Flex::EVEN, &index),
         focus: index[&state.layout.focus],
@@ -187,7 +206,7 @@ fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> Ses
 }
 
 /// Reopens the session's buffers and rebuilds its layout; files that no longer open are
-/// skipped and their panes left empty. Call after `boot`.
+/// skipped, their panes left empty when no tab remains. Call after `boot`.
 pub fn restore(
     state: &mut State,
     session: Session,
@@ -199,71 +218,107 @@ pub fn restore(
         Some(pane) => return Err(SessionError::UnusedPane(pane)),
         None => {}
     }
+    for (pane, saved) in session.panes.iter().enumerate() {
+        let SessionPane::Tabs {
+            tabs,
+            active,
+            preview,
+        } = saved
+        else {
+            continue;
+        };
+        let duplicate = tabs.iter().enumerate().position(|(index, item)| {
+            let SessionItem::Text { path, .. } = item;
+            tabs[..index]
+                .iter()
+                .any(|SessionItem::Text { path: earlier, .. }| earlier == path)
+        });
+        let reason = match (tabs.len(), duplicate, preview) {
+            (0, _, _) => InvalidTabs::Empty,
+            (_, Some(index), _) => InvalidTabs::Duplicate(index),
+            (len, None, _) if *active >= len => InvalidTabs::Active(*active),
+            (len, None, Some(preview)) if *preview >= len => InvalidTabs::Preview(*preview),
+            (_, None, _) => continue,
+        };
+        return Err(SessionError::Tabs { pane, reason });
+    }
     let focus_slot = session.focus.min(session.panes.len().saturating_sub(1));
 
-    // Files deleted since the session was saved are dropped rather than recreated empty.
-    for path in session.tabs.iter().filter(|path| path.is_file()) {
-        apply(state, Command::Open(path.clone()), out);
-    }
-    let by_path: HashMap<PathBuf, BufferId> = state
-        .buffers
-        .iter()
-        .map(|(id, buffer)| (buffer.path.clone(), id))
-        .collect();
-
     let mut panes = slotmap::SlotMap::with_key();
-    let ids: Vec<PaneId> = session
-        .panes
-        .into_iter()
-        .map(|pane| {
-            let view = match pane {
-                SessionPane::Empty => View::Empty,
-                SessionPane::Text {
-                    path,
-                    ranges,
-                    primary,
-                    scroll,
-                } => match by_path.get(&path) {
-                    Some(&buffer) => {
-                        // Loading buffers clamp their views when the text arrives.
-                        let len = match &state.buffers[buffer].content {
-                            Content::Text { doc, .. } => doc.text.len_chars(),
-                            Content::Loading { .. } => usize::MAX,
-                        };
-                        let ranges: SmallVec<[Range; 1]> = ranges
-                            .iter()
-                            .map(|&[anchor, head]| Range::new(anchor.min(len), head.min(len)))
-                            .collect();
-                        let selection = match ranges.is_empty() {
-                            true => Selection::point(0),
-                            false => {
-                                let primary = primary.min(ranges.len() - 1);
-                                Selection::new(ranges, primary)
-                            }
-                        };
-                        View::Text(TextView {
-                            buffer,
-                            selection,
-                            scroll: Scroll {
-                                anchor: scroll.min(len),
-                                ..Scroll::default()
-                            },
-                        })
-                    }
-                    None => View::Empty,
-                },
+    let mut ids: Vec<PaneId> = Vec::with_capacity(session.panes.len());
+    for (pane, saved) in session.panes.into_iter().enumerate() {
+        let SessionPane::Tabs {
+            tabs,
+            active,
+            preview,
+        } = saved
+        else {
+            ids.push(panes.insert(Pane::EMPTY));
+            continue;
+        };
+        // Saved index of each kept item; files deleted since are dropped, not recreated.
+        let mut kept: Vec<usize> = Vec::with_capacity(tabs.len());
+        let mut items: Vec<Item> = Vec::with_capacity(tabs.len());
+        for (saved_index, item) in tabs.into_iter().enumerate() {
+            let SessionItem::Text {
+                path,
+                ranges,
+                primary,
+                scroll,
+            } = item;
+            let buffer = match path.is_file() {
+                true => apply::load(state, path, out),
+                false => None,
             };
-            panes.insert(Pane {
-                view,
-                parked: Vec::new(),
-            })
-        })
-        .collect();
+            let Some(buffer) = buffer else {
+                continue;
+            };
+            // Loading buffers clamp their views when the text arrives.
+            let len = match &state.buffers[buffer].content {
+                Content::Text { doc, .. } => doc.text.len_chars(),
+                Content::Loading { .. } => usize::MAX,
+            };
+            let ranges: SmallVec<[Range; 1]> = ranges
+                .iter()
+                .map(|&[anchor, head]| Range::new(anchor.min(len), head.min(len)))
+                .collect();
+            let mut view = TextView::new(buffer);
+            view.selection = match ranges.is_empty() {
+                true => Selection::point(0),
+                false => {
+                    let primary = primary.min(ranges.len() - 1);
+                    Selection::new(ranges, primary)
+                }
+            };
+            view.scroll.anchor = scroll.min(len);
+            items.push(Item {
+                view: View::Text(view),
+                used: state.layout.tick(),
+            });
+            kept.push(saved_index);
+        }
+        let active = (kept.iter().enumerate())
+            .min_by_key(|(_, saved)| saved.abs_diff(active))
+            .map(|(index, _)| index);
+        let tabs = match active {
+            None => None,
+            Some(active) => {
+                let preview = preview.and_then(|p| kept.iter().position(|&saved| saved == p));
+                let now = state.layout.tick();
+                let mut tabs = Tabs::from_parts(items, active, preview)
+                    .map_err(|reason| SessionError::Tabs { pane, reason })?;
+                tabs.activate(active, now);
+                Some(tabs)
+            }
+        };
+        ids.push(panes.insert(Pane { tabs }));
+    }
     state.layout = match ids.get(focus_slot) {
         Some(&focus) => Layout {
             root: restore_node(session.layout, &ids).node,
             panes,
             focus,
+            clock: state.layout.clock,
         },
         None => Layout::new(),
     };

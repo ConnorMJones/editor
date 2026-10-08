@@ -16,7 +16,7 @@ use state::buffer::Content;
 use state::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
-use state::layout::{PaneId, View, Viewport};
+use state::layout::{Pane, PaneId, View, Viewport};
 use state::scroll::{self, Gesture, Press, Scrollbar, Unit};
 
 use crate::theme::{Colors, Theme};
@@ -187,12 +187,18 @@ impl Element for TextElement {
         let pane = self.pane;
         let workspace = self.workspace.read(cx);
         let cell = workspace.theme.cell;
-        let len_lines = match workspace.state.layout.panes.get(pane).map(|p| &p.view) {
-            Some(View::Text(view)) => match &workspace.state.buffers[view.buffer].content {
+        let len_lines = match workspace
+            .state
+            .layout
+            .panes
+            .get(pane)
+            .and_then(Pane::active)
+        {
+            Some(View::Text(view)) => match &workspace.state.buffers[view.buffer()].content {
                 Content::Text { doc, .. } => doc.text.len_lines(),
                 Content::Loading { .. } => 1,
             },
-            Some(View::Empty) | None => 1,
+            None => 1,
         };
         let gutter = Gutter::new(len_lines);
         let text_origin = point(
@@ -230,8 +236,8 @@ impl Element for TextElement {
             cache.lines.swap(0, 1);
             cache.numbers.swap(0, 1);
             let [frame, previous] = &mut cache.frames;
-            match state.layout.panes.get(pane).map(|p| &p.view) {
-                Some(View::Text(view)) => match &state.buffers[view.buffer].content {
+            match state.layout.panes.get(pane).and_then(Pane::active) {
+                Some(View::Text(view)) => match &state.buffers[view.buffer()].content {
                     Content::Text { doc, .. } => display::layout(
                         frame,
                         doc,
@@ -246,7 +252,7 @@ impl Element for TextElement {
                         frame.cursors.clear();
                     }
                 },
-                Some(View::Empty) | None => {
+                None => {
                     frame.rows.clear();
                     frame.selections.clear();
                     frame.cursors.clear();

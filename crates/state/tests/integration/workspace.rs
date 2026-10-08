@@ -4,7 +4,7 @@ use std::path::Path;
 use model::git::GitStatus;
 use state::buffer::Disk;
 use state::files::Files;
-use state::layout::{Node, View};
+use state::layout::Node;
 use state::path::RelPath;
 use state::picker::Items;
 use state::tree::RowKind;
@@ -63,7 +63,7 @@ fn buffer_picker_and_cycling() {
     }
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>:o b.txt<ret>:o c.txt<ret>");
-    assert_eq!(h.state.tabs.len(), 3);
+    assert_eq!(h.focused_tabs(), ["a.txt", "b.txt", "c.txt"]);
 
     h.keys("gn");
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
@@ -118,22 +118,20 @@ fn closing_buffer_keeps_panes_valid() {
     fs::write(dir.path().join("b.txt"), "b").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret><C-w>v:o b.txt<ret>");
+    let (first, second) = (h.state.layout.leaves()[0], h.state.layout.leaves()[1]);
     h.keys(":bc<ret>");
-    assert_eq!(h.state.tabs.len(), 1);
+    assert_eq!(h.state.buffers.len(), 1);
     for pane in h.state.layout.panes.values() {
-        match &pane.view {
-            View::Text(view) => assert!(h.state.buffers.contains_key(view.buffer)),
-            View::Empty => panic!("pane lost its buffer"),
+        match pane.active() {
+            Some(view) => assert!(h.state.buffers.contains_key(view.buffer())),
+            None => panic!("pane lost its buffer"),
         }
     }
+    // a.txt is still shown in the first pane, so its buffer stays.
     h.keys(":bc<ret>");
-    assert!(
-        h.state
-            .layout
-            .panes
-            .values()
-            .all(|p| matches!(p.view, View::Empty))
-    );
+    assert!(h.state.layout.panes[second].tabs.is_none());
+    assert_eq!(h.tabs(first), ["a.txt"]);
+    assert_eq!(h.state.buffers.len(), 1);
 }
 
 #[test]
@@ -332,10 +330,7 @@ fn grep_picker_jumps_to_hit() {
     }
     h.keys("<ret>");
     let doc = h.doc();
-    let View::Text(view) = &h.state.layout.panes[h.state.layout.focus].view else {
-        panic!("no view");
-    };
-    let cursor = view.selection.primary().cursor(doc.text.slice(..));
+    let cursor = h.view().selection.primary().cursor(doc.text.slice(..));
     assert_eq!(cursor, doc.text.line_to_char(1) + 4);
 }
 
@@ -345,4 +340,19 @@ fn command_palette_runs_command() {
     let mut h = Harness::new(dir.path());
     h.keys("<space>?vsplit<ret>");
     assert_eq!(h.state.layout.panes.len(), 2);
+}
+
+#[test]
+fn reading_watched_files_raises_no_events() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "a").unwrap();
+    let mut h = Harness::watched(dir.path());
+    // Settle events from boot's own listing and git status.
+    h.wait_for_events(|_| false);
+    let _ = fs::read(dir.path().join("a.txt")).unwrap();
+    let _ = fs::read_dir(dir.path()).unwrap().count();
+    assert!(
+        !h.events_arrive(),
+        "opening files must not look like changes"
+    );
 }

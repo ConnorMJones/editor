@@ -10,6 +10,8 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub font: FontConfig,
     pub session: SessionConfig,
+    pub tabs: TabsConfig,
+    pub window: WindowConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,4 +73,46 @@ pub enum Restore {
     #[default]
     Off,
     Last,
+}
+
+/// How files opened from each source join a pane's tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TabsConfig {
+    /// Tree clicks and `l`/enter on a file row.
+    pub open_from_tree: OpenAs,
+    /// File and grep pickers.
+    pub open_from_picker: OpenAs,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        TabsConfig {
+            open_from_tree: OpenAs::Preview,
+            open_from_picker: OpenAs::Permanent,
+        }
+    }
+}
+
+/// A preview tab is replaced by the next preview opened in its pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenAs {
+    Preview,
+    Permanent,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WindowConfig {
+    pub title_bar: TitleBar,
+}
+
+/// The drawn title bar; GNOME offers no server-side one, so hiding it leaves Super+drag to move.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleBar {
+    #[default]
+    Hidden,
+    Shown,
 }
