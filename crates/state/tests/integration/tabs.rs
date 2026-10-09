@@ -2,7 +2,7 @@ use std::fs;
 
 use model::notice::Notice;
 use state::apply::Force;
-use state::layout::{InvalidTabs, View};
+use state::layout::InvalidTabs;
 use state::picker::Items;
 use state::session::{self, Session, SessionError};
 use state::workspace::{self, Click};
@@ -239,8 +239,11 @@ fn one_buffer_in_two_panes_maps_every_tab_through_edits() {
     h.keys("<C-w>vj");
     let second = h.state.layout.focus;
     let selection = |h: &Harness, pane, index: usize| {
-        let View::Text(view) = &h.state.layout.panes[pane].items()[index].view;
-        view.selection.clone()
+        h.state.layout.panes[pane].items()[index]
+            .view
+            .text()
+            .selection
+            .clone()
     };
     let parked = selection(&h, second, 0);
     // The second pane's a.txt tab goes inactive behind b.txt.
@@ -319,7 +322,7 @@ fn split_copies_only_the_active_item() {
     h.keys("b");
     assert_ne!(h.view().selection, selection);
     match h.state.layout.panes[first].active() {
-        Some(View::Text(view)) => assert_eq!(view.selection, selection),
+        Some(view) => assert_eq!(view.text().selection, selection),
         None => panic!("first pane lost its tab"),
     }
     h.keys("<C-w>k");

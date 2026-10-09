@@ -229,6 +229,7 @@ fn fillers_insert_virtual_rows_and_shades_colour_lines() {
         &Selection::point(0),
         Scroll {
             anchor: 0,
+            rows: 0,
             viewport: Viewport { rows: 7, cols: 40 },
         },
         &loader,
@@ -276,6 +277,7 @@ fn virtual_rows_fill_the_viewport_end() {
         &Selection::point(0),
         Scroll {
             anchor: 0,
+            rows: 0,
             viewport: Viewport { rows: 4, cols: 40 },
         },
         &loader,

@@ -8,6 +8,8 @@ use helix_core::syntax::{HighlighterError, Loader};
 use helix_core::{Language, LineEnding, Rope, Selection, Syntax, Transaction};
 use slotmap::new_key_type;
 
+use crate::changes::Arrive;
+use crate::conflict::{self, Conflicts};
 use crate::diff::{Diff, Edge};
 use crate::layout::PaneId;
 
@@ -37,6 +39,7 @@ pub enum Content {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Jump {
     pub pane: PaneId,
+    pub arrive: Arrive,
     pub to: Target,
 }
 
@@ -79,6 +82,8 @@ pub struct TextDoc {
     pub indent_style: IndentStyle,
     pub tab_width: usize,
     pub text_width: usize,
+    /// Parsed with the text, then again after edits by `conflict::sync`.
+    pub conflicts: Conflicts,
 }
 
 /// Edits applied to `text` but not yet grouped into an undo revision.
@@ -97,6 +102,8 @@ impl TextDoc {
             language.and_then(|language| Syntax::new(text.slice(..), language, loader).ok());
         let config = language.map(|language| &**loader.language(language).config());
         let indent = config.and_then(|config| config.indent.as_ref());
+        let mut conflicts = Conflicts::EMPTY;
+        conflict::parse(text.slice(..), 0, &mut conflicts);
         TextDoc {
             line_ending: helix_core::line_ending::auto_detect_line_ending(&text)
                 .unwrap_or(LineEnding::LF),
@@ -116,6 +123,7 @@ impl TextDoc {
             saved_revision: 0,
             language,
             syntax,
+            conflicts,
         }
     }
 

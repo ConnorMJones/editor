@@ -6,6 +6,7 @@ use model::window::{Axis, Side};
 use slotmap::{SlotMap, new_key_type};
 
 use crate::buffer::BufferId;
+use crate::diffview::DiffView;
 
 new_key_type! {
     pub struct PaneId;
@@ -106,7 +107,7 @@ impl Layout {
         self.clock
     }
 
-    /// Makes every preview tab of `buffer` permanent.
+    /// Makes every preview tab of `buffer`, text or diff, permanent.
     pub fn keep(&mut self, buffer: BufferId) {
         for pane in self.panes.values_mut() {
             match &mut pane.tabs {
@@ -436,13 +437,49 @@ pub struct Item {
 #[derive(Clone)]
 pub enum View {
     Text(TextView),
+    Diff(DiffView),
+}
+
+/// Identifies a tab within its pane, so one pane can hold a file and its diff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TabKey {
+    Text(BufferId),
+    Diff(BufferId),
+}
+
+impl TabKey {
+    pub fn buffer(self) -> BufferId {
+        match self {
+            TabKey::Text(buffer) | TabKey::Diff(buffer) => buffer,
+        }
+    }
 }
 
 impl View {
-    /// Identifies the view within its pane.
+    pub fn key(&self) -> TabKey {
+        match self {
+            View::Text(view) => TabKey::Text(view.buffer),
+            View::Diff(diff) => TabKey::Diff(diff.text.buffer),
+        }
+    }
+
     pub fn buffer(&self) -> BufferId {
-        let View::Text(view) = self;
-        view.buffer
+        self.key().buffer()
+    }
+
+    /// The buffer's selection and scroll: the text view, or a diff's right side.
+    pub fn text(&self) -> &TextView {
+        match self {
+            View::Text(view) => view,
+            View::Diff(diff) => &diff.text,
+        }
+    }
+
+    pub fn text_mut(&mut self) -> &mut TextView {
+        match self {
+            View::Text(view) => view,
+            View::Diff(diff) => &mut diff.text,
+        }
     }
 }
 
@@ -502,10 +539,10 @@ impl Tabs {
         preview: Option<usize>,
     ) -> Result<Tabs, InvalidTabs> {
         let duplicate = items.iter().enumerate().find_map(|(index, item)| {
-            let buffer = item.view.buffer();
+            let key = item.view.key();
             items[..index]
                 .iter()
-                .any(|earlier| earlier.view.buffer() == buffer)
+                .any(|earlier| earlier.view.key() == key)
                 .then_some(index)
         });
         match (items.len(), duplicate, preview) {
@@ -537,10 +574,8 @@ impl Tabs {
         self.preview
     }
 
-    pub fn find(&self, buffer: BufferId) -> Option<usize> {
-        self.items
-            .iter()
-            .position(|item| item.view.buffer() == buffer)
+    pub fn find(&self, key: TabKey) -> Option<usize> {
+        self.items.iter().position(|item| item.view.key() == key)
     }
 
     /// Stale indices are ignored.
@@ -563,7 +598,7 @@ impl Tabs {
     /// after the active tab; returns the displaced preview.
     pub(crate) fn open(&mut self, view: View, open: OpenAs, now: Tick) -> Option<Item> {
         let item = Item { view, used: now };
-        match (self.find(item.view.buffer()), open, self.preview) {
+        match (self.find(item.view.key()), open, self.preview) {
             (Some(index), OpenAs::Permanent, _) => {
                 match self.preview == Some(index) {
                     true => self.preview = None,
@@ -636,10 +671,12 @@ impl Tabs {
     }
 }
 
-/// Visible window of a text view; `anchor` is the first char of the top visual row.
+/// Visible window of a text view: the top row lies `rows` below `anchor`'s visual row, like
+/// helix's `vertical_offset`, and is negative only inside filler rows above the first line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scroll {
     pub anchor: usize,
+    pub rows: isize,
     pub viewport: Viewport,
 }
 

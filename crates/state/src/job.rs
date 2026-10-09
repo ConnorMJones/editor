@@ -17,14 +17,11 @@ use crate::buffer::{BufferId, Content, Disk, Target, TextDoc};
 use crate::diff::{Base, BaseRead, Diff, Edge, Landing, Lines, Outcome, Stamp};
 use crate::files::{self, Files, Rescan, Walked};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
-use crate::layout::View;
+
 use crate::path::RelPath;
 use crate::picker::{self, Hit, Items, Preview, Search};
 use crate::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
-use crate::{
-    Effect, Exit, Focus, Overlay, Refresh, Repo, Sidebar, State, changes, request_git, scroll,
-    watch,
-};
+use crate::{Effect, Exit, Overlay, Refresh, Repo, State, changes, request_git, scroll, watch};
 
 /// Blocking work run off the UI thread.
 pub enum Job {
@@ -105,6 +102,15 @@ pub enum Job {
         path: PathBuf,
         op: IndexOp,
     },
+    /// Builds the highlighted HEAD copy a diff view shows on its left.
+    ParseHead {
+        buffer: BufferId,
+        oid: Oid,
+        text: Rope,
+        /// Picks the language.
+        path: PathBuf,
+        languages: Arc<Loader>,
+    },
 }
 
 /// What a reload does to a buffer with unsaved edits.
@@ -176,6 +182,11 @@ pub enum JobResult {
         path: PathBuf,
         op: IndexOp,
         result: Result<(), IndexError>,
+    },
+    HeadParsed {
+        buffer: BufferId,
+        oid: Oid,
+        doc: TextDoc,
     },
 }
 
@@ -408,6 +419,17 @@ pub fn run(job: Job) -> JobResult {
             path,
             op,
         },
+        Job::ParseHead {
+            buffer,
+            oid,
+            text,
+            path,
+            languages,
+        } => JobResult::HeadParsed {
+            buffer,
+            oid,
+            doc: TextDoc::new(text, &path, &languages),
+        },
     }
 }
 
@@ -430,11 +452,12 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             let notice = match read {
                 OpenRead::Text { doc, disk, mtime } => {
                     let len = doc.text.len_chars();
-                    let jump = jump.map(|jump| match jump.to {
-                        Target::Position(to) => {
-                            (jump.pane, Arrival::At(line_column(&doc.text, to)))
-                        }
-                        Target::Hunk(edge) => (jump.pane, Arrival::Hunk(edge)),
+                    let jump = jump.map(|jump| {
+                        let arrival = match jump.to {
+                            Target::Position(to) => Arrival::At(line_column(&doc.text, to)),
+                            Target::Hunk(edge) => Arrival::Hunk(edge),
+                        };
+                        (jump.pane, jump.arrive, arrival)
                     });
                     entry.content = Content::Text {
                         doc,
@@ -446,7 +469,7 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     // Views restored from a session were placed before the length was known.
                     for pane in state.layout.panes.values_mut() {
                         for item in pane.items_mut() {
-                            let View::Text(view) = &mut item.view;
+                            let view = item.view.text_mut();
                             match view.buffer() == buffer {
                                 true => {
                                     view.selection = view.selection.clone().transform(|range| {
@@ -459,16 +482,16 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         }
                     }
                     match jump {
-                        Some((pane, Arrival::Hunk(edge))) => {
-                            changes::expect_landing(state, buffer, Landing { pane, edge })
+                        Some((pane, arrive, Arrival::Hunk(edge))) => {
+                            changes::expect_landing(state, buffer, Landing { pane, edge, arrive })
                         }
-                        Some((pane, Arrival::At(at))) => {
+                        Some((pane, arrive, Arrival::At(at))) => {
                             let target = (state.layout.panes.get_mut(pane)).and_then(|target| {
-                                let index = target.tabs.as_ref()?.find(buffer)?;
-                                Some(&mut target.items_mut()[index].view)
+                                let index = target.tabs.as_ref()?.find(arrive.key(buffer))?;
+                                Some(target.items_mut()[index].view.text_mut())
                             });
                             match target {
-                                Some(View::Text(view)) => {
+                                Some(view) => {
                                     view.selection = Selection::point(at);
                                     scroll::follow_cursor(state, pane);
                                 }
@@ -728,7 +751,7 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         .values()
                         .flat_map(|pane| pane.items())
                         .find_map(|item| {
-                            let View::Text(view) = &item.view;
+                            let view = item.view.text();
                             (view.buffer() == buffer).then(|| view.selection.clone())
                         })
                         .unwrap_or_else(|| Selection::point(0));
@@ -764,10 +787,7 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     match kind {
                         EntryKind::File => {
                             crate::apply::apply(state, Command::Open(path.to_path(&root)), out);
-                            match state.sidebar {
-                                Sidebar::Files(_) => state.sidebar = Sidebar::Files(Focus::Editor),
-                                Sidebar::Hidden => {}
-                            }
+                            crate::workspace::focus_editor(state);
                         }
                         EntryKind::Dir => {}
                     }
@@ -817,6 +837,9 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         } => changes::diffed(state, buffer, stamp, lines, outcome),
         JobResult::GitIndexed { path, op, result } => {
             changes::indexed(state, path, op, result, out)
+        }
+        JobResult::HeadParsed { buffer, oid, doc } => {
+            crate::diffview::head_parsed(state, buffer, oid, doc)
         }
         JobResult::Grepped {
             generation,

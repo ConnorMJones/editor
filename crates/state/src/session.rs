@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::apply;
 use crate::buffer::Content;
+use crate::changes::Arrive;
+use crate::diffview::DiffView;
 use crate::job::Job;
 use crate::layout::{
     Child, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs, TextView, View,
@@ -15,6 +17,7 @@ use crate::layout::{
 use crate::path::RelPath;
 use crate::tree::{self, Dir, Fold, Listing};
 use crate::{Effect, Focus, Sidebar, SidebarWidth, State};
+use model::git::Group;
 
 /// Workspace layout saved on exit and restored with `session.restore = "last"`.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -30,6 +33,9 @@ pub struct Session {
     pub sidebar_width: f32,
     /// Expanded tree directories relative to the root.
     pub expanded: Vec<String>,
+    /// Collapsed groups of the Changes sidebar.
+    #[serde(default)]
+    pub collapsed: Vec<Group>,
 }
 
 /// `flex` is the node's weight within its parent split; older sessions split evenly.
@@ -80,13 +86,31 @@ pub enum SessionItem {
         primary: usize,
         scroll: usize,
     },
+    /// A diff against HEAD; the selection and scroll are its buffer side's.
+    Diff {
+        path: PathBuf,
+        ranges: Vec<[usize; 2]>,
+        primary: usize,
+        scroll: usize,
+    },
+}
+
+impl SessionItem {
+    fn path(&self) -> (Arrive, &Path) {
+        match self {
+            SessionItem::Text { path, .. } => (Arrive::Text, path),
+            SessionItem::Diff { path, .. } => (Arrive::Diff, path),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionSidebar {
     Hidden,
+    /// The file tree.
     Shown,
+    Changes,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -148,17 +172,29 @@ pub fn snapshot(state: &State) -> Session {
                     .items()
                     .iter()
                     .map(|item| {
-                        let View::Text(view) = &item.view;
-                        SessionItem::Text {
-                            path: state.buffers[view.buffer()].path.clone(),
-                            ranges: view
-                                .selection
-                                .ranges()
-                                .iter()
-                                .map(|range| [range.anchor, range.head])
-                                .collect(),
-                            primary: view.selection.primary_index(),
-                            scroll: view.scroll.anchor,
+                        let view = item.view.text();
+                        let path = state.buffers[view.buffer()].path.clone();
+                        let ranges = view
+                            .selection
+                            .ranges()
+                            .iter()
+                            .map(|range| [range.anchor, range.head])
+                            .collect();
+                        let (primary, scroll) =
+                            (view.selection.primary_index(), view.scroll.anchor);
+                        match item.view {
+                            View::Text(_) => SessionItem::Text {
+                                path,
+                                ranges,
+                                primary,
+                                scroll,
+                            },
+                            View::Diff(_) => SessionItem::Diff {
+                                path,
+                                ranges,
+                                primary,
+                                scroll,
+                            },
                         }
                     })
                     .collect(),
@@ -182,9 +218,14 @@ pub fn snapshot(state: &State) -> Session {
         sidebar: match state.sidebar {
             Sidebar::Hidden => SessionSidebar::Hidden,
             Sidebar::Files(_) => SessionSidebar::Shown,
+            Sidebar::Changes(_) => SessionSidebar::Changes,
         },
         sidebar_width: state.sidebar_width.get(),
         expanded,
+        collapsed: Group::ALL
+            .into_iter()
+            .filter(|group| state.git.folds[*group as usize] == Fold::Collapsed)
+            .collect(),
     }
 }
 
@@ -228,10 +269,9 @@ pub fn restore(
             continue;
         };
         let duplicate = tabs.iter().enumerate().position(|(index, item)| {
-            let SessionItem::Text { path, .. } = item;
             tabs[..index]
                 .iter()
-                .any(|SessionItem::Text { path: earlier, .. }| earlier == path)
+                .any(|earlier| earlier.path() == item.path())
         });
         let reason = match (tabs.len(), duplicate, preview) {
             (0, _, _) => InvalidTabs::Empty,
@@ -260,15 +300,24 @@ pub fn restore(
         let mut kept: Vec<usize> = Vec::with_capacity(tabs.len());
         let mut items: Vec<Item> = Vec::with_capacity(tabs.len());
         for (saved_index, item) in tabs.into_iter().enumerate() {
-            let SessionItem::Text {
-                path,
-                ranges,
-                primary,
-                scroll,
-            } = item;
-            let buffer = match path.is_file() {
-                true => apply::load(state, path, out),
-                false => None,
+            let (arrive, path, ranges, primary, scroll) = match item {
+                SessionItem::Text {
+                    path,
+                    ranges,
+                    primary,
+                    scroll,
+                } => (Arrive::Text, path, ranges, primary, scroll),
+                SessionItem::Diff {
+                    path,
+                    ranges,
+                    primary,
+                    scroll,
+                } => (Arrive::Diff, path, ranges, primary, scroll),
+            };
+            // A diff also shows a file deleted from the worktree.
+            let buffer = match (arrive, path.is_file(), path.exists()) {
+                (_, true, _) | (Arrive::Diff, false, false) => apply::load(state, path, out),
+                (Arrive::Text, false, _) | (Arrive::Diff, false, true) => None,
             };
             let Some(buffer) = buffer else {
                 continue;
@@ -291,8 +340,15 @@ pub fn restore(
                 }
             };
             view.scroll.anchor = scroll.min(len);
+            let view = match arrive {
+                Arrive::Text => View::Text(view),
+                Arrive::Diff => View::Diff(DiffView {
+                    text: view,
+                    ..DiffView::new(buffer)
+                }),
+            };
             items.push(Item {
-                view: View::Text(view),
+                view,
                 used: state.layout.tick(),
             });
             kept.push(saved_index);
@@ -326,8 +382,12 @@ pub fn restore(
     state.sidebar = match session.sidebar {
         SessionSidebar::Hidden => Sidebar::Hidden,
         SessionSidebar::Shown => Sidebar::Files(Focus::Editor),
+        SessionSidebar::Changes => Sidebar::Changes(Focus::Editor),
     };
     state.sidebar_width = SidebarWidth::new(session.sidebar_width);
+    for group in session.collapsed {
+        state.git.folds[group as usize] = Fold::Collapsed;
+    }
     for dir in session.expanded {
         match RelPath::parse(&dir) {
             Ok(path) if !path.is_root() => {

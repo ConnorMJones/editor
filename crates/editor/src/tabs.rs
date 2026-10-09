@@ -5,7 +5,7 @@ use gpui::{
 };
 use slotmap::Key as _;
 use state::apply::Force;
-use state::layout::{Pane, PaneId, Tabs};
+use state::layout::{Pane, PaneId, TabKey, Tabs};
 use state::workspace::{self, Click};
 
 use crate::workspace::Workspace;
@@ -100,9 +100,18 @@ impl Workspace {
                 true => label.italic(),
                 false => label,
             };
+            // Zed marks a diff tab with a muted diff icon before the file name.
+            let (kind, close_id, icon) = match item.view.key() {
+                TabKey::Text(_) => ("tab", "tab-close", None),
+                TabKey::Diff(_) => (
+                    "diff-tab",
+                    "diff-tab-close",
+                    Some(div().text_color(theme.text_muted).child("±")),
+                ),
+            };
             let key = item.view.buffer().data().as_ffi();
             let close = div()
-                .id(ElementId::NamedInteger("tab-close".into(), key))
+                .id(ElementId::NamedInteger(close_id.into(), key))
                 .absolute()
                 .top_0()
                 .left_0()
@@ -142,7 +151,7 @@ impl Workspace {
                 (false, false) => end.child(hover(close)),
             };
             div()
-                .id(ElementId::NamedInteger("tab".into(), key))
+                .id(ElementId::NamedInteger(kind.into(), key))
                 .group(GROUP)
                 .flex_none()
                 .h_full()
@@ -182,6 +191,7 @@ impl Workspace {
                         .gap_1()
                         .pl_3()
                         .pr_1()
+                        .children(icon)
                         .child(label)
                         .children(
                             detail.map(|detail| div().text_color(theme.text_muted).child(detail)),

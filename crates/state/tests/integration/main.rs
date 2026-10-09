@@ -1,4 +1,6 @@
 mod clipboard;
+mod conflict;
+mod diffview;
 mod editing;
 mod git;
 #[path = "../support/harness.rs"]

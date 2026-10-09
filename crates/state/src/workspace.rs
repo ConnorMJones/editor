@@ -2,26 +2,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use model::command::{Command, Cycle, PickerCommand, TreeCommand, WindowCommand};
+use model::command::{ChangesCommand, Command, Cycle, PickerCommand, TreeCommand, WindowCommand};
 use model::config::OpenAs;
 use model::notice::Notice;
 use model::window::PickerKind;
 
 use crate::apply::{Force, apply};
 use crate::buffer::{BufferId, Content, Position, Target};
+use crate::changes::{self, Arrive, ListRow};
+use crate::diffview::DiffView;
 use crate::files::Files;
 use crate::job::{FsOp, Job};
-use crate::layout::{LastPane, Layout, Pane, PaneId, Tabs, TextView, Tick, View};
+use crate::layout::{LastPane, Layout, Pane, PaneId, TabKey, Tabs, TextView, Tick, View};
 use crate::path::RelPath;
 use crate::picker::{
     self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource, Search,
 };
 use crate::tree::{self, Dir, EntryKind, Fold, Listing, RowKind, TreeEdit};
-use crate::{Effect, Focus, Overlay, Sidebar, State};
+use crate::{Effect, Focus, Overlay, Repo, Sidebar, State, scroll};
 
 /// Shows `buffer` in `pane` by zed's preview rules, committing the pane's current edits; a
 /// modified buffer always opens permanently and a modified preview is never replaced.
-pub fn show(state: &mut State, pane: PaneId, buffer: BufferId, open: OpenAs) {
+pub fn show(state: &mut State, pane: PaneId, key: TabKey, open: OpenAs) {
+    let buffer = key.buffer();
     let open = match state.buffers.get(buffer).map(|b| b.content.is_modified()) {
         None => return,
         Some(true) => OpenAs::Permanent,
@@ -34,14 +37,17 @@ pub fn show(state: &mut State, pane: PaneId, buffer: BufferId, open: OpenAs) {
     let Some(target) = layout.panes.get_mut(pane) else {
         return;
     };
-    match target.active() {
-        Some(View::Text(view)) => match buffers.get_mut(view.buffer()).map(|b| &mut b.content) {
+    match target.active().map(View::text) {
+        Some(view) => match buffers.get_mut(view.buffer()).map(|b| &mut b.content) {
             Some(Content::Text { doc, .. }) => doc.commit(&view.selection),
             Some(Content::Loading { .. }) | None => {}
         },
         None => {}
     }
-    let view = View::Text(TextView::new(buffer));
+    let view = match key {
+        TabKey::Text(buffer) => View::Text(TextView::new(buffer)),
+        TabKey::Diff(buffer) => View::Diff(DiffView::new(buffer)),
+    };
     let displaced = match &mut target.tabs {
         Some(tabs) => {
             let preview = tabs.preview().map(|p| tabs.items()[p].view.buffer());
@@ -88,12 +94,13 @@ pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
     else {
         return;
     };
+    // The same pane may also show the buffer, as text beside its diff.
     let elsewhere = state.layout.panes.iter().any(|(id, other)| {
-        id != pane
-            && other
-                .items()
-                .iter()
-                .any(|item| item.view.buffer() == buffer)
+        other
+            .items()
+            .iter()
+            .enumerate()
+            .any(|(at, item)| item.view.buffer() == buffer && (id, at) != (pane, index))
     });
     let modified = (state.buffers.get(buffer)).is_some_and(|b| b.content.is_modified());
     match (elsewhere, modified, force) {
@@ -171,11 +178,12 @@ pub fn cycle_tab(state: &mut State, cycle: Cycle) {
     tabs.activate(next, now);
 }
 
-fn focus_editor(state: &mut State) {
-    match state.sidebar {
-        Sidebar::Files(_) => state.sidebar = Sidebar::Files(Focus::Editor),
-        Sidebar::Hidden => {}
-    }
+pub(crate) fn focus_editor(state: &mut State) {
+    state.sidebar = match state.sidebar {
+        Sidebar::Files(_) => Sidebar::Files(Focus::Editor),
+        Sidebar::Changes(_) => Sidebar::Changes(Focus::Editor),
+        Sidebar::Hidden => Sidebar::Hidden,
+    };
 }
 
 pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
@@ -184,7 +192,9 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
     match command {
         TreeCommand::Toggle => {
             state.sidebar = match state.sidebar {
-                Sidebar::Hidden | Sidebar::Files(Focus::Editor) => Sidebar::Files(Focus::Sidebar),
+                Sidebar::Hidden | Sidebar::Files(Focus::Editor) | Sidebar::Changes(_) => {
+                    Sidebar::Files(Focus::Sidebar)
+                }
                 Sidebar::Files(Focus::Sidebar) => Sidebar::Hidden,
             };
         }
@@ -198,7 +208,8 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
             Some(row) => match row.kind {
                 RowKind::File => {
                     let open = state.tab_config.open_from_tree;
-                    crate::apply::open(state, row.path.to_path(&root), None, open, out);
+                    let path = row.path.to_path(&root);
+                    crate::apply::open(state, path, Arrive::Text, None, open, out);
                     focus_editor(state);
                 }
                 RowKind::Dir(Fold::Expanded) => {
@@ -408,12 +419,17 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                 Items::Files(files) => {
                     let path = PathBuf::from(files[index].as_str());
                     let open = state.tab_config.open_from_picker;
-                    crate::apply::open(state, path, None, open, out);
+                    crate::apply::open(state, path, Arrive::Text, None, open, out);
                     focus_editor(state);
                 }
                 Items::Buffers(buffers) => {
                     let focus = state.layout.focus;
-                    show(state, focus, buffers[index].0, OpenAs::Permanent);
+                    show(
+                        state,
+                        focus,
+                        TabKey::Text(buffers[index].0),
+                        OpenAs::Permanent,
+                    );
                     focus_editor(state);
                 }
                 Items::Grep(grep) => {
@@ -422,6 +438,7 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                     crate::apply::open(
                         state,
                         PathBuf::from(hit.path.as_str()),
+                        Arrive::Text,
                         Some(Target::Position(Position {
                             line: hit.line as usize,
                             column: hit.column as usize,
@@ -585,7 +602,7 @@ pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<E
         (Click::Single, _) => tree(state, TreeCommand::Open, out),
         (Click::Double, RowKind::File) => {
             let path = state.tree.rows[index].path.to_path(state.root.path());
-            crate::apply::open(state, path, None, OpenAs::Permanent, out);
+            crate::apply::open(state, path, Arrive::Text, None, OpenAs::Permanent, out);
             focus_editor(state);
         }
         // The first click already toggled the directory.
@@ -603,4 +620,77 @@ pub fn click_picker(state: &mut State, index: usize, out: &mut Vec<Effect>) {
         false => return,
     }
     picker(state, PickerCommand::Submit, out);
+}
+
+/// `space d`: shows the focused tab's file as a diff, or a diff as its file, in the same pane
+/// and with the same selection; an existing tab of the other kind is activated.
+pub fn toggle_diff(state: &mut State) {
+    let focus = state.layout.focus;
+    let Some(tabs) = (state.layout.panes.get(focus)).and_then(|pane| pane.tabs.as_ref()) else {
+        state.notice = Some(Notice::NoBuffer);
+        return;
+    };
+    let item = &tabs.items()[tabs.active()];
+    let (selection, anchor) = (
+        item.view.text().selection.clone(),
+        item.view.text().scroll.anchor,
+    );
+    let key = match item.view.key() {
+        TabKey::Text(buffer) => TabKey::Diff(buffer),
+        TabKey::Diff(buffer) => TabKey::Text(buffer),
+    };
+    let open = match tabs.preview() == Some(tabs.active()) {
+        true => OpenAs::Preview,
+        false => OpenAs::Permanent,
+    };
+    show(state, focus, key, open);
+    match state.layout.panes.get_mut(focus).and_then(Pane::active_mut) {
+        Some(view) if view.key() == key => {
+            let text = view.text_mut();
+            text.selection = selection;
+            text.scroll.anchor = anchor;
+            text.scroll.rows = 0;
+        }
+        Some(_) | None => {}
+    }
+    scroll::follow_cursor(state, focus);
+}
+
+/// Changes sidebar click on row `row`: a header toggles its group, an entry opens like `l`, and a
+/// double click keeps its tab.
+pub fn click_changes(state: &mut State, row: usize, click: Click, out: &mut Vec<Effect>) {
+    let changes = match &state.git.repo {
+        Repo::Found { snapshot, .. } => &snapshot.changes[..],
+        Repo::Unknown | Repo::None => &[],
+    };
+    state.sidebar = Sidebar::Changes(Focus::Sidebar);
+    match changes::list_row(changes, &state.git.folds, row) {
+        Some(ListRow::Header { .. }) => {
+            state.git.cursor = changes::cursor_at(changes, &state.git.folds, row);
+            changes::list(state, ChangesCommand::Open, out);
+        }
+        Some(ListRow::Entry(index)) => {
+            let open = match click {
+                Click::Single => OpenAs::Preview,
+                Click::Double => OpenAs::Permanent,
+            };
+            changes::open_entry(state, index, open, out);
+        }
+        None => {}
+    }
+}
+
+/// A Changes sidebar row button: runs `command` (stage, unstage, discard) on that row.
+pub fn changes_action(
+    state: &mut State,
+    row: usize,
+    command: ChangesCommand,
+    out: &mut Vec<Effect>,
+) {
+    let changes = match &state.git.repo {
+        Repo::Found { snapshot, .. } => &snapshot.changes[..],
+        Repo::Unknown | Repo::None => &[],
+    };
+    state.git.cursor = changes::cursor_at(changes, &state.git.folds, row);
+    changes::list(state, command, out);
 }

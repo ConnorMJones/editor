@@ -80,3 +80,27 @@ fn title_bar_defaults_hidden_and_parses() {
     let config: Config = toml::from_str("[window]\ntitle_bar = \"shown\"").unwrap();
     assert_eq!(config.window.title_bar, TitleBar::Shown);
 }
+
+#[test]
+fn diff_colours_override_and_reject_unknown_roles() {
+    let config: Config =
+        toml::from_str("[theme.diff]\nadded = \"#00ff00\"\ntheirs = \"#ff8800\"").unwrap();
+    assert_eq!(
+        config.theme.diff.added,
+        Some(Rgb {
+            r: 0,
+            g: 0xff,
+            b: 0
+        })
+    );
+    assert_eq!(
+        config.theme.diff.theirs,
+        Some(Rgb {
+            r: 0xff,
+            g: 0x88,
+            b: 0
+        })
+    );
+    assert_eq!(config.theme.diff.removed, None);
+    assert!(toml::from_str::<Config>("[theme.diff]\ninserted = \"#00ff00\"").is_err());
+}

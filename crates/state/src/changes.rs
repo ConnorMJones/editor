@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use helix_core::{Range, RopeSlice, Selection, Tendril, Transaction};
-use model::command::{Answer, FileOp, HunkOp, HunkTarget};
+use model::command::{Answer, ChangesCommand, FileOp, HunkOp, HunkTarget};
 use model::config::OpenAs;
-use model::git::Change;
+use model::git::{Change, Group};
 use model::mode::Mode;
 use model::notice::Notice;
 
@@ -15,12 +15,12 @@ use crate::diff::{
     Base, BaseRead, Bases, Compute, Edge, Hunk, Landing, Lines, Outcome, Side, Stamp, Tracked,
     intersecting, next_hunk, prev_hunk, splice,
 };
-use crate::git::{IndexError, IndexOp, RepoPath};
+use crate::git::{Changed, IndexError, IndexOp, RepoPath};
 use crate::job::{FsOp, Job};
-use crate::layout::{Pane, View};
+use crate::layout::{Pane, TabKey, View};
 use crate::path::RelPath;
-use crate::tree::EntryKind;
-use crate::{Effect, Refresh, Repo, State, request_git, scroll, watch};
+use crate::tree::{EntryKind, Fold};
+use crate::{Effect, Focus, Refresh, Repo, Sidebar, State, request_git, scroll, watch, workspace};
 
 /// A destructive git operation waiting for `Command::Confirm`; a sidebar shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,10 +36,20 @@ pub enum Discard {
     Delete(RelPath),
 }
 
-/// What `]g` shows of the next changed file; the diff view adds its own variant.
+/// Which view of a file a tab shows; `]g` keeps it when it moves on to the next changed file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrive {
     Text,
+    Diff,
+}
+
+impl Arrive {
+    pub fn key(self, buffer: BufferId) -> TabKey {
+        match self {
+            Arrive::Text => TabKey::Text(buffer),
+            Arrive::Diff => TabKey::Diff(buffer),
+        }
+    }
 }
 
 /// Git dir and repository path of `path`; `None` outside the repository's worktree.
@@ -149,6 +159,7 @@ pub fn bases_read(
 
 /// Starts a diff for every tracked buffer whose hunks no longer match its text or bases.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
+    crate::conflict::sync(state);
     for (buffer, entry) in state.buffers.iter_mut() {
         let (doc, tracked) = match &mut entry.content {
             Content::Text {
@@ -179,6 +190,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             Compute::Running => {}
         }
     }
+    crate::diffview::refresh(state, out);
 }
 
 /// Takes a finished diff; a result for older text or bases is dropped and `sync` re-queues.
@@ -260,11 +272,11 @@ pub fn land(state: &mut State, buffer: BufferId) {
         Edge::Last => tracked.hunks.last(),
     };
     let view = (layout.panes.get_mut(landing.pane)).and_then(|pane| {
-        let index = pane.tabs.as_ref()?.find(buffer)?;
-        Some(&mut pane.items_mut()[index].view)
+        let index = pane.tabs.as_ref()?.find(landing.arrive.key(buffer))?;
+        Some(pane.items_mut()[index].view.text_mut())
     });
     match (hunk, view) {
-        (Some(hunk), Some(View::Text(view))) => {
+        (Some(hunk), Some(view)) => {
             let range = hunk_range(hunk, doc.text.slice(..));
             view.selection = Selection::single(range.anchor, range.head);
         }
@@ -281,10 +293,15 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
     let State {
         layout, buffers, ..
     } = &mut *state;
-    let Some(View::Text(view)) = layout.panes.get_mut(focus).and_then(Pane::active_mut) else {
+    let Some(view) = layout.panes.get_mut(focus).and_then(Pane::active_mut) else {
         state.notice = Some(Notice::NoBuffer);
         return;
     };
+    let arrive = match view {
+        View::Text(_) => Arrive::Text,
+        View::Diff(_) => Arrive::Diff,
+    };
+    let view = view.text_mut();
     let buffer = view.buffer();
     let Some(Content::Text { doc, diff, .. }) = buffers.get(buffer).map(|b| &b.content) else {
         return;
@@ -308,7 +325,6 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
         }
     };
     let primary = view.selection.primary().cursor_line(text);
-    let arrive = Arrive::Text;
     let (direction, edge) = match target {
         HunkTarget::Next => (helix_core::movement::Direction::Forward, Edge::First),
         HunkTarget::Previous => (helix_core::movement::Direction::Backward, Edge::Last),
@@ -352,21 +368,22 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
             let root = state.root.path();
             let current = RelPath::new(root, &state.buffers[buffer].path).ok();
             // A partly staged file is listed twice; it is visited at its first group.
-            let order = snapshot.changes.iter().filter_map(|changed| {
+            let order = snapshot.changes.iter().filter(|changed| {
                 match snapshot
                     .paths
                     .get(&changed.path)
                     .map(|change| change.groups())
                 {
-                    Some([first, ..]) if *first == changed.group => Some(&changed.path),
-                    Some(_) | None => None,
+                    Some([first, ..]) => *first == changed.group,
+                    Some([]) | None => false,
                 }
             });
             let (len, at) = order
                 .clone()
                 .enumerate()
-                .fold((0, None), |(_, at), (i, path)| {
-                    (i + 1, at.or((Some(path) == current.as_ref()).then_some(i)))
+                .fold((0, None), |(_, at), (i, changed)| {
+                    let here = Some(&changed.path) == current.as_ref();
+                    (i + 1, at.or(here.then_some(i)))
                 });
             let index = match (len, edge, at) {
                 (0, ..) => {
@@ -378,14 +395,23 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
                 (len, Edge::Last, Some(at)) => (at + len - 1) % len,
                 (len, Edge::Last, None) => len - 1,
             };
-            let Some(path) = order.clone().nth(index).map(|path| path.to_path(root)) else {
+            let Some(changed) = order.clone().nth(index) else {
                 return;
             };
-            match arrive {
-                Arrive::Text => {
-                    crate::apply::open(state, path, Some(Target::Hunk(edge)), OpenAs::Preview, out)
-                }
-            }
+            let path = changed.path.to_path(root);
+            // Conflicts are resolved in the text, so they never open as a diff.
+            let arrive = match changed.group {
+                Group::Conflicts => Arrive::Text,
+                Group::Staged | Group::Changes => arrive,
+            };
+            crate::apply::open(
+                state,
+                path,
+                arrive,
+                Some(Target::Hunk(edge)),
+                OpenAs::Preview,
+                out,
+            )
         }
     }
 }
@@ -411,7 +437,10 @@ fn index_job(state: &mut State, path: &Path, op: IndexOp) -> Option<Job> {
 /// Stages, unstages or reverts the hunks touched by the focused view's selections.
 pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
     let focus = state.layout.focus;
-    let Some(View::Text(view)) = state.layout.panes.get(focus).and_then(Pane::active) else {
+    let Some(view) = (state.layout.panes.get(focus))
+        .and_then(Pane::active)
+        .map(View::text)
+    else {
         state.notice = Some(Notice::NoBuffer);
         return;
     };
@@ -618,4 +647,220 @@ pub(crate) fn expect_landing(state: &mut State, buffer: BufferId, landing: Landi
         Some(Content::Loading { .. }) | None => {}
     }
     land(state, buffer);
+}
+
+/// Entries of each sidebar group in `changes`, which is sorted by group.
+pub fn groups(changes: &[Changed]) -> [(Group, std::ops::Range<usize>); 3] {
+    let mut start = 0;
+    [Group::Conflicts, Group::Staged, Group::Changes].map(|group| {
+        let end = start + changes[start..].partition_point(|changed| changed.group == group);
+        let range = start..end;
+        start = end;
+        (group, range)
+    })
+}
+
+/// A row of the Changes sidebar: a group header, or entry `Entry(i)` of the snapshot's changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListRow {
+    Header {
+        group: Group,
+        count: usize,
+        fold: Fold,
+    },
+    Entry(usize),
+}
+
+/// What the Changes sidebar cursor rests on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListCursor {
+    Header(Group),
+    Entry(Changed),
+}
+
+/// Sidebar rows a group takes: its header, plus its entries unless collapsed.
+fn group_rows(entries: &std::ops::Range<usize>, fold: Fold) -> usize {
+    match (entries.is_empty(), fold) {
+        (true, _) => 0,
+        (false, Fold::Expanded) => 1 + entries.len(),
+        (false, Fold::Collapsed) => 1,
+    }
+}
+
+/// Rows of the Changes sidebar: a header per non-empty group plus the entries of expanded ones.
+pub fn list_len(changes: &[Changed], folds: &[Fold; Group::COUNT]) -> usize {
+    groups(changes)
+        .iter()
+        .map(|(group, entries)| group_rows(entries, folds[*group as usize]))
+        .sum()
+}
+
+pub fn list_row(changes: &[Changed], folds: &[Fold; Group::COUNT], row: usize) -> Option<ListRow> {
+    let mut row = row;
+    for (group, entries) in groups(changes) {
+        let fold = folds[group as usize];
+        let rows = group_rows(&entries, fold);
+        match (rows, row) {
+            (0, _) => {}
+            (_, 0) => {
+                return Some(ListRow::Header {
+                    group,
+                    count: entries.len(),
+                    fold,
+                });
+            }
+            (rows, row) if row < rows => return Some(ListRow::Entry(entries.start + row - 1)),
+            (rows, rest) => row = rest - rows,
+        }
+    }
+    None
+}
+
+/// Row of `cursor`: an entry of a collapsed group shows as its header, a vanished entry as the
+/// row now in its place.
+pub fn cursor_row(
+    changes: &[Changed],
+    folds: &[Fold; Group::COUNT],
+    cursor: Option<&ListCursor>,
+) -> Option<usize> {
+    let last = list_len(changes, folds).checked_sub(1)?;
+    let groups = groups(changes);
+    let header = |group: Group| -> usize {
+        groups
+            .iter()
+            .take_while(|(other, _)| *other != group)
+            .map(|(other, entries)| group_rows(entries, folds[*other as usize]))
+            .sum()
+    };
+    let row = match cursor {
+        Some(ListCursor::Header(group)) => header(*group),
+        // Nothing selected yet starts on the first file.
+        None | Some(ListCursor::Entry(_)) => {
+            let index = match cursor {
+                Some(ListCursor::Entry(changed)) => match changes.binary_search(changed) {
+                    Ok(index) | Err(index) => index.min(changes.len() - 1),
+                },
+                Some(ListCursor::Header(_)) | None => 0,
+            };
+            let group = changes[index].group;
+            match folds[group as usize] {
+                Fold::Collapsed => header(group),
+                Fold::Expanded => header(group) + 1 + index - groups[group as usize].1.start,
+            }
+        }
+    };
+    Some(row.min(last))
+}
+
+/// The cursor that rests on `row`.
+pub fn cursor_at(
+    changes: &[Changed],
+    folds: &[Fold; Group::COUNT],
+    row: usize,
+) -> Option<ListCursor> {
+    match list_row(changes, folds, row)? {
+        ListRow::Header { group, .. } => Some(ListCursor::Header(group)),
+        ListRow::Entry(index) => Some(ListCursor::Entry(changes[index].clone())),
+    }
+}
+
+fn snapshot_changes(repo: &Repo) -> &[Changed] {
+    match repo {
+        Repo::Found { snapshot, .. } => &snapshot.changes,
+        Repo::Unknown | Repo::None => &[],
+    }
+}
+
+/// Opens entry `index` in the focused pane: its diff, or its text when it has conflicts.
+pub(crate) fn open_entry(state: &mut State, index: usize, open: OpenAs, out: &mut Vec<Effect>) {
+    let Some(changed) = snapshot_changes(&state.git.repo).get(index).cloned() else {
+        return;
+    };
+    let path = changed.path.to_path(state.root.path());
+    let arrive = match changed.group {
+        Group::Conflicts => Arrive::Text,
+        Group::Staged | Group::Changes => Arrive::Diff,
+    };
+    state.git.cursor = Some(ListCursor::Entry(changed));
+    crate::apply::open(state, path, arrive, None, open, out);
+}
+
+pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
+    let folds = state.git.folds;
+    let changes = snapshot_changes(&state.git.repo);
+    let at = cursor_row(changes, &folds, state.git.cursor.as_ref());
+    let row = at.and_then(|at| list_row(changes, &folds, at));
+    let root = state.root.path();
+    // Paths a file operation applies to: the entry, or every entry of a header's group.
+    let paths = |row: ListRow| -> Vec<PathBuf> {
+        let range = match row {
+            ListRow::Header { group, .. } => groups(changes)[group as usize].1.clone(),
+            ListRow::Entry(index) => index..index + 1,
+        };
+        changes[range]
+            .iter()
+            .map(|changed| changed.path.to_path(root))
+            .collect()
+    };
+    match (command, at, row) {
+        (ChangesCommand::Toggle, ..) => {
+            state.sidebar = match state.sidebar {
+                Sidebar::Hidden | Sidebar::Files(_) | Sidebar::Changes(Focus::Editor) => {
+                    Sidebar::Changes(Focus::Sidebar)
+                }
+                Sidebar::Changes(Focus::Sidebar) => Sidebar::Hidden,
+            }
+        }
+        (ChangesCommand::FocusEditor, ..) => workspace::focus_editor(state),
+        (ChangesCommand::Up, Some(at), _) => {
+            state.git.cursor = cursor_at(changes, &folds, at.saturating_sub(1))
+        }
+        (ChangesCommand::Down, Some(at), _) => {
+            let last = list_len(changes, &folds).saturating_sub(1);
+            state.git.cursor = cursor_at(changes, &folds, (at + 1).min(last))
+        }
+        (ChangesCommand::Up | ChangesCommand::Down, None, _) => {}
+        (ChangesCommand::Open, _, Some(ListRow::Header { group, fold, .. })) => {
+            state.git.folds[group as usize] = match fold {
+                Fold::Expanded => Fold::Collapsed,
+                Fold::Collapsed => Fold::Expanded,
+            };
+            state.git.cursor = Some(ListCursor::Header(group));
+        }
+        (ChangesCommand::Open, _, Some(ListRow::Entry(index))) => {
+            open_entry(state, index, OpenAs::Preview, out)
+        }
+        (ChangesCommand::Collapse, _, Some(ListRow::Header { group, .. })) => {
+            state.git.folds[group as usize] = Fold::Collapsed
+        }
+        (ChangesCommand::Collapse, _, Some(ListRow::Entry(index))) => {
+            state.git.cursor = Some(ListCursor::Header(changes[index].group))
+        }
+        (ChangesCommand::Stage, _, Some(row)) => {
+            for path in paths(row) {
+                file_op(state, FileOp::Stage(path), out);
+            }
+        }
+        (ChangesCommand::Unstage, _, Some(row)) => {
+            for path in paths(row) {
+                file_op(state, FileOp::Unstage(path), out);
+            }
+        }
+        (ChangesCommand::Discard, _, Some(ListRow::Header { .. })) => {
+            state.notice = Some(Notice::DiscardGroup)
+        }
+        (ChangesCommand::Discard, _, Some(ListRow::Entry(index))) => {
+            let path = changes[index].path.to_path(root);
+            file_op(state, FileOp::Discard(path), out)
+        }
+        (
+            ChangesCommand::Open
+            | ChangesCommand::Collapse
+            | ChangesCommand::Stage
+            | ChangesCommand::Unstage
+            | ChangesCommand::Discard,
+            _,
+            None,
+        ) => state.notice = Some(Notice::NoChangedFiles),
+    }
 }

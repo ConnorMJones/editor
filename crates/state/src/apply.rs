@@ -22,14 +22,16 @@ use slotmap::SlotMap;
 use crate::buffer::{
     Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, Target, TextDoc, Uncommitted,
 };
+use crate::changes::Arrive;
 use crate::diff::Landing;
+use crate::diffview::{self, Right};
 use crate::job::{Job, ReloadPolicy};
-use crate::layout::{Layout, Pane, Tabs, TextView, View};
+use crate::layout::{Layout, Pane, TabKey, Tabs, TextView, View};
 use crate::prompt::{Candidate, Chosen};
 use crate::register::{self, ClipboardUse, Values};
 use crate::{
     Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky, changes,
-    edit, input, motion, prompt, select, workspace,
+    conflict, edit, input, motion, prompt, select, workspace,
 };
 
 pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
@@ -686,7 +688,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             }
         },
 
-        Command::Open(path) => open(state, path, None, OpenAs::Permanent, out),
+        Command::Open(path) => open(state, path, Arrive::Text, None, OpenAs::Permanent, out),
         Command::Write => match focused_buffer(state) {
             Some(id) => out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job)),
             None => state.notice = Some(Notice::NoBuffer),
@@ -785,6 +787,11 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::Hunk(op) => changes::hunk_op(state, op, out),
         Command::File(op) => changes::file_op(state, op, out),
         Command::Confirm(answer) => changes::confirm(state, answer, out),
+
+        Command::ToggleDiff => workspace::toggle_diff(state),
+        Command::Changes(command) => changes::list(state, command, out),
+        Command::GotoConflict(direction) => conflict::goto(state, direction),
+        Command::Resolve(take) => conflict::resolve(state, take),
     }
 }
 
@@ -885,14 +892,20 @@ pub(crate) fn exit_select_mode(state: &mut State) {
     }
 }
 
+/// The focused editable text: a text view, or a diff's buffer side unless it is inert.
 pub(crate) fn focused<'a, 'b>(
     layout: &'a mut Layout,
     buffers: &'b mut SlotMap<BufferId, Buffer>,
 ) -> Option<(&'a mut TextView, &'b mut TextDoc)> {
-    let View::Text(view) = layout.panes.get_mut(layout.focus)?.active_mut()?;
-    match buffers.get_mut(view.buffer()).map(|b| &mut b.content) {
-        Some(Content::Text { doc, .. }) => Some((view, doc)),
-        Some(Content::Loading { .. }) | None => None,
+    let view = layout.panes.get_mut(layout.focus)?.active_mut()?;
+    let content = &mut buffers.get_mut(view.buffer())?.content;
+    let right = match view {
+        View::Text(_) => Right::Live,
+        View::Diff(_) => diffview::right(content),
+    };
+    match (right, content) {
+        (Right::Live, Content::Text { doc, .. }) => Some((view.text_mut(), doc)),
+        (Right::Deleted, _) | (Right::Live, Content::Loading { .. }) => None,
     }
 }
 
@@ -923,7 +936,7 @@ pub(crate) fn map_views(
 ) {
     for pane in layout.panes.values_mut() {
         for item in pane.items_mut() {
-            let View::Text(view) = &mut item.view;
+            let view = item.view.text_mut();
             match view.buffer() == buffer {
                 true => {
                     view.selection = view.selection.clone().map(changes).ensure_invariants(text);
@@ -1008,8 +1021,8 @@ pub(crate) fn try_edit(
         tx.selection(),
         layout.panes.get_mut(focus).and_then(Pane::active_mut),
     ) {
-        (Some(selection), Some(View::Text(view))) => {
-            view.selection = selection.clone().ensure_invariants(text);
+        (Some(selection), Some(view)) => {
+            view.text_mut().selection = selection.clone().ensure_invariants(text);
         }
         (Some(_), None) | (None, _) => {}
     }
@@ -1063,8 +1076,8 @@ fn step_history(state: &mut State, step: HistoryStep, exhausted: Notice) {
                 tx.selection(),
                 layout.panes.get_mut(focus).and_then(Pane::active_mut),
             ) {
-                (Some(selection), Some(View::Text(view))) => {
-                    view.selection = selection.clone().ensure_invariants(text);
+                (Some(selection), Some(view)) => {
+                    view.text_mut().selection = selection.clone().ensure_invariants(text);
                 }
                 (Some(_), None) | (None, _) => {}
             }
@@ -1080,7 +1093,7 @@ fn commit(state: &mut State, id: BufferId) {
         .values()
         .flat_map(|pane| pane.items())
         .find_map(|item| {
-            let View::Text(view) = &item.view;
+            let view = item.view.text();
             (view.buffer() == id).then(|| view.selection.clone())
         })
         .unwrap_or_else(|| Selection::point(0));
@@ -1182,6 +1195,7 @@ pub(crate) fn load(state: &mut State, path: PathBuf, out: &mut Vec<Effect>) -> O
 pub(crate) fn open(
     state: &mut State,
     path: PathBuf,
+    arrive: Arrive,
     to: Option<Target>,
     open: OpenAs,
     out: &mut Vec<Effect>,
@@ -1190,7 +1204,8 @@ pub(crate) fn open(
         return;
     };
     let focus = state.layout.focus;
-    workspace::show(state, focus, id, open);
+    let key = arrive.key(id);
+    workspace::show(state, focus, key, open);
     let Some(to) = to else {
         return;
     };
@@ -1199,14 +1214,24 @@ pub(crate) fn open(
         state.layout.panes.get_mut(focus).and_then(Pane::active_mut),
         to,
     ) {
-        (Content::Loading { jump }, _, to) => *jump = Some(Jump { pane: focus, to }),
-        (Content::Text { .. }, _, Target::Hunk(edge)) => {
-            changes::expect_landing(state, id, Landing { pane: focus, edge })
+        (Content::Loading { jump }, _, to) => {
+            *jump = Some(Jump {
+                pane: focus,
+                arrive,
+                to,
+            })
         }
-        (Content::Text { doc, .. }, Some(View::Text(view)), Target::Position(to))
-            if view.buffer() == id =>
-        {
-            view.selection = Selection::point(line_column(&doc.text, to));
+        (Content::Text { .. }, _, Target::Hunk(edge)) => changes::expect_landing(
+            state,
+            id,
+            Landing {
+                pane: focus,
+                edge,
+                arrive,
+            },
+        ),
+        (Content::Text { doc, .. }, Some(view), Target::Position(to)) if view.key() == key => {
+            view.text_mut().selection = Selection::point(line_column(&doc.text, to));
         }
         (Content::Text { .. }, Some(_) | None, Target::Position(_)) => {}
     }
@@ -1217,10 +1242,13 @@ pub(crate) fn remove_buffer(state: &mut State, id: BufferId) {
     state.buffers.remove(id);
     let now = state.layout.tick();
     for pane in state.layout.panes.values_mut() {
-        let index = pane.tabs.as_ref().and_then(|tabs| tabs.find(id));
-        match (pane.tabs.take(), index) {
-            (Some(tabs), Some(index)) => pane.tabs = tabs.remove(index, now).0,
-            (tabs, _) => pane.tabs = tabs,
+        // A pane may show the buffer twice, as text and as a diff.
+        for key in [TabKey::Text(id), TabKey::Diff(id)] {
+            let index = pane.tabs.as_ref().and_then(|tabs| tabs.find(key));
+            match (pane.tabs.take(), index) {
+                (Some(tabs), Some(index)) => pane.tabs = tabs.remove(index, now).0,
+                (tabs, _) => pane.tabs = tabs,
+            }
         }
     }
 }

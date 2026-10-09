@@ -5,7 +5,7 @@ use model::color::{Base16, Palette, Rgb};
 use model::config::Config;
 use model::git::GitStatus;
 use model::mode::Mode;
-use model::theme::{Background, Modifiers};
+use model::theme::{Background, Modifiers, TintColor, Tone};
 
 /// Resolved UI colours and fonts; mirrors the base16 mapping of the user's helix theme.
 pub struct Theme {
@@ -25,6 +25,8 @@ pub struct Theme {
     pub chrome: Chrome,
     /// Row backgrounds of diff and conflict views, tinted over `background`.
     pub rows: RowColors,
+    /// Diff and conflict colours, indexed by `Tone`.
+    pub tones: [Hsla; Tone::COUNT],
 }
 
 pub struct RowColors(pub [Hsla; Background::COUNT]);
@@ -74,6 +76,18 @@ fn hsla(c: Rgb) -> Hsla {
 impl Theme {
     pub fn new(palette: &Palette, config: &Config, cell: Size<Pixels>) -> Theme {
         let colors = Colors(palette.0.map(hsla));
+        let diff = &config.theme.diff;
+        let tones = Tone::ALL.map(|tone| {
+            let set = match tone {
+                Tone::Added => diff.added,
+                Tone::Removed => diff.removed,
+                Tone::Modified => diff.modified,
+                Tone::Ours => diff.ours,
+                Tone::Theirs => diff.theirs,
+                Tone::Base => diff.base,
+            };
+            set.map_or(colors[tone.slot()], hsla)
+        });
         let mono = font(config.font.mono.family.clone());
         Theme {
             background: hsla(config.theme.background.unwrap_or(palette[Base16::Base00])),
@@ -118,8 +132,13 @@ impl Theme {
             },
             rows: RowColors(Background::ALL.map(|role| {
                 let tint = model::theme::background(role);
-                colors[tint.slot].opacity(tint.alpha as f32 / 100.0)
+                let color = match tint.color {
+                    TintColor::Slot(slot) => colors[slot],
+                    TintColor::Tone(tone) => tones[tone as usize],
+                };
+                color.opacity(tint.alpha as f32 / 100.0)
             })),
+            tones,
             colors,
         }
     }

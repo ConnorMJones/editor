@@ -12,8 +12,9 @@ use model::register::{Clipboard, Register};
 use slotmap::SlotMap;
 
 use crate::buffer::{Buffer, BufferId, Content, TextDoc};
-use crate::display::{Indent, text_format};
-use crate::layout::{Layout, PaneId, TextView, View, Viewport};
+use crate::diffview::{self, RIGHT, Right};
+use crate::display::{Fillers, Indent, text_format};
+use crate::layout::{Layout, PaneId, Scroll, TextView, View, Viewport};
 use crate::register::ClipboardUse;
 use crate::{Effect, State};
 
@@ -23,83 +24,163 @@ pub const SCROLLOFF: usize = 5;
 /// Rows a mouse wheel notch scrolls, as helix's `scroll-lines`.
 pub const WHEEL_LINES: isize = 3;
 
-/// Anchor that keeps `cursor` at least `SCROLLOFF` rows inside a `rows` tall viewport.
+/// Rows a view shows besides its text: filler rows after lines and above the first line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Padding<'a> {
+    pub fillers: &'a [(usize, u16)],
+    pub lead: u32,
+}
+
+impl Padding<'_> {
+    pub const NONE: Padding<'static> = Padding {
+        fillers: &[],
+        lead: 0,
+    };
+}
+
+/// Line annotations drawing `padding`'s fillers; allocates only when there are any.
+pub fn annotations<'a>(text: RopeSlice<'a>, padding: Padding<'a>) -> TextAnnotations<'a> {
+    let mut annotations = TextAnnotations::default();
+    match padding.fillers.is_empty() {
+        true => {}
+        false => {
+            annotations.add_line_annotation(Box::new(Fillers::new(text, padding.fillers)));
+        }
+    }
+    annotations
+}
+
+/// The position `delta` rows from `anchor` and `rows`, through annotation rows and up into
+/// the `lead` rows above the first line.
+pub fn offset(
+    text: RopeSlice,
+    anchor: usize,
+    rows: isize,
+    delta: isize,
+    lead: u32,
+    format: &TextFormat,
+    annotations: &TextAnnotations,
+) -> (usize, isize) {
+    let anchor = anchor.min(text.len_chars());
+    let target = rows + delta;
+    // Rows below the first line's top, needed only when the move may cross it.
+    let from_top = match (lead, rows < 0, target < 0) {
+        (0, ..) | (_, false, false) => None,
+        (_, true, _) => Some(rows),
+        (_, false, true) => visual_offset_from_anchor(
+            text,
+            0,
+            anchor,
+            format,
+            annotations,
+            target.unsigned_abs() + 1,
+        )
+        .ok()
+        .map(|(pos, _)| pos.row as isize + rows),
+    };
+    let helix = |anchor: usize, rows: isize| {
+        let (anchor, virtual_rows) =
+            char_idx_at_visual_offset(text, anchor, rows, 0, format, annotations);
+        (anchor, virtual_rows as isize)
+    };
+    match from_top.map(|top| top + delta) {
+        Some(top) if top < 0 => (0, top.max(-(lead as isize))),
+        Some(top) => helix(0, top),
+        None => helix(anchor, target),
+    }
+}
+
+/// Scroll position that keeps `cursor` at least `SCROLLOFF` rows inside the viewport.
 pub fn follow(
     text: RopeSlice,
     cursor: usize,
-    anchor: usize,
-    rows: u16,
+    scroll: Scroll,
+    lead: u32,
     format: &TextFormat,
-) -> usize {
-    let height = rows as usize;
-    let anchor = anchor.min(text.len_chars());
+    annotations: &TextAnnotations,
+) -> (usize, isize) {
+    let height = scroll.viewport.rows as usize;
+    let anchor = scroll.anchor.min(text.len_chars());
     let bottom_row = match height {
-        0 => return anchor,
+        0 => return (anchor, scroll.rows),
         height => height - SCROLLOFF.min(height / 2) - 1,
     };
     let top_row = SCROLLOFF.min((height - 1) / 2);
-    let annotations = TextAnnotations::default();
-    let target = match visual_offset_from_anchor(text, anchor, cursor, format, &annotations, height)
-    {
-        Ok((pos, _)) if pos.row < top_row => top_row,
-        Ok((pos, _)) if pos.row > bottom_row => bottom_row,
-        Ok(_) => return anchor,
-        Err(VisualOffsetError::PosBeforeAnchorRow) => top_row,
-        Err(VisualOffsetError::PosAfterMaxRow) => bottom_row,
-    };
-    char_idx_at_visual_offset(text, cursor, -(target as isize), 0, format, &annotations).0
+    let max_rows = (height as isize + scroll.rows).max(0) as usize;
+    let target =
+        match visual_offset_from_anchor(text, anchor, cursor, format, annotations, max_rows) {
+            Ok((pos, _)) => match pos.row as isize - scroll.rows {
+                row if row < top_row as isize => top_row,
+                row if row > bottom_row as isize => bottom_row,
+                _ => return (anchor, scroll.rows),
+            },
+            Err(VisualOffsetError::PosBeforeAnchorRow) => top_row,
+            Err(VisualOffsetError::PosAfterMaxRow) => bottom_row,
+        };
+    offset(
+        text,
+        cursor,
+        0,
+        -(target as isize),
+        lead,
+        format,
+        annotations,
+    )
 }
 
 /// Scrolls by `rows` and drags the primary cursor along once it would leave the scrolloff band.
+#[allow(clippy::too_many_arguments)]
 pub fn scroll(
     text: RopeSlice,
     selection: &Selection,
-    anchor: usize,
-    viewport: Viewport,
+    scroll: Scroll,
     rows: isize,
     mode: Mode,
+    lead: u32,
     format: &TextFormat,
-) -> (usize, Option<Selection>) {
-    let annotations = TextAnnotations::default();
-    let anchor = char_idx_at_visual_offset(
+    annotations: &TextAnnotations,
+) -> (Scroll, Option<Selection>) {
+    let (anchor, top) = offset(
         text,
-        anchor.min(text.len_chars()),
+        scroll.anchor,
+        scroll.rows,
         rows,
-        0,
+        lead,
         format,
-        &annotations,
-    )
-    .0;
-    let moved = into_band(
+        annotations,
+    );
+    let moved = Scroll {
+        anchor,
+        rows: top,
+        viewport: scroll.viewport,
+    };
+    let dragged = into_band(
         text,
         selection,
-        anchor,
-        viewport,
+        moved,
         rows.cmp(&0),
         mode,
         format,
+        annotations,
     );
-    (anchor, moved)
+    (moved, dragged)
 }
 
 /// The selection with the primary cursor dragged inside the scrolloff band of a view moved in `direction`.
 fn into_band(
     text: RopeSlice,
     selection: &Selection,
-    anchor: usize,
-    viewport: Viewport,
+    scroll: Scroll,
     direction: Ordering,
     mode: Mode,
     format: &TextFormat,
+    annotations: &TextAnnotations,
 ) -> Option<Selection> {
-    let annotations = TextAnnotations::default();
-    let height = viewport.rows as usize;
+    let height = scroll.viewport.rows as usize;
     let scrolloff = SCROLLOFF.min(height.saturating_sub(1) / 2);
     let primary = selection.primary();
     let cursor = primary.cursor(text);
-    let edge = |row: usize| {
-        char_idx_at_visual_offset(text, anchor, row as isize, 0, format, &annotations).0
-    };
+    let edge = |row: usize| char_at(text, scroll, row as u16, 0, format, annotations);
     let head = match direction {
         Ordering::Greater => Some(edge(scrolloff)).filter(|&head| head > cursor),
         Ordering::Less => {
@@ -118,15 +199,22 @@ fn into_band(
     })
 }
 
-/// Char under the cell at `row`, `col` of the text area.
-pub fn char_at(text: RopeSlice, anchor: usize, row: u16, col: u16, format: &TextFormat) -> usize {
+/// Char under the cell at `row`, `col` of the text area; filler rows give the char before them.
+pub fn char_at(
+    text: RopeSlice,
+    scroll: Scroll,
+    row: u16,
+    col: u16,
+    format: &TextFormat,
+    annotations: &TextAnnotations,
+) -> usize {
     char_idx_at_visual_offset(
         text,
-        anchor.min(text.len_chars()),
-        row as isize,
+        scroll.anchor.min(text.len_chars()),
+        scroll.rows + row as isize,
         col as usize,
         format,
-        &TextAnnotations::default(),
+        annotations,
     )
     .0
 }
@@ -246,16 +334,39 @@ pub fn line_at_thumb(len_lines: usize, shown: usize, height: f32, track: f32, to
     }
 }
 
-fn pane_text<'a>(
+/// The text a pane's active view scrolls: a text view, or a diff's buffer side with the
+/// diff's filler rows.
+pub struct Pointed<'a> {
+    pub view: &'a mut TextView,
+    pub doc: &'a TextDoc,
+    pub padding: Padding<'a>,
+    pub right: Right,
+}
+
+pub(crate) fn pane_text<'a>(
     layout: &'a mut Layout,
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
-) -> Option<(&'a mut TextView, &'a TextDoc)> {
-    let View::Text(view) = layout.panes.get_mut(pane)?.active_mut()?;
-    match buffers.get(view.buffer()).map(|b| &b.content) {
-        Some(Content::Text { doc, .. }) => Some((view, doc)),
-        Some(Content::Loading { .. }) | None => None,
-    }
+) -> Option<Pointed<'a>> {
+    let view = layout.panes.get_mut(pane)?.active_mut()?;
+    let content = &buffers.get(view.buffer())?.content;
+    let Content::Text { doc, .. } = content else {
+        return None;
+    };
+    Some(match view {
+        View::Text(view) => Pointed {
+            view,
+            doc,
+            padding: crate::conflict::padding(doc),
+            right: Right::Live,
+        },
+        View::Diff(diff) => Pointed {
+            view: &mut diff.text,
+            doc,
+            padding: diff.align.sides[RIGHT].padding(),
+            right: diffview::right(content),
+        },
+    })
 }
 
 /// Keeps the primary cursor of `pane` in view; run after every command.
@@ -266,24 +377,39 @@ pub fn follow_cursor(state: &mut State, pane: PaneId) {
         languages,
         ..
     } = state;
-    let Some((view, doc)) = pane_text(layout, buffers, pane) else {
-        return;
-    };
-    let text = doc.text.slice(..);
-    let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
-    view.scroll.anchor = follow(
-        text,
-        view.selection.primary().cursor(text),
-        view.scroll.anchor,
-        view.scroll.viewport.rows,
-        &format,
-    );
+    match pane_text(layout, buffers, pane) {
+        Some(Pointed {
+            view,
+            doc,
+            padding,
+            right: Right::Live,
+        }) => {
+            let text = doc.text.slice(..);
+            let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+            let annotations = annotations(text, padding);
+            (view.scroll.anchor, view.scroll.rows) = follow(
+                text,
+                view.selection.primary().cursor(text),
+                view.scroll,
+                padding.lead,
+                &format,
+                &annotations,
+            );
+        }
+        // Nothing to follow on an inert side.
+        Some(Pointed {
+            right: Right::Deleted,
+            ..
+        })
+        | None => {}
+    }
+    diffview::sync_left(state, pane);
 }
 
-/// Records the drawn size of `pane`; a changed size re-follows the cursor.
+/// Records the drawn size of a text view; a changed size re-follows the cursor.
 pub fn set_viewport(state: &mut State, pane: PaneId, viewport: Viewport) {
     match pane_text(&mut state.layout, &state.buffers, pane) {
-        Some((view, _)) if view.scroll.viewport != viewport => {
+        Some(Pointed { view, .. }) if view.scroll.viewport != viewport => {
             view.scroll.viewport = viewport;
             follow_cursor(state, pane);
         }
@@ -291,6 +417,7 @@ pub fn set_viewport(state: &mut State, pane: PaneId, viewport: Viewport) {
     }
 }
 
+/// Wheel scrolling; a diff scrolls both sides, also when its buffer side is inert.
 pub fn wheel(state: &mut State, pane: PaneId, rows: isize) {
     let mode = state.input.mode;
     let State {
@@ -299,27 +426,38 @@ pub fn wheel(state: &mut State, pane: PaneId, rows: isize) {
         languages,
         ..
     } = state;
-    let Some((view, doc)) = pane_text(layout, buffers, pane) else {
+    let Some(Pointed {
+        view,
+        doc,
+        padding,
+        right,
+    }) = pane_text(layout, buffers, pane)
+    else {
         return;
     };
+    let text = doc.text.slice(..);
     let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
-    let (anchor, moved) = scroll(
-        doc.text.slice(..),
+    let annotations = annotations(text, padding);
+    let (moved, dragged) = scroll(
+        text,
         &view.selection,
-        view.scroll.anchor,
-        view.scroll.viewport,
+        view.scroll,
         rows,
         mode,
+        padding.lead,
         &format,
+        &annotations,
     );
-    view.scroll.anchor = anchor;
-    match moved {
-        Some(selection) => view.selection = selection,
-        None => {}
+    view.scroll = moved;
+    match (dragged, right) {
+        (Some(selection), Right::Live) => view.selection = selection,
+        (Some(_), Right::Deleted) | (None, _) => {}
     }
+    drop(annotations);
+    diffview::sync_left(state, pane);
 }
 
-/// The view of `pane` with the char under its text cell `row`, `col`.
+/// The live view of `pane` with the char under its text cell `row`, `col`.
 fn pointed(
     state: &mut State,
     pane: PaneId,
@@ -332,9 +470,19 @@ fn pointed(
         languages,
         ..
     } = state;
-    let (view, doc) = pane_text(layout, buffers, pane)?;
+    let Pointed {
+        view,
+        doc,
+        padding,
+        right: Right::Live,
+    } = pane_text(layout, buffers, pane)?
+    else {
+        return None;
+    };
+    let text = doc.text.slice(..);
     let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
-    let pos = char_at(doc.text.slice(..), view.scroll.anchor, row, col, &format);
+    let annotations = annotations(text, padding);
+    let pos = char_at(text, view.scroll, row, col, &format, &annotations);
     Some((view, doc, pos))
 }
 
@@ -384,7 +532,7 @@ pub fn release(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
         notice,
         ..
     } = state;
-    let Some((view, doc)) = pane_text(layout, buffers, pane) else {
+    let Some(Pointed { view, doc, .. }) = pane_text(layout, buffers, pane) else {
         return;
     };
     let primary = view.selection.primary();
@@ -421,26 +569,39 @@ pub fn scroll_to_line(state: &mut State, pane: PaneId, line: usize) {
         languages,
         ..
     } = state;
-    let Some((view, doc)) = pane_text(layout, buffers, pane) else {
+    let Some(Pointed {
+        view,
+        doc,
+        padding,
+        right,
+    }) = pane_text(layout, buffers, pane)
+    else {
         return;
     };
     let text = doc.text.slice(..);
     let line = line.min(text.len_lines().saturating_sub(1));
     let current = text.char_to_line(view.scroll.anchor.min(text.len_chars()));
-    let anchor = text.line_to_char(line);
+    let moved = Scroll {
+        anchor: text.line_to_char(line),
+        rows: 0,
+        viewport: view.scroll.viewport,
+    };
     let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
-    let moved = into_band(
+    let annotations = annotations(text, padding);
+    let dragged = into_band(
         text,
         &view.selection,
-        anchor,
-        view.scroll.viewport,
+        moved,
         line.cmp(&current),
         mode,
         &format,
+        &annotations,
     );
-    view.scroll.anchor = anchor;
-    match moved {
-        Some(selection) => view.selection = selection,
-        None => {}
+    view.scroll = moved;
+    match (dragged, right) {
+        (Some(selection), Right::Live) => view.selection = selection,
+        (Some(_), Right::Deleted) | (None, _) => {}
     }
+    drop(annotations);
+    diffview::sync_left(state, pane);
 }

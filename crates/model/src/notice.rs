@@ -105,6 +105,8 @@ pub enum Notice {
     DiffPending,
     NoHunks,
     NoChangedFiles,
+    /// Discard works on one file at a time.
+    DiscardGroup,
     Unchanged {
         path: PathBuf,
     },
@@ -117,6 +119,12 @@ pub enum Notice {
         error: String,
     },
     DiscardNotConfirmed,
+
+    // Conflicts: merge markers in the buffer text.
+    NoConflicts,
+    NoConflictUnderSelection,
+    /// A selected conflict has no `|||||||` section to take.
+    NoConflictBase,
 }
 
 /// Mirrors `helix_core::surround::Error`.
@@ -206,6 +214,7 @@ impl std::fmt::Display for Notice {
             Notice::DiffPending => f.write_str("diff is still updating; try again"),
             Notice::NoHunks => f.write_str("no change under the selection"),
             Notice::NoChangedFiles => f.write_str("no changed files"),
+            Notice::DiscardGroup => f.write_str("discard files one at a time"),
             Notice::Unchanged { path } => write!(f, "{} has no changes", path.display()),
             Notice::IndexChanged { path } => {
                 write!(
@@ -216,6 +225,11 @@ impl std::fmt::Display for Notice {
             }
             Notice::GitFailed { path, error } => write!(f, "git: {}: {error}", path.display()),
             Notice::DiscardNotConfirmed => f.write_str("discard cancelled"),
+            Notice::NoConflicts => f.write_str("no more conflicts"),
+            Notice::NoConflictUnderSelection => f.write_str("no conflict under the selection"),
+            Notice::NoConflictBase => {
+                f.write_str("conflict has no base section (needs merge.conflictStyle diff3)")
+            }
         }
     }
 }

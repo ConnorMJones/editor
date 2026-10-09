@@ -1,5 +1,7 @@
 mod commands;
+mod conflict;
 mod diff;
+mod diffview;
 mod display;
 #[path = "../support/harness.rs"]
 mod harness;

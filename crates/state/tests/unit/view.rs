@@ -1,4 +1,4 @@
-use state::layout::{View, Viewport};
+use state::layout::Viewport;
 use state::{Sticky, scroll};
 
 use crate::harness::Harness;
@@ -107,7 +107,7 @@ fn edits_elsewhere_shift_other_views_anchor() {
     let original = h.state.layout.focus;
     h.keys("<C-w>vggxd");
     match h.state.layout.panes[original].active() {
-        Some(View::Text(view)) => assert_eq!(view.scroll.anchor, before - 2),
+        Some(view) => assert_eq!(view.text().scroll.anchor, before - 2),
         None => panic!("no view"),
     }
 }

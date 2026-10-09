@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::regex::bytes::{Regex, RegexBuilder};
 use model::command::{
-    Command, Cycle, HunkOp, HunkTarget, PickerCommand, TreeCommand, WindowCommand,
+    Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, Take, TreeCommand, WindowCommand,
 };
 use model::window::{Axis, PickerKind, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
@@ -305,6 +305,18 @@ pub static PALETTE: &[(&str, Command)] = &[
     ("revert-hunk", Command::Hunk(HunkOp::Revert)),
     ("undo", Command::Undo),
     ("redo", Command::Redo),
+    (
+        "goto-next-conflict",
+        Command::GotoConflict(Direction::Forward),
+    ),
+    (
+        "goto-prev-conflict",
+        Command::GotoConflict(Direction::Backward),
+    ),
+    ("conflict-ours", Command::Resolve(Take::Ours)),
+    ("conflict-theirs", Command::Resolve(Take::Theirs)),
+    ("conflict-both", Command::Resolve(Take::Both)),
+    ("conflict-base", Command::Resolve(Take::Base)),
 ];
 
 /// Previews kept per picker; loads beyond this evict the oldest.

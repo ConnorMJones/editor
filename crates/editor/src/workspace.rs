@@ -11,19 +11,24 @@ use gpui::{
     WindowButtonLayout, WindowControlArea, canvas, div, point, prelude::*, px, size,
     transparent_black, uniform_list,
 };
-use helix_core::text_annotations::TextAnnotations;
 use helix_core::visual_offset_from_anchor;
-use model::command::{Command, PickerCommand};
+use model::command::{ChangesCommand, Command, PickerCommand};
 use model::config::TitleBar;
+use model::git::{Change, GitStatus, Group, Kind};
 use model::register::Clipboard;
 use model::window::Axis;
 use slotmap::SecondaryMap;
 use state::buffer::{Content, Disk};
+use state::changes::{self, Confirm, Discard, ListRow};
+use state::conflict;
+use state::diff::{self, Bases, Removal, Side};
+use state::diffview::{Left, RIGHT};
 use state::display::{self, Gutter, Indent};
 use state::job::{self, JobResult};
 use state::keymap::{self, Context as KeyContext};
 use state::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
 use state::picker::{Items, PALETTE, Search};
+use state::scroll;
 use state::tree::{self, Fold, RowKind, TreeEdit};
 use state::watch::{self, Watcher};
 use state::{
@@ -32,7 +37,7 @@ use state::{
 };
 
 use crate::preview::PreviewElement;
-use crate::text::TextElement;
+use crate::text::{Part, TextElement};
 use crate::theme::Theme;
 
 pub struct Workspace {
@@ -43,6 +48,7 @@ pub struct Workspace {
     pub focus: gpui::FocusHandle,
     pub watcher: Watcher,
     pub tree_scroll: UniformListScrollHandle,
+    pub changes_scroll: UniformListScrollHandle,
     pub picker_scroll: UniformListScrollHandle,
     /// Uncommitted IME composition, drawn at the primary cursor.
     pub preedit: String,
@@ -174,6 +180,21 @@ impl Workspace {
     pub fn changed(&mut self, cx: &mut Context<Self>) {
         self.tree_scroll
             .scroll_to_item(self.state.tree.cursor, ScrollStrategy::Nearest);
+        match &self.state.git.repo {
+            Repo::Found { snapshot, .. } => {
+                match changes::cursor_row(
+                    &snapshot.changes,
+                    &self.state.git.folds,
+                    self.state.git.cursor.as_ref(),
+                ) {
+                    Some(row) => self
+                        .changes_scroll
+                        .scroll_to_item(row, ScrollStrategy::Nearest),
+                    None => {}
+                }
+            }
+            Repo::None | Repo::Unknown => {}
+        }
         match &self.state.overlay {
             Overlay::Picker(picker) => self
                 .picker_scroll
@@ -580,9 +601,10 @@ impl Workspace {
         let state = &self.state;
         let focused = pane == state.layout.focus;
         let mode = state.input.mode;
-        let (file, flags, selections, position) =
+        let (file, flags, hunks, conflicts, selections, position) =
             match state.layout.panes.get(pane).and_then(Pane::active) {
-                Some(View::Text(view)) => {
+                Some(shown) => {
+                    let view = shown.text();
                     let buffer = &state.buffers[view.buffer()];
                     let name = buffer
                         .path
@@ -591,7 +613,9 @@ impl Workspace {
                         .display()
                         .to_string();
                     match &buffer.content {
-                        Content::Text { doc, disk, .. } => {
+                        Content::Text {
+                            doc, disk, diff, ..
+                        } => {
                             let cursor = view.selection.primary().cursor(doc.text.slice(..));
                             let line = doc.text.char_to_line(cursor);
                             let column = cursor - doc.text.line_to_char(line);
@@ -608,20 +632,62 @@ impl Workspace {
                                 1 => "1 sel".to_owned(),
                                 n => format!("{n} sels"),
                             };
+                            let hunks = match (shown, &diff.bases) {
+                                (View::Text(_), _) => String::new(),
+                                (View::Diff(_), Bases::Tracked(tracked)) => {
+                                    let at = diff::hunk_at(
+                                        &tracked.hunks,
+                                        Side::After,
+                                        line as u32,
+                                        Removal::Include,
+                                    );
+                                    match (at, tracked.hunks.len()) {
+                                        (_, 0) => "diff: no changes".to_owned(),
+                                        (Some(at), count) => {
+                                            format!("diff: hunk {}/{count}", at + 1)
+                                        }
+                                        (None, count) => format!("diff: {count} hunks"),
+                                    }
+                                }
+                                (View::Diff(_), Bases::Untracked) => "diff: untracked".to_owned(),
+                                (View::Diff(_), Bases::NoRepo) => {
+                                    "diff: not in a repository".to_owned()
+                                }
+                                (View::Diff(_), Bases::Loading) => "diff".to_owned(),
+                            };
+                            let list = &conflict::current(doc).list;
+                            let at = list.partition_point(|conflict| conflict.close < line);
+                            let conflicts = match (list.len(), list.get(at)) {
+                                (0, _) => String::new(),
+                                (count, Some(inside)) if inside.open <= line => {
+                                    format!("conflict {}/{count}", at + 1)
+                                }
+                                (1, _) => "1 conflict".to_owned(),
+                                (count, _) => format!("{count} conflicts"),
+                            };
                             (
                                 name,
                                 format!("{marker}{disk}"),
+                                hunks,
+                                conflicts,
                                 selections,
                                 format!("{}:{}", line + 1, column + 1),
                             )
                         }
-                        Content::Loading { .. } => {
-                            (name, "[loading]".to_owned(), String::new(), String::new())
-                        }
+                        Content::Loading { .. } => (
+                            name,
+                            "[loading]".to_owned(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        ),
                     }
                 }
                 None => (
                     "[scratch]".to_owned(),
+                    String::new(),
+                    String::new(),
                     String::new(),
                     String::new(),
                     String::new(),
@@ -664,6 +730,13 @@ impl Workspace {
             .child(div().pl_1().text_color(theme.chrome.unsaved).child(flags))
             .child(div().flex_1())
             .child(div().px_2().text_color(theme.text_muted).child(pending))
+            .child(div().px_2().child(hunks))
+            .child(
+                div()
+                    .px_2()
+                    .text_color(theme.chrome.close_hover)
+                    .child(conflicts),
+            )
             .child(div().px_2().child(selections))
             .child(div().px_2().child(position))
     }
@@ -681,18 +754,42 @@ impl Workspace {
                     (Some(tabs), Some(scroll)) => Some(self.tab_bar(pane, tabs, scroll, cx)),
                     (Some(_) | None, _) => None,
                 };
+                let element = |part: Part| TextElement {
+                    workspace: cx.entity(),
+                    pane,
+                    part,
+                };
                 let body = match target.and_then(Pane::active) {
-                    Some(View::Text(view)) => {
-                        match &self.state.buffers[view.buffer()].content {
-                            Content::Text { .. } => div()
+                    Some(view) => {
+                        match (&self.state.buffers[view.buffer()].content, view) {
+                            (Content::Text { .. }, View::Text(_)) => div()
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_hidden()
-                                .child(TextElement {
-                                    workspace: cx.entity(),
-                                    pane,
-                                }),
-                            Content::Loading { .. } => div()
+                                .child(element(Part::Text)),
+                            // Equal halves, so both sides wrap at the same width.
+                            (Content::Text { .. }, View::Diff(_)) => div()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .flex_row()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(element(Part::Head)),
+                                )
+                                .child(div().flex_none().w(px(1.)).bg(self.theme.chrome.border))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(element(Part::Buffer)),
+                                ),
+                            (Content::Loading { .. }, _) => div()
                                 .flex_1()
                                 .p_2()
                                 .text_color(self.theme.text_muted)
@@ -799,8 +896,247 @@ impl Workspace {
                         .absolute()
                         .size_full(),
                     )
-                    .child(
-                        uniform_list(
+                    .child(match self.state.sidebar {
+                        Sidebar::Changes(_) => uniform_list(
+                            "changes",
+                            match &self.state.git.repo {
+                                Repo::Found { snapshot, .. } => {
+                                    changes::list_len(&snapshot.changes, &self.state.git.folds)
+                                }
+                                Repo::None | Repo::Unknown => 0,
+                            },
+                            cx.processor(|this, range: Range<usize>, _window, cx| {
+                                let state = &this.state;
+                                let theme = &this.theme;
+                                let Repo::Found { snapshot, .. } = &state.git.repo else {
+                                    return Vec::new();
+                                };
+                                let entries = &snapshot.changes;
+                                let focused =
+                                    matches!(state.sidebar, Sidebar::Changes(Focus::Sidebar));
+                                let folds = &state.git.folds;
+                                let cursor =
+                                    changes::cursor_row(entries, folds, state.git.cursor.as_ref());
+                                range
+                                    .map(|row| match changes::list_row(entries, folds, row) {
+                                        Some(ListRow::Header { group, count, fold }) => {
+                                            let label = match group {
+                                                Group::Conflicts => "Conflicts",
+                                                Group::Staged => "Staged Changes",
+                                                Group::Changes => "Changes",
+                                            };
+                                            let chevron = match fold {
+                                                Fold::Expanded => "▾",
+                                                Fold::Collapsed => "▸",
+                                            };
+                                            let button = match group {
+                                                Group::Staged => row_button(
+                                                    theme,
+                                                    ("unstage-all", row),
+                                                    "−",
+                                                    row,
+                                                    ChangesCommand::Unstage,
+                                                    cx,
+                                                ),
+                                                Group::Conflicts | Group::Changes => row_button(
+                                                    theme,
+                                                    ("stage-all", row),
+                                                    "+",
+                                                    row,
+                                                    ChangesCommand::Stage,
+                                                    cx,
+                                                ),
+                                            };
+                                            let bg = match (Some(row) == cursor, focused) {
+                                                (true, true) => theme.chrome.selection,
+                                                (true, false) => theme.background,
+                                                (false, _) => theme.surface,
+                                            };
+                                            div()
+                                                .id(row)
+                                                .group("change-row")
+                                                .w_full()
+                                                .flex()
+                                                .flex_row()
+                                                .gap_1()
+                                                .px_2()
+                                                .bg(bg)
+                                                .hover(|style| style.bg(theme.chrome.hover))
+                                                .text_color(theme.text_muted)
+                                                .on_click(cx.listener(
+                                                    move |this, _: &ClickEvent, window, cx| {
+                                                        workspace::click_changes(
+                                                            &mut this.state,
+                                                            row,
+                                                            workspace::Click::Single,
+                                                            &mut this.effects,
+                                                        );
+                                                        window.focus(&this.focus, cx);
+                                                        this.changed(cx);
+                                                    },
+                                                ))
+                                                .child(div().flex_none().w(px(12.)).child(chevron))
+                                                .child(div().flex_1().child(label))
+                                                .child(button)
+                                                .child(div().flex_none().child(count.to_string()))
+                                        }
+                                        Some(ListRow::Entry(index)) => {
+                                            let changed = &entries[index];
+                                            let change = snapshot.paths.get(&changed.path).copied();
+                                            let side = match changed.group {
+                                                Group::Staged => change.and_then(Change::staged),
+                                                Group::Conflicts | Group::Changes => {
+                                                    change.and_then(Change::unstaged)
+                                                }
+                                            };
+                                            let (letter, status) =
+                                                match (changed.group, change, side) {
+                                                    (Group::Conflicts, ..) => {
+                                                        ("C", GitStatus::Conflicted)
+                                                    }
+                                                    (_, Some(Change::Untracked), _) => {
+                                                        ("U", GitStatus::Untracked)
+                                                    }
+                                                    (_, _, Some(Kind::Added)) => {
+                                                        ("A", GitStatus::Added)
+                                                    }
+                                                    (_, _, Some(Kind::Deleted)) => {
+                                                        ("D", GitStatus::Deleted)
+                                                    }
+                                                    (_, _, Some(Kind::Renamed)) => {
+                                                        ("R", GitStatus::Modified)
+                                                    }
+                                                    (_, _, Some(Kind::TypeChange)) => {
+                                                        ("T", GitStatus::Modified)
+                                                    }
+                                                    (_, _, Some(Kind::Modified) | None) => {
+                                                        ("M", GitStatus::Modified)
+                                                    }
+                                                };
+                                            // Staged in full, in part, or not at all.
+                                            let marker = match change {
+                                                Some(Change::Staged(_)) => "●",
+                                                Some(Change::Both { .. }) => "◐",
+                                                Some(Change::Unstaged(_) | Change::Untracked) => {
+                                                    "○"
+                                                }
+                                                Some(Change::Conflicted | Change::Ignored)
+                                                | None => "",
+                                            };
+                                            let bg = match (Some(row) == cursor, focused) {
+                                                (true, true) => theme.chrome.selection,
+                                                (true, false) => theme.background,
+                                                (false, _) => theme.surface,
+                                            };
+                                            let buttons = match changed.group {
+                                                Group::Changes => [
+                                                    Some(row_button(
+                                                        theme,
+                                                        ("discard", row),
+                                                        "↶",
+                                                        row,
+                                                        ChangesCommand::Discard,
+                                                        cx,
+                                                    )),
+                                                    Some(row_button(
+                                                        theme,
+                                                        ("stage", row),
+                                                        "+",
+                                                        row,
+                                                        ChangesCommand::Stage,
+                                                        cx,
+                                                    )),
+                                                ],
+                                                Group::Staged => [
+                                                    Some(row_button(
+                                                        theme,
+                                                        ("unstage", row),
+                                                        "−",
+                                                        row,
+                                                        ChangesCommand::Unstage,
+                                                        cx,
+                                                    )),
+                                                    None,
+                                                ],
+                                                Group::Conflicts => [
+                                                    Some(row_button(
+                                                        theme,
+                                                        ("stage", row),
+                                                        "+",
+                                                        row,
+                                                        ChangesCommand::Stage,
+                                                        cx,
+                                                    )),
+                                                    None,
+                                                ],
+                                            };
+                                            let dir = changed.path.parent().unwrap_or("");
+                                            div()
+                                                .id(row)
+                                                .group("change-row")
+                                                .w_full()
+                                                .flex()
+                                                .flex_row()
+                                                .gap_2()
+                                                .pl_4()
+                                                .pr_2()
+                                                .bg(bg)
+                                                .hover(|style| style.bg(theme.chrome.hover))
+                                                .on_click(cx.listener(
+                                                    move |this, event: &ClickEvent, window, cx| {
+                                                        let click = match event.click_count() {
+                                                            2 => workspace::Click::Double,
+                                                            _ => workspace::Click::Single,
+                                                        };
+                                                        workspace::click_changes(
+                                                            &mut this.state,
+                                                            row,
+                                                            click,
+                                                            &mut this.effects,
+                                                        );
+                                                        window.focus(&this.focus, cx);
+                                                        this.changed(cx);
+                                                    },
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_color(theme.chrome[status])
+                                                        .child(changed.path.name().to_owned()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_color(theme.text_muted)
+                                                        .child(dir.to_owned()),
+                                                )
+                                                .children(buttons.into_iter().flatten())
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_color(theme.text_muted)
+                                                        .child(marker),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .w(px(12.))
+                                                        .text_color(theme.chrome[status])
+                                                        .child(letter),
+                                                )
+                                        }
+                                        None => div().id(row),
+                                    })
+                                    .collect()
+                            }),
+                        )
+                        .track_scroll(&self.changes_scroll)
+                        .flex_1()
+                        .into_any_element(),
+                        Sidebar::Files(_) | Sidebar::Hidden => uniform_list(
                             "file-tree",
                             self.state.tree.rows.len(),
                             cx.processor(|this, range: Range<usize>, _window, cx| {
@@ -876,8 +1212,9 @@ impl Workspace {
                             }),
                         )
                         .track_scroll(&self.tree_scroll)
-                        .flex_1(),
-                    ),
+                        .flex_1()
+                        .into_any_element(),
+                    }),
             )
             .child(divider(Axis::Row, border).on_mouse_down(
                 MouseButton::Left,
@@ -1122,12 +1459,23 @@ impl EntityInputHandler for Workspace {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let state = &self.state;
-        let View::Text(view) = state.layout.panes.get(state.layout.focus)?.active()?;
+        let shown = state.layout.panes.get(state.layout.focus)?.active()?;
+        let view = shown.text();
         let doc = match &state.buffers.get(view.buffer())?.content {
             Content::Text { doc, .. } => doc,
             Content::Loading { .. } => return None,
         };
         let text = doc.text.slice(..);
+        let (padding, gutter_lines) = match shown {
+            View::Text(_) => (conflict::padding(doc), text.len_lines()),
+            View::Diff(diff) => (
+                diff.align.sides[RIGHT].padding(),
+                match &diff.left {
+                    Left::Head { doc: head, .. } => text.len_lines().max(head.text.len_lines()),
+                    Left::Pending | Left::Absent | Left::Parsing { .. } => text.len_lines(),
+                },
+            ),
+        };
         let viewport = view.scroll.viewport;
         let format = display::text_format(viewport, Indent::of(doc, &state.languages));
         let (pos, _) = visual_offset_from_anchor(
@@ -1135,16 +1483,17 @@ impl EntityInputHandler for Workspace {
             view.scroll.anchor,
             view.selection.primary().cursor(text),
             &format,
-            &TextAnnotations::default(),
-            viewport.rows as usize,
+            &scroll::annotations(text, padding),
+            (viewport.rows as isize + view.scroll.rows).max(0) as usize,
         )
         .ok()?;
+        let row = pos.row as isize - view.scroll.rows;
         let cell = self.theme.cell;
-        let col = Gutter::new(text.len_lines()).cols as usize + pos.col;
+        let col = Gutter::new(gutter_lines).cols as usize + pos.col;
         Some(Bounds::new(
             point(
                 element_bounds.origin.x + cell.width * col as f32,
-                element_bounds.origin.y + cell.height * pos.row as f32,
+                element_bounds.origin.y + cell.height * row as f32,
             ),
             cell,
         ))
@@ -1184,24 +1533,53 @@ impl Render for Workspace {
             }
         }
         let state = &self.state;
-        let bottom = match (&state.overlay, &state.tree.edit, &state.notice) {
-            (Overlay::Prompt(_), _, _) => String::new(),
-            (_, TreeEdit::Create { line }, _) => {
+        let relative = |path: &std::path::Path| {
+            path.strip_prefix(state.root.path())
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
+        let bottom = match (
+            &state.overlay,
+            &state.tree.edit,
+            &state.git.confirm,
+            &state.notice,
+        ) {
+            (Overlay::Prompt(_), ..) => String::new(),
+            (_, TreeEdit::Create { line }, ..) => {
                 format!("new path (end with / for a directory): {line}")
             }
-            (_, TreeEdit::Rename { from, line }, _) => format!("rename {from} to: {line}"),
-            (_, TreeEdit::Delete { path, line, .. }, _) => {
+            (_, TreeEdit::Rename { from, line }, ..) => format!("rename {from} to: {line}"),
+            (_, TreeEdit::Delete { path, line, .. }, ..) => {
                 format!("delete {path}? type y to confirm: {line}")
             }
-            (Overlay::None | Overlay::Picker(_), TreeEdit::None, Some(notice)) => {
+            (
+                _,
+                TreeEdit::None,
+                Some(Confirm::Discard {
+                    path,
+                    how: Discard::Checkout,
+                }),
+                _,
+            ) => format!("discard changes to {}? y/n", relative(path)),
+            (
+                _,
+                TreeEdit::None,
+                Some(Confirm::Discard {
+                    path,
+                    how: Discard::Delete(_),
+                }),
+                _,
+            ) => format!("delete untracked {}? y/n", relative(path)),
+            (Overlay::None | Overlay::Picker(_), TreeEdit::None, None, Some(notice)) => {
                 notice.to_string()
             }
-            (Overlay::None | Overlay::Picker(_), TreeEdit::None, None) => String::new(),
+            (Overlay::None | Overlay::Picker(_), TreeEdit::None, None, None) => String::new(),
         };
         let line_height = window.line_height();
         let main = div().flex_1().flex().flex_row().min_h_0();
         let main = match state.sidebar {
-            Sidebar::Files(focus) => main.child(self.sidebar(focus, cx)),
+            Sidebar::Files(focus) | Sidebar::Changes(focus) => main.child(self.sidebar(focus, cx)),
             Sidebar::Hidden => main,
         };
         let areas = self.areas.clone();
@@ -1274,4 +1652,35 @@ impl Render for Workspace {
             ));
         self.decorations(content, window, cx)
     }
+}
+
+/// A Changes sidebar row button, shown while the row is hovered, that runs `command` on the row.
+fn row_button(
+    theme: &Theme,
+    id: (&'static str, usize),
+    glyph: &'static str,
+    row: usize,
+    command: ChangesCommand,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    let hover = theme.chrome.hover;
+    let text = theme.text;
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(16.))
+        .flex()
+        .justify_center()
+        .rounded_sm()
+        .text_color(theme.text_muted)
+        .invisible()
+        .group_hover("change-row", |style| style.visible())
+        .hover(move |style| style.bg(hover).text_color(text))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            workspace::changes_action(&mut this.state, row, command, &mut this.effects);
+            window.focus(&this.focus, cx);
+            this.changed(cx);
+        }))
+        .child(glyph)
 }

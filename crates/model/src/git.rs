@@ -42,12 +42,20 @@ pub enum Change {
 }
 
 /// A group of the Changes sidebar; also the order `]g` walks files in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Group {
     Conflicts,
     Staged,
     /// Unstaged and untracked files.
     Changes,
+}
+
+impl Group {
+    pub const COUNT: usize = 3;
+    pub const ALL: [Group; Group::COUNT] = [Group::Conflicts, Group::Staged, Group::Changes];
 }
 
 impl Change {

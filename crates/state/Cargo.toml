@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "diff"
 harness = false
+
+[[bench]]
+name = "diffview"
+harness = false

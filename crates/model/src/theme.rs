@@ -125,10 +125,6 @@ pub const CURSOR_SECONDARY: CursorColors = CursorColors {
     bg: Base05,
 };
 
-pub const DIFF_PLUS: Base16 = Base0B;
-pub const DIFF_MINUS: Base16 = Base08;
-pub const DIFF_DELTA: Base16 = Base09;
-
 pub const SCROLLBAR_TRACK: Base16 = Base01;
 pub const SCROLLBAR_THUMB: Base16 = Base03;
 /// Thumb colour while dragged.
@@ -153,10 +149,14 @@ pub enum Background {
     Theirs,
     /// The common ancestor section of a diff3 conflict.
     Base,
+    /// Conflict marker and label rows, dimmer than the sections they open.
+    OursMarker,
+    TheirsMarker,
+    BaseMarker,
 }
 
 impl Background {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 10;
     pub const ALL: [Background; Background::COUNT] = [
         Background::Added,
         Background::Removed,
@@ -165,48 +165,108 @@ impl Background {
         Background::Ours,
         Background::Theirs,
         Background::Base,
+        Background::OursMarker,
+        Background::TheirsMarker,
+        Background::BaseMarker,
     ];
 }
 
-/// A palette slot blended over the editor background at `alpha` percent.
+/// Colours of diff and conflict marks; each can be overridden under `[theme.diff]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Tone {
+    Added,
+    Removed,
+    Modified,
+    Ours,
+    Theirs,
+    Base,
+}
+
+impl Tone {
+    pub const COUNT: usize = 6;
+    pub const ALL: [Tone; Tone::COUNT] = [
+        Tone::Added,
+        Tone::Removed,
+        Tone::Modified,
+        Tone::Ours,
+        Tone::Theirs,
+        Tone::Base,
+    ];
+
+    /// Palette slot used when the config sets no colour.
+    pub const fn slot(self) -> Base16 {
+        match self {
+            Tone::Added => Base0B,
+            Tone::Removed => Base08,
+            Tone::Modified => Base09,
+            Tone::Ours => Base0B,
+            Tone::Theirs => Base09,
+            Tone::Base => Base0E,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TintColor {
+    Slot(Base16),
+    Tone(Tone),
+}
+
+/// A colour blended over the editor background at `alpha` percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tint {
-    pub slot: Base16,
+    pub color: TintColor,
     pub alpha: u8,
 }
 
 pub const fn background(role: Background) -> Tint {
     match role {
         Background::Added => Tint {
-            slot: Base0B,
+            color: TintColor::Tone(Tone::Added),
             alpha: 14,
         },
         Background::Removed => Tint {
-            slot: Base08,
+            color: TintColor::Tone(Tone::Removed),
             alpha: 14,
         },
         Background::Modified => Tint {
-            slot: Base09,
+            color: TintColor::Tone(Tone::Modified),
             alpha: 14,
         },
         Background::Filler => Tint {
-            slot: Base01,
+            color: TintColor::Slot(Base01),
             alpha: 100,
         },
         Background::Ours => Tint {
-            slot: Base0D,
+            color: TintColor::Tone(Tone::Ours),
             alpha: 16,
         },
         Background::Theirs => Tint {
-            slot: Base0E,
+            color: TintColor::Tone(Tone::Theirs),
             alpha: 16,
         },
         Background::Base => Tint {
-            slot: Base03,
+            color: TintColor::Tone(Tone::Base),
             alpha: 16,
+        },
+        Background::OursMarker => Tint {
+            color: TintColor::Tone(Tone::Ours),
+            alpha: 8,
+        },
+        Background::TheirsMarker => Tint {
+            color: TintColor::Tone(Tone::Theirs),
+            alpha: 8,
+        },
+        Background::BaseMarker => Tint {
+            color: TintColor::Tone(Tone::Base),
+            alpha: 8,
         },
     }
 }
+
+/// Text of the label rows around a conflict.
+pub const CONFLICT_LABEL: Style = Style::fg(Base04).with(Modifiers::ITALIC);
 
 /// Opacity of gutter signs for hunks that are already staged, in percent.
 pub const STAGED_SIGN_ALPHA: u8 = 40;

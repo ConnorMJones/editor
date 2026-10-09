@@ -11,7 +11,7 @@ use model::theme as roles;
 use state::Overlay;
 use state::buffer::{Content, TextDoc};
 use state::display::{self, CursorShape, Focus, Frame};
-use state::layout::{Pane, Scroll, View, Viewport};
+use state::layout::{Pane, Scroll, Viewport};
 use state::picker::{self, Preview, PreviewSource};
 
 use crate::workspace::Workspace;
@@ -104,7 +104,7 @@ impl Element for PreviewElement {
                                 let cursor = (state.layout.panes.values())
                                     .flat_map(Pane::items)
                                     .find_map(|item| {
-                                        let View::Text(view) = &item.view;
+                                        let view = item.view.text();
                                         (view.buffer() == buffer)
                                             .then(|| view.selection.primary().head)
                                     });
@@ -163,6 +163,7 @@ impl Element for PreviewElement {
                         anchor: doc
                             .text
                             .line_to_char(line.saturating_sub(viewport.rows as usize / 3)),
+                        rows: 0,
                         viewport,
                     };
                     let frame = &mut cache.frame;

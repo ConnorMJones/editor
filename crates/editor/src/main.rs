@@ -116,6 +116,7 @@ fn main() -> anyhow::Result<()> {
                         preedit: String::new(),
                         watcher,
                         tree_scroll: UniformListScrollHandle::new(),
+                        changes_scroll: UniformListScrollHandle::new(),
                         picker_scroll: UniformListScrollHandle::new(),
                         session: session_file,
                         drag: Drag::Idle,

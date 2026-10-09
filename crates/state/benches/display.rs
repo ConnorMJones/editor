@@ -6,6 +6,7 @@ use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Rope, Selection};
 use model::mode::Mode;
 use state::buffer::TextDoc;
+use state::conflict::{self, Conflicts};
 use state::display::{self, Focus, Frame, Indent, text_format};
 use state::layout::{Scroll, Viewport};
 use state::scroll;
@@ -34,6 +35,7 @@ fn display(c: &mut Criterion) {
     let selection = Selection::point(middle + 4);
     let scroll = Scroll {
         anchor: middle,
+        rows: 0,
         viewport,
     };
     let mut frame = Frame::default();
@@ -60,10 +62,20 @@ fn display(c: &mut Criterion) {
             scroll::follow(
                 doc.text.slice(..),
                 black_box(far),
-                middle,
-                viewport.rows,
+                scroll,
+                0,
                 &format,
+                &TextAnnotations::default(),
             )
+        })
+    });
+
+    // Runs once per edit batch; the scan only reads lines starting with a marker character.
+    let mut conflicts = Conflicts::EMPTY;
+    c.bench_function("conflict scan of 20k-line rust", |b| {
+        b.iter(|| {
+            conflict::parse(black_box(doc.text.slice(..)), 1, &mut conflicts);
+            conflicts.list.len()
         })
     });
 }

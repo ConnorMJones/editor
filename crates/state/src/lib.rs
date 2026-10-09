@@ -1,7 +1,9 @@
 pub mod apply;
 pub mod buffer;
 pub mod changes;
+pub mod conflict;
 pub mod diff;
+pub mod diffview;
 pub mod display;
 pub mod edit;
 pub mod files;
@@ -32,6 +34,7 @@ use helix_core::Selection;
 use helix_core::syntax::Loader;
 use model::command::{Command, Pending, RegexOp};
 use model::config::TabsConfig;
+use model::git::Group;
 use model::key::{Key, KeySeq};
 use model::mode::Mode;
 use model::notice::Notice;
@@ -148,6 +151,8 @@ impl State {
                 repo: Repo::Unknown,
                 refresh: Refresh::Idle,
                 confirm: None,
+                cursor: None,
+                folds: [Fold::Expanded; Group::COUNT],
             },
             matcher: nucleo::Matcher::default(),
             grep: Arc::new(AtomicU64::new(0)),
@@ -289,6 +294,7 @@ pub enum Exit {
 pub enum Sidebar {
     Hidden,
     Files(Focus),
+    Changes(Focus),
 }
 
 /// Sidebar width in logical pixels, kept within `MIN..=MAX`.
@@ -325,6 +331,10 @@ pub struct Git {
     pub refresh: Refresh,
     /// A destructive operation waiting for `Command::Confirm`.
     pub confirm: Option<changes::Confirm>,
+    /// Row selected in the Changes sidebar, kept by value so it survives refreshes.
+    pub cursor: Option<changes::ListCursor>,
+    /// Per `Group`, whether the sidebar shows its entries.
+    pub folds: [Fold; Group::COUNT],
 }
 
 pub enum Repo {

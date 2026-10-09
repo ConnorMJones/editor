@@ -4,9 +4,7 @@ use helix_core::line_ending::line_end_char_index;
 use helix_core::movement::{self, Movement};
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::textobject::{self, TextObject};
-use helix_core::{
-    Range, RopeSlice, char_idx_at_visual_offset, match_brackets, search, visual_offset_from_anchor,
-};
+use helix_core::{Range, RopeSlice, match_brackets, search, visual_offset_from_anchor};
 use helix_stdx::rope::RopeSliceExt;
 use model::command::{
     Align, CharTarget, Direction, Find, Inclusion, Motion, Object, ObjectScope, ScrollBy,
@@ -17,9 +15,10 @@ use model::notice::Notice;
 
 use crate::State;
 use crate::apply::{count_of, focused, movement_of, reselect, select, try_select};
+use crate::diffview::Right;
 use crate::display::{Indent, text_format};
 use crate::layout::Viewport;
-use crate::scroll::{self, SCROLLOFF};
+use crate::scroll::{self, Pointed, SCROLLOFF};
 
 pub(crate) fn direction(direction: Direction) -> movement::Direction {
     match direction {
@@ -185,15 +184,22 @@ pub fn motion(state: &mut State, motion: Motion) {
                 languages,
                 ..
             } = state;
-            let Some((view, doc)) = focused(layout, buffers) else {
+            let Some(Pointed {
+                view,
+                doc,
+                padding,
+                right: Right::Live,
+            }) = scroll::pane_text(layout, buffers, layout.focus)
+            else {
                 return;
             };
             let text = doc.text.slice(..);
             let format = text_format(viewport, Indent::of(doc, languages));
-            let annotations = TextAnnotations::default();
+            let annotations = scroll::annotations(text, padding);
             let anchor = view.scroll.anchor.min(text.len_chars());
             let height = viewport.rows as usize;
             let scrolloff = SCROLLOFF.min(height.saturating_sub(1) / 2);
+            let max_rows = (height as isize + view.scroll.rows).max(0) as usize;
             // Last row that shows text; shorter documents end above the bottom edge.
             let last = match visual_offset_from_anchor(
                 text,
@@ -201,9 +207,9 @@ pub fn motion(state: &mut State, motion: Motion) {
                 text.len_chars(),
                 &format,
                 &annotations,
-                height,
+                max_rows,
             ) {
-                Ok((pos, _)) => pos.row,
+                Ok((pos, _)) => (pos.row as isize - view.scroll.rows).max(0) as usize,
                 Err(_) => height.saturating_sub(1),
             };
             let row = match align {
@@ -212,8 +218,7 @@ pub fn motion(state: &mut State, motion: Motion) {
                 Align::Bottom => last.saturating_sub(scrolloff + count - 1),
             };
             let row = row.max(scrolloff).min(last.saturating_sub(scrolloff));
-            let pos =
-                char_idx_at_visual_offset(text, anchor, row as isize, 0, &format, &annotations).0;
+            let pos = scroll::char_at(text, view.scroll, row as u16, 0, &format, &annotations);
             view.selection = view
                 .selection
                 .clone()
@@ -355,12 +360,19 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
         languages,
         ..
     } = state;
-    let Some((view, doc)) = focused(layout, buffers) else {
+    let Some(Pointed {
+        view,
+        doc,
+        padding,
+        right: Right::Live,
+    }) = scroll::pane_text(layout, buffers, layout.focus)
+    else {
         return;
     };
     let text = doc.text.slice(..);
     let viewport = view.scroll.viewport;
     let format = text_format(viewport, Indent::of(doc, languages));
+    let padded = scroll::annotations(text, padding);
     let height = viewport.rows as isize;
     let sign = match dir {
         Direction::Forward => 1,
@@ -372,32 +384,33 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
                 ScrollBy::Page => height,
                 ScrollBy::Lines | ScrollBy::HalfPageCursor => count as isize,
             };
-            let (anchor, moved) = scroll::scroll(
+            let (moved_view, moved) = scroll::scroll(
                 text,
                 &view.selection,
-                view.scroll.anchor,
-                viewport,
+                view.scroll,
                 sign * rows,
                 mode,
+                padding.lead,
                 &format,
+                &padded,
             );
-            view.scroll.anchor = anchor;
+            view.scroll = moved_view;
             if let Some(selection) = moved {
                 view.selection = selection.ensure_invariants(text);
             }
         }
         ScrollBy::HalfPageCursor => {
             let rows = height / 2;
-            let mut annotations = TextAnnotations::default();
-            view.scroll.anchor = char_idx_at_visual_offset(
+            (view.scroll.anchor, view.scroll.rows) = scroll::offset(
                 text,
-                view.scroll.anchor.min(text.len_chars()),
+                view.scroll.anchor,
+                view.scroll.rows,
                 sign * rows,
-                0,
+                padding.lead,
                 &format,
-                &annotations,
-            )
-            .0;
+                &padded,
+            );
+            let mut annotations = TextAnnotations::default();
             view.selection = view
                 .selection
                 .clone()
@@ -425,11 +438,18 @@ pub fn align_view(state: &mut State, align: Align) {
         languages,
         ..
     } = state;
-    let Some((view, doc)) = focused(layout, buffers) else {
+    let Some(Pointed {
+        view,
+        doc,
+        padding,
+        right: Right::Live,
+    }) = scroll::pane_text(layout, buffers, layout.focus)
+    else {
         return;
     };
     let text = doc.text.slice(..);
     let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+    let annotations = scroll::annotations(text, padding);
     let last_row = view.scroll.viewport.rows.saturating_sub(1) as isize;
     let row = match align {
         Align::Top => 0,
@@ -437,8 +457,8 @@ pub fn align_view(state: &mut State, align: Align) {
         Align::Bottom => last_row,
     };
     let cursor = view.selection.primary().cursor(text);
-    view.scroll.anchor =
-        char_idx_at_visual_offset(text, cursor, -row, 0, &format, &TextAnnotations::default()).0;
+    (view.scroll.anchor, view.scroll.rows) =
+        scroll::offset(text, cursor, 0, -row, padding.lead, &format, &annotations);
 }
 
 pub fn goto_syntax_object(state: &mut State, object: SyntaxObject, dir: Direction) {

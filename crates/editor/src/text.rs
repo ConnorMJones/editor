@@ -9,12 +9,14 @@ use gpui::{
     ScrollWheelEvent, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle,
     Window, fill, point, px, relative, size,
 };
-use helix_core::text_annotations::TextAnnotations;
+use helix_core::Selection;
 use model::mode::Mode;
-use model::theme::{self as roles, Modifiers};
+use model::theme::{self as roles, Modifiers, Tone};
 use slotmap::Key as _;
 use state::buffer::Content;
+use state::conflict;
 use state::diff::{self, Bases, Diff, Stage};
+use state::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
 use state::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
@@ -28,10 +30,21 @@ use crate::workspace::Workspace;
 const SCROLLBAR_WIDTH: Pixels = px(8.);
 const MIN_THUMB: f32 = 16.;
 
-/// Draws the text view shown in `pane`.
+/// Draws one side of the view shown in `pane`: a text view, or either side of a diff.
 pub struct TextElement {
     pub workspace: Entity<Workspace>,
     pub pane: PaneId,
+    pub part: Part,
+}
+
+/// What a text element draws of its pane's active view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Text,
+    /// A diff's read-only HEAD side.
+    Head,
+    /// A diff's buffer side, which takes the keys.
+    Buffer,
 }
 
 impl IntoElement for TextElement {
@@ -156,8 +169,13 @@ impl Element for TextElement {
     type PrepaintState = Prepaint;
 
     fn id(&self) -> Option<ElementId> {
+        let name = match self.part {
+            Part::Text => "text",
+            Part::Head => "diff-head",
+            Part::Buffer => "diff-buffer",
+        };
         Some(ElementId::NamedInteger(
-            "text".into(),
+            name.into(),
             self.pane.data().as_ffi(),
         ))
     }
@@ -191,20 +209,21 @@ impl Element for TextElement {
         let pane = self.pane;
         let workspace = self.workspace.read(cx);
         let cell = workspace.theme.cell;
-        let len_lines = match workspace
-            .state
-            .layout
-            .panes
-            .get(pane)
-            .and_then(Pane::active)
-        {
-            Some(View::Text(view)) => match &workspace.state.buffers[view.buffer()].content {
-                Content::Text { doc, .. } => doc.text.len_lines(),
-                Content::Loading { .. } => 1,
-            },
-            None => 1,
+        let state = &workspace.state;
+        let active = state.layout.panes.get(pane).and_then(Pane::active);
+        let len_lines = match active.map(|view| &state.buffers[view.buffer()].content) {
+            Some(Content::Text { doc, .. }) => doc.text.len_lines(),
+            Some(Content::Loading { .. }) | None => 1,
         };
-        let gutter = Gutter::new(len_lines);
+        // Both sides of a diff share one gutter width so their text wraps alike.
+        let gutter_lines = match active {
+            Some(View::Diff(DiffView {
+                left: Left::Head { doc, .. },
+                ..
+            })) => len_lines.max(doc.text.len_lines()),
+            Some(View::Diff(_) | View::Text(_)) | None => len_lines,
+        };
+        let gutter = Gutter::new(gutter_lines);
         let text_origin = point(
             bounds.origin.x + cell.width * gutter.cols as f32,
             bounds.origin.y,
@@ -214,8 +233,13 @@ impl Element for TextElement {
             rows: (bounds.size.height / cell.height).floor().max(0.0) as u16,
             cols: ((text_width / cell.width).floor().max(0.0) as u16).saturating_sub(gutter.cols),
         };
-        self.workspace.update(cx, |workspace, _| {
-            scroll::set_viewport(&mut workspace.state, pane, viewport)
+        let part = self.part;
+        self.workspace.update(cx, |workspace, cx| match part {
+            Part::Text => scroll::set_viewport(&mut workspace.state, pane, viewport),
+            Part::Head | Part::Buffer => {
+                diffview::prepare(&mut workspace.state, pane, viewport, &mut workspace.effects);
+                workspace.flush(cx);
+            }
         });
         let hitbox = window.insert_hitbox(
             Bounds::new(bounds.origin, size(text_width, bounds.size.height)),
@@ -232,37 +256,85 @@ impl Element for TextElement {
             let workspace = self.workspace.read(cx);
             let theme = &workspace.theme;
             let state = &workspace.state;
-            let focus = match state.layout.focus == pane {
-                true => Focus::Focused(state.input.mode),
-                false => Focus::Unfocused,
+            let focus = match (part, state.layout.focus == pane) {
+                (Part::Head, _) => Focus::ReadOnly,
+                (Part::Text | Part::Buffer, true) => Focus::Focused(state.input.mode),
+                (Part::Text | Part::Buffer, false) => Focus::Unfocused,
             };
             cache.frames.swap(0, 1);
             cache.lines.swap(0, 1);
             cache.numbers.swap(0, 1);
             let [frame, previous] = &mut cache.frames;
-            match state.layout.panes.get(pane).and_then(Pane::active) {
-                Some(View::Text(view)) => match &state.buffers[view.buffer()].content {
-                    Content::Text { doc, .. } => display::layout(
-                        frame,
-                        doc,
-                        &view.selection,
-                        view.scroll,
-                        &state.languages,
-                        focus,
-                        &TextAnnotations::default(),
-                        &[],
-                    ),
-                    Content::Loading { .. } => {
-                        frame.rows.clear();
-                        frame.selections.clear();
-                        frame.cursors.clear();
+            let active = state.layout.panes.get(pane).and_then(Pane::active);
+            match (part, active) {
+                (Part::Text, Some(View::Text(view))) => match &state.buffers[view.buffer()].content
+                {
+                    Content::Text { doc, .. } => {
+                        let conflicts = conflict::current(doc);
+                        display::layout(
+                            frame,
+                            doc,
+                            &view.selection,
+                            view.scroll,
+                            &state.languages,
+                            focus,
+                            &conflict::annotations(doc),
+                            &conflicts.shades,
+                        );
+                        conflict::label(
+                            frame,
+                            doc.text.slice(..),
+                            conflicts,
+                            view.scroll.viewport.rows,
+                        );
+                    }
+                    Content::Loading { .. } => display::blank(frame, 0),
+                },
+                (Part::Buffer, Some(View::Diff(diff))) => {
+                    let content = &state.buffers[diff.text.buffer()].content;
+                    match (content, diffview::right(content)) {
+                        (Content::Text { doc, .. }, Right::Live) => {
+                            let side = &diff.align.sides[RIGHT];
+                            display::layout(
+                                frame,
+                                doc,
+                                &diff.text.selection,
+                                diff.text.scroll,
+                                &state.languages,
+                                focus,
+                                &scroll::annotations(doc.text.slice(..), side.padding()),
+                                &side.shades,
+                            )
+                        }
+                        (Content::Text { .. }, Right::Deleted) => {
+                            display::blank(frame, viewport.rows)
+                        }
+                        (Content::Loading { .. }, _) => display::blank(frame, 0),
+                    }
+                }
+                (Part::Head, Some(View::Diff(diff))) => match &diff.left {
+                    Left::Head {
+                        doc, scroll: top, ..
+                    } => {
+                        let side = &diff.align.sides[LEFT];
+                        display::layout(
+                            frame,
+                            doc,
+                            &Selection::point(0),
+                            *top,
+                            &state.languages,
+                            focus,
+                            &scroll::annotations(doc.text.slice(..), side.padding()),
+                            &side.shades,
+                        )
+                    }
+                    Left::Pending | Left::Absent | Left::Parsing { .. } => {
+                        display::blank(frame, viewport.rows)
                     }
                 },
-                None => {
-                    frame.rows.clear();
-                    frame.selections.clear();
-                    frame.cursors.clear();
-                }
+                (Part::Text, Some(View::Diff(_)))
+                | (Part::Head | Part::Buffer, Some(View::Text(_)))
+                | (_, None) => display::blank(frame, 0),
             }
 
             let span = tracing::trace_span!("shape rows").entered();
@@ -324,7 +396,9 @@ impl Element for TextElement {
 
             let numbering = match focus {
                 Focus::Focused(Mode::Normal | Mode::Select) => Numbering::Relative,
-                Focus::Focused(Mode::Insert) | Focus::Unfocused => Numbering::Absolute,
+                Focus::Focused(Mode::Insert) | Focus::Unfocused | Focus::ReadOnly => {
+                    Numbering::Absolute
+                }
             };
             let [numbers, old_numbers] = &mut cache.numbers;
             numbers.clear();
@@ -379,19 +453,21 @@ impl Element for TextElement {
             }
             drop(span);
 
-            let tracked = match state.layout.panes.get(pane).and_then(Pane::active) {
-                Some(View::Text(view)) => match &state.buffers[view.buffer()].content {
-                    Content::Text {
-                        diff:
-                            Diff {
-                                bases: Bases::Tracked(tracked),
-                                ..
-                            },
-                        ..
-                    } => Some(tracked),
-                    Content::Text { .. } | Content::Loading { .. } => None,
-                },
-                None => None,
+            let tracked = match (part, active) {
+                (Part::Head, _) | (_, None) => None,
+                (Part::Text | Part::Buffer, Some(view)) => {
+                    match &state.buffers[view.buffer()].content {
+                        Content::Text {
+                            diff:
+                                Diff {
+                                    bases: Bases::Tracked(tracked),
+                                    ..
+                                },
+                            ..
+                        } => Some(tracked),
+                        Content::Text { .. } | Content::Loading { .. } => None,
+                    }
+                }
             };
             cache.signs.clear();
             cache.signs.extend(frame.rows.iter().map(|row| {
@@ -412,12 +488,15 @@ impl Element for TextElement {
             };
             let bar = Bar {
                 hitbox: bar_hitbox,
-                scrollbar: scroll::scrollbar(
-                    len_lines,
-                    visible.clone(),
-                    f32::from(track.size.height),
-                    MIN_THUMB,
-                ),
+                scrollbar: match part {
+                    Part::Head => Scrollbar::Hidden,
+                    Part::Text | Part::Buffer => scroll::scrollbar(
+                        len_lines,
+                        visible.clone(),
+                        f32::from(track.size.height),
+                        MIN_THUMB,
+                    ),
+                },
                 len_lines,
                 shown: visible.len(),
                 page: viewport.rows as isize,
@@ -450,7 +529,7 @@ impl Element for TextElement {
                     );
                     Some((origin, line))
                 }
-                (Focus::Focused(_) | Focus::Unfocused, ..) => None,
+                (Focus::Focused(_) | Focus::Unfocused | Focus::ReadOnly, ..) => None,
             };
             let prepaint = Prepaint {
                 hitbox,
@@ -488,7 +567,7 @@ impl Element for TextElement {
         } = prepaint;
         let (origin, cell, gutter, focus) = (*text_origin, *cell, *gutter, *focus);
         let theme = &self.workspace.read(cx).theme;
-        let (colors, rows) = (Colors(theme.colors.0), RowColors(theme.rows.0));
+        let (colors, rows, tones) = (Colors(theme.colors.0), RowColors(theme.rows.0), theme.tones);
         let pane = self.pane;
         let id = id.expect("text element has an id");
         let pointer = window.with_element_state(id, |cache: Option<Cache>, window| {
@@ -513,7 +592,7 @@ impl Element for TextElement {
                         }
                     }
                 }
-                Focus::Unfocused => {}
+                Focus::Unfocused | Focus::ReadOnly => {}
             }
             for (index, row) in frame.rows.iter().enumerate() {
                 match row.background {
@@ -598,15 +677,16 @@ impl Element for TextElement {
                     Some(sign) => *sign,
                     None => continue,
                 };
-                let (slot, extent) = match sign {
-                    DiffSign::Added => (roles::DIFF_PLUS, size(cell.width / 4., cell.height)),
-                    DiffSign::Modified => (roles::DIFF_DELTA, size(cell.width / 4., cell.height)),
-                    DiffSign::Removed => (roles::DIFF_MINUS, size(cell.width, px(2.))),
+                let (tone, extent) = match sign {
+                    DiffSign::Added => (Tone::Added, size(cell.width / 4., cell.height)),
+                    DiffSign::Modified => (Tone::Modified, size(cell.width / 4., cell.height)),
+                    DiffSign::Removed => (Tone::Removed, size(cell.width, px(2.))),
                 };
+                let tone = tones[tone as usize];
                 // Staged changes are dimmed; partly staged ones still need attention.
                 let color = match stage {
-                    Stage::Staged => colors[slot].opacity(roles::STAGED_SIGN_ALPHA as f32 / 100.),
-                    Stage::Unstaged | Stage::Partial => colors[slot],
+                    Stage::Staged => tone.opacity(roles::STAGED_SIGN_ALPHA as f32 / 100.),
+                    Stage::Unstaged | Stage::Partial => tone,
                 };
                 window.paint_quad(fill(Bounds::new(point(diff_x, top), extent), color));
             }
@@ -645,12 +725,13 @@ impl Element for TextElement {
                 ElementInputHandler::new(bounds, self.workspace.clone()),
                 cx,
             ),
-            Focus::Unfocused => {}
+            Focus::Unfocused | Focus::ReadOnly => {}
         }
 
         let track = bar.hitbox.bounds;
         let (scrollbar, len_lines, shown, page) =
             (bar.scrollbar, bar.len_lines, bar.shown, bar.page);
+        let part = self.part;
         window.on_mouse_event({
             let workspace = self.workspace.clone();
             let hitbox = hitbox.clone();
@@ -662,8 +743,25 @@ impl Element for TextElement {
                 hitbox.is_hovered(window),
                 bar_hitbox.is_hovered(window),
                 scrollbar,
+                part,
             ) {
-                (DispatchPhase::Bubble, MouseButton::Left, true, _, _) => {
+                // The HEAD side has no cursor; a click moves the buffer side's to the facing line.
+                (DispatchPhase::Bubble, MouseButton::Left, true, _, _, Part::Head) => {
+                    let (row, col) = cell_at(origin, cell, event.position);
+                    workspace.update(cx, |workspace, cx| {
+                        diffview::click_left(&mut workspace.state, pane, row, col);
+                        window.focus(&workspace.focus, cx);
+                        cx.notify();
+                    });
+                }
+                (
+                    DispatchPhase::Bubble,
+                    MouseButton::Left,
+                    true,
+                    _,
+                    _,
+                    Part::Text | Part::Buffer,
+                ) => {
                     let (row, col) = cell_at(origin, cell, event.position);
                     let press = match event.modifiers.alt {
                         true => Press::AddCursor,
@@ -678,7 +776,14 @@ impl Element for TextElement {
                         cx.notify();
                     });
                 }
-                (DispatchPhase::Bubble, MouseButton::Middle, true, _, _) => {
+                (
+                    DispatchPhase::Bubble,
+                    MouseButton::Middle,
+                    true,
+                    _,
+                    _,
+                    Part::Text | Part::Buffer,
+                ) => {
                     let (row, col) = cell_at(origin, cell, event.position);
                     workspace.update(cx, |workspace, cx| {
                         scroll::middle_click(
@@ -693,7 +798,7 @@ impl Element for TextElement {
                         cx.notify();
                     });
                 }
-                (DispatchPhase::Bubble, MouseButton::Left, _, true, Scrollbar::Shown(thumb)) => {
+                (DispatchPhase::Bubble, MouseButton::Left, _, true, Scrollbar::Shown(thumb), _) => {
                     let offset = event.position.y - track.origin.y - px(thumb.top);
                     match (offset < px(0.), offset > px(thumb.height)) {
                         (false, false) => pointer.drag.set(Drag::Thumb { grab: offset }),

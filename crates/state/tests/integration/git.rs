@@ -11,7 +11,7 @@ use state::diff::{Bases, Diff, Hunk, Stage, Tracked, stage};
 
 use crate::harness::Harness;
 
-fn init(dir: &Path, files: &[(&str, &str)]) -> Repository {
+pub fn init(dir: &Path, files: &[(&str, &str)]) -> Repository {
     let repo = Repository::init(dir).expect("init repo");
     for (name, text) in files {
         std::fs::write(dir.join(name), text).expect("write file");
@@ -21,7 +21,7 @@ fn init(dir: &Path, files: &[(&str, &str)]) -> Repository {
 }
 
 /// Stages everything in the worktree and commits it.
-fn commit(repo: &Repository, message: &str) {
+pub fn commit(repo: &Repository, message: &str) {
     let mut index = repo.index().unwrap();
     index.read(true).unwrap();
     index.add_all(["*"], IndexAddOption::DEFAULT, None).unwrap();
@@ -42,14 +42,14 @@ fn commit(repo: &Repository, message: &str) {
     .unwrap();
 }
 
-fn stage_path(repo: &Repository, name: &str) {
+pub fn stage_path(repo: &Repository, name: &str) {
     let mut index = repo.index().unwrap();
     index.read(true).unwrap();
     index.add_path(Path::new(name)).unwrap();
     index.write().unwrap();
 }
 
-fn staged_text(repo: &Repository, name: &str) -> Option<String> {
+pub fn staged_text(repo: &Repository, name: &str) -> Option<String> {
     // The handle caches its index; the editor writes through its own.
     let mut index = repo.index().unwrap();
     index.read(true).unwrap();

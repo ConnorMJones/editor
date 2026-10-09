@@ -20,6 +20,7 @@ pub struct ThemeConfig {
     pub palette: PathBuf,
     /// Replaces base00 as the editor background when set.
     pub background: Option<Rgb>,
+    pub diff: DiffColors,
 }
 
 impl Default for ThemeConfig {
@@ -27,6 +28,7 @@ impl Default for ThemeConfig {
         ThemeConfig {
             palette: PathBuf::from("/etc/stylix/palette.json"),
             background: None,
+            diff: DiffColors::default(),
         }
     }
 }
@@ -115,4 +117,16 @@ pub enum TitleBar {
     #[default]
     Hidden,
     Shown,
+}
+
+/// Overrides for diff and conflict colours; unset ones come from the palette.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiffColors {
+    pub added: Option<Rgb>,
+    pub removed: Option<Rgb>,
+    pub modified: Option<Rgb>,
+    pub ours: Option<Rgb>,
+    pub theirs: Option<Rgb>,
+    pub base: Option<Rgb>,
 }

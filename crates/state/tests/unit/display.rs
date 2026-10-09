@@ -24,6 +24,7 @@ fn loader() -> Loader {
 fn scroll(rows: u16, cols: u16) -> Scroll {
     Scroll {
         anchor: 0,
+        rows: 0,
         viewport: Viewport { rows, cols },
     }
 }

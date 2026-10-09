@@ -106,6 +106,8 @@ pub enum DiffSign {
 pub enum Focus {
     Focused(Mode),
     Unfocused,
+    /// Draws no cursors or selections, like the HEAD side of a diff.
+    ReadOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,7 +233,10 @@ pub fn layout(
     frame.lead.clear();
 
     let text = doc.text.slice(..);
-    let ranges = selection.ranges();
+    let ranges: &[helix_core::Range] = match focus {
+        Focus::ReadOnly => &[],
+        Focus::Focused(_) | Focus::Unfocused => selection.ranges(),
+    };
     let primary = selection.primary_index();
     frame.primary_line = text.char_to_line(selection.primary().cursor(text));
     let viewport = scroll.viewport;
@@ -244,11 +249,15 @@ pub fn layout(
     let unit = indent.unit.max(1);
     let format = text_format(viewport, indent);
     let anchor = scroll.anchor.min(text.len_chars());
+    // Negative with filler rows above the first line on screen.
     let row_off = visual_offset_from_block(text, anchor, anchor, &format, annotations)
         .0
-        .row;
+        .row as isize
+        + scroll.rows;
     let first_line = text.char_to_line(anchor);
-    let end_line = (first_line + viewport.rows as usize + 1).min(text.len_lines());
+    // Rows skipped past the anchor are its own wrapped rows or annotations, so one more line
+    // covers them.
+    let end_line = (first_line + viewport.rows as usize + 2).min(text.len_lines());
     let mut highlighter = doc.syntax.as_ref().map(|syntax| {
         syntax.highlighter(
             text,
@@ -287,8 +296,9 @@ pub fn layout(
             }
             next_event = event_char(&highlighter, text);
         }
-        let Some(row) = g.visual_pos.row.checked_sub(row_off) else {
-            continue;
+        let row = match usize::try_from(g.visual_pos.row as isize - row_off) {
+            Ok(row) => row,
+            Err(_) => continue,
         };
         // Every text row holds a grapheme, so rows skipped over come from line annotations.
         if row >= viewport.rows as usize {
@@ -391,9 +401,8 @@ pub fn layout(
                         (Focus::Focused(Mode::Normal), Rank::Primary) => CursorShape::Block,
                         (Focus::Focused(Mode::Insert), Rank::Primary) => CursorShape::Bar,
                         (Focus::Focused(Mode::Select), Rank::Primary) => CursorShape::Underline,
-                        (Focus::Focused(_), Rank::Secondary) | (Focus::Unfocused, _) => {
-                            CursorShape::Block
-                        }
+                        (Focus::Focused(_), Rank::Secondary)
+                        | (Focus::Unfocused | Focus::ReadOnly, _) => CursorShape::Block,
                     };
                     frame.cursors.push(Cursor {
                         row,
@@ -577,6 +586,23 @@ fn push_virtual(frame: &mut Frame, end: usize, area: &mut Area, level: u16, unit
         });
         *area = Area::Text;
     }
+}
+
+/// Fills `frame` with `rows` filler rows, for a diff side with no text to show.
+pub fn blank(frame: &mut Frame, rows: u16) {
+    frame.rows.clear();
+    frame.text.clear();
+    frame.runs.clear();
+    frame.selections.clear();
+    frame.cursors.clear();
+    frame.rows.extend((0..rows).map(|index| Row {
+        line: 0,
+        kind: RowKind::Virtual(index),
+        mark: LineMark::Plain,
+        text: 0..0,
+        runs: 0..0,
+        background: Some(Background::Filler),
+    }));
 }
 
 /// Inserts `count` virtual rows after each listed document line; entries are sorted by line.

@@ -11,6 +11,7 @@ pub use imara_diff::Hunk;
 use imara_diff::{Algorithm, IndentHeuristic, IndentLevel, Interner, Token};
 
 use crate::Refresh;
+use crate::changes::Arrive;
 use crate::display::DiffSign;
 use crate::layout::PaneId;
 
@@ -138,6 +139,7 @@ pub enum Compute {
 pub struct Landing {
     pub pane: PaneId,
     pub edge: Edge,
+    pub arrive: Arrive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

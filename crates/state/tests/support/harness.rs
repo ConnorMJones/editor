@@ -165,9 +165,10 @@ impl Harness {
     }
 
     /// Active view of the focused pane.
+    /// Active view of the focused pane: a text view, or a diff's buffer side.
     pub fn view(&self) -> &TextView {
         match self.state.layout.panes[self.state.layout.focus].active() {
-            Some(View::Text(view)) => view,
+            Some(view) => view.text(),
             None => panic!("focused pane has no tab"),
         }
     }
@@ -175,7 +176,7 @@ impl Harness {
     pub fn view_mut(&mut self) -> &mut TextView {
         let focus = self.state.layout.focus;
         match self.state.layout.panes[focus].active_mut() {
-            Some(View::Text(view)) => view,
+            Some(view) => view.text_mut(),
             None => panic!("focused pane has no tab"),
         }
     }
@@ -193,7 +194,7 @@ impl Harness {
             .map(|view| self.state.buffers[view.buffer()].path.clone())
     }
 
-    /// File names of `pane`'s tabs in bar order, with the preview marked `*`.
+    /// File names of `pane`'s tabs in bar order, diffs prefixed `±` and the preview marked `*`.
     pub fn tabs(&self, pane: PaneId) -> Vec<String> {
         let target = &self.state.layout.panes[pane];
         let preview = target.tabs.as_ref().and_then(|tabs| tabs.preview());
@@ -204,9 +205,13 @@ impl Harness {
             .map(|(index, item)| {
                 let path = &self.state.buffers[item.view.buffer()].path;
                 let name = path.file_name().unwrap().to_string_lossy();
+                let kind = match item.view {
+                    View::Text(_) => "",
+                    View::Diff(_) => "±",
+                };
                 match preview == Some(index) {
-                    true => format!("{name}*"),
-                    false => name.into_owned(),
+                    true => format!("{kind}{name}*"),
+                    false => format!("{kind}{name}"),
                 }
             })
             .collect()

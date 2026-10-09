@@ -16,28 +16,29 @@ use crate::{Effect, Focus, Overlay, Sidebar, State, Sticky, changes, scroll};
 pub fn context(state: &State) -> Context {
     match (
         &state.overlay,
+        &state.git.confirm,
         state.sidebar,
         &state.tree.edit,
         state.input.mode,
     ) {
         (Overlay::Prompt(_), ..) => Context::Prompt,
         (Overlay::Picker(_), ..) => Context::Picker,
-        (Overlay::None, Sidebar::Files(Focus::Sidebar), TreeEdit::None, _) => Context::Tree,
+        (Overlay::None, Some(_), ..) => Context::Confirm,
+        (Overlay::None, None, Sidebar::Files(Focus::Sidebar), TreeEdit::None, _) => Context::Tree,
         (
             Overlay::None,
+            None,
             Sidebar::Files(Focus::Sidebar),
             TreeEdit::Create { .. } | TreeEdit::Rename { .. } | TreeEdit::Delete { .. },
             _,
         ) => Context::TreeInput,
-        (Overlay::None, Sidebar::Hidden | Sidebar::Files(Focus::Editor), _, Mode::Normal) => {
-            Context::Normal
-        }
-        (Overlay::None, Sidebar::Hidden | Sidebar::Files(Focus::Editor), _, Mode::Insert) => {
-            Context::Insert
-        }
-        (Overlay::None, Sidebar::Hidden | Sidebar::Files(Focus::Editor), _, Mode::Select) => {
-            Context::Select
-        }
+        (Overlay::None, None, Sidebar::Changes(Focus::Sidebar), ..) => Context::Changes,
+        (Overlay::None, None, Sidebar::Hidden | Sidebar::Files(Focus::Editor), _, mode)
+        | (Overlay::None, None, Sidebar::Changes(Focus::Editor), _, mode) => match mode {
+            Mode::Normal => Context::Normal,
+            Mode::Insert => Context::Insert,
+            Mode::Select => Context::Select,
+        },
     }
 }
 
@@ -96,7 +97,12 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
         }
         (
             None,
-            context @ (Context::Prompt | Context::Tree | Context::TreeInput | Context::Picker),
+            context @ (Context::Prompt
+            | Context::Tree
+            | Context::TreeInput
+            | Context::Picker
+            | Context::Changes
+            | Context::Confirm),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -292,6 +298,8 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         Context::Prompt => Some(Command::PromptInsert(c)),
         Context::Picker => Some(Command::Picker(PickerCommand::Insert(c))),
         Context::TreeInput => Some(Command::Tree(TreeCommand::EditInsert(c))),
-        Context::Normal | Context::Select | Context::Tree => None,
+        Context::Normal | Context::Select | Context::Tree | Context::Changes | Context::Confirm => {
+            None
+        }
     }
 }

@@ -137,6 +137,16 @@ pub enum Command {
     File(FileOp),
     /// Answers the pending confirmation, such as a discard.
     Confirm(Answer),
+
+    /// Switches the focused pane between a file's text and its diff against HEAD.
+    ToggleDiff,
+    Changes(ChangesCommand),
+
+    // Conflicts: merge markers in the buffer text.
+    /// Select mode extends to the conflict.
+    GotoConflict(Direction),
+    /// Resolves every conflict touched by a selection, as one edit.
+    Resolve(Take),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -441,4 +451,33 @@ pub enum PickerCommand {
     Previous,
     Submit,
     Cancel,
+}
+
+/// The Changes sidebar: files changed against HEAD, grouped as git shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangesCommand {
+    /// Shows and focuses the sidebar, or hides it when it already has focus.
+    Toggle,
+    FocusEditor,
+    Up,
+    Down,
+    /// Opens the file's diff, or its text when it has conflicts.
+    Open,
+    Stage,
+    Unstage,
+    /// Asks for confirmation first.
+    Discard,
+    /// Collapses a group, or moves from an entry to its group.
+    Collapse,
+}
+
+/// Which sections of a conflict replace it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Take {
+    Ours,
+    Theirs,
+    /// Ours, then theirs.
+    Both,
+    /// The common ancestor of a diff3 conflict.
+    Base,
 }

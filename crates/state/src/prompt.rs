@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use helix_core::unicode::segmentation::GraphemeCursor;
 use model::command::{
-    Command, Cycle, Direction, Dirs, PromptCommand, PromptMotion, SortCase, SortOrder,
+    Command, Cycle, Direction, Dirs, PromptCommand, PromptMotion, SortCase, SortOrder, Take,
     WindowCommand,
 };
 use model::notice::Notice;
@@ -65,7 +65,7 @@ pub enum Completes {
 }
 
 /// Typed command names, canonical first, as `parse` accepts them.
-pub const COMMANDS: [(&[&str], Completes); 21] = [
+pub const COMMANDS: [(&[&str], Completes); 25] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
     (&["write-all", "wa"], Completes::Nothing),
@@ -87,6 +87,10 @@ pub const COMMANDS: [(&[&str], Completes); 21] = [
     (&["goto", "g"], Completes::Nothing),
     (&["reflow"], Completes::Nothing),
     (&["sort"], Completes::Nothing),
+    (&["conflict-ours"], Completes::Nothing),
+    (&["conflict-theirs"], Completes::Nothing),
+    (&["conflict-both"], Completes::Nothing),
+    (&["conflict-base"], Completes::Nothing),
 ];
 
 /// A fresh prompt, with completions listed up front like helix.
@@ -414,6 +418,10 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
             }
             Ok(Command::Sort(case, order))
         }
+        ("conflict-ours", _) => bare(Command::Resolve(Take::Ours), "conflict-ours"),
+        ("conflict-theirs", _) => bare(Command::Resolve(Take::Theirs), "conflict-theirs"),
+        ("conflict-both", _) => bare(Command::Resolve(Take::Both), "conflict-both"),
+        ("conflict-base", _) => bare(Command::Resolve(Take::Base), "conflict-base"),
         // `:<n>` jumps to line n, like helix.
         (name, None) if name.parse::<NonZeroUsize>().is_ok() => {
             number("goto", name).map(Command::GotoLine)

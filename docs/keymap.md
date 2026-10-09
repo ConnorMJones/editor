@@ -4,6 +4,8 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 
 ## Custom bindings (not helix defaults)
 
+Source view keys are listed in their own section below.
+
 | Keys | Context | Action |
 | --- | --- | --- |
 | `C-k C-s` | normal, insert, select, tree | Save all modified buffers. Shadows helix's insert-mode `C-k` (kill to line end). |
@@ -12,11 +14,33 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
 | `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
 | `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
-| `]g` / `[g` | normal, select | Next / previous change; past the last / first change of the file it opens the next / previous changed file (conflicts, staged, then unstaged and untracked, by path; wrapping) and lands on its first / last change. Helix stops at the file's ends. |
+
+## Source view (git)
+
+Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours are set under
+`[theme.diff]` in the config (`added`, `removed`, `modified`, `ours`, `theirs`, `base`).
+
+| Keys | Context | Action |
+| --- | --- | --- |
+| `space g` | normal, select, tree, changes | Toggle the Changes sidebar: Conflicts / Staged Changes / Changes (helix: changed-file picker). |
+| `j` / `k` | changes | Move between files and group headers. |
+| `l` / enter | changes | On a file: open its diff as a preview tab (conflicted files open as text; focus stays in the sidebar). On a header: collapse or expand the group. |
+| `h` / left | changes | Collapse the group (from a file, move to its header). |
+| `s` / `u` | changes | Stage / unstage the file, or the whole group on a header. |
+| `d` | changes | Discard the file's changes (asks `y` / `n`; untracked files are deleted). |
+| `esc` | changes | Back to the editor. |
+| mouse | changes | Click a file to open its diff, double-click to keep the tab, click a header to collapse it. Hover a row for `+` stage, `−` unstage and `↶` discard. |
+| `y` / `n` / `esc` | confirm | Answer a pending discard. |
+| `space d` | normal, select | Toggle the tab between the file and its side-by-side diff (helix: diagnostics picker). The right side is the live buffer and takes every key. |
+| `]g` / `[g` | normal, select | Next / previous change; past the file's last / first change, continue into the next / previous changed file (its diff when in a diff; conflicted files open as text). Helix stops at the file's ends. |
 | `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
-| `space h s` | normal, select | Stage the changes touched by the selections (helix: none). |
+| `space h s` | normal, select | Stage the changes touched by the selections. |
 | `space h u` | normal, select | Unstage the staged changes under the selections. |
 | `space h r` | normal, select | Revert the changes under the selections to HEAD, as one undoable edit. |
+| `]m` / `[m` | normal, select | Next / previous merge conflict, selecting it whole; select mode extends; takes a count. |
+| `space m o` / `space m t` | normal, select | Resolve the conflicts touched by the selections with ours (HEAD) / theirs (incoming), as one undoable edit. Also `:conflict-ours` / `:conflict-theirs`. |
+| `space m b` | normal, select | Resolve with both sides, ours then theirs. Also `:conflict-both`. |
+| `space m r` | normal, select | Resolve with the base section of a diff3 conflict. Also `:conflict-base`. |
 
 ## Typed commands (`:`)
 
@@ -43,6 +67,10 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `:goto`, `:g` |
 | `:reflow` |
 | `:sort` |
+| `:conflict-ours` |
+| `:conflict-theirs` |
+| `:conflict-both` |
+| `:conflict-base` |
 
 ## Normal
 
@@ -232,6 +260,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space b` | `Picker(Open(Buffers))` |
 | `space /` | `Picker(Open(Grep))` |
 | `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
@@ -260,6 +289,13 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space w o` | `Window(Only)` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `space d` | `ToggleDiff` |
+| `] m` | `GotoConflict(Forward)` |
+| `[ m` | `GotoConflict(Backward)` |
+| `space m o` | `Resolve(Ours)` |
+| `space m t` | `Resolve(Theirs)` |
+| `space m b` | `Resolve(Both)` |
+| `space m r` | `Resolve(Base)` |
 
 ## Insert
 
@@ -480,6 +516,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space b` | `Picker(Open(Buffers))` |
 | `space /` | `Picker(Open(Grep))` |
 | `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
@@ -508,6 +545,13 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space w o` | `Window(Only)` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `space d` | `ToggleDiff` |
+| `] m` | `GotoConflict(Forward)` |
+| `[ m` | `GotoConflict(Backward)` |
+| `space m o` | `Resolve(Ours)` |
+| `space m t` | `Resolve(Theirs)` |
+| `space m b` | `Resolve(Both)` |
+| `space m r` | `Resolve(Base)` |
 
 ## Prompt
 
@@ -572,6 +616,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space b` | `Picker(Open(Buffers))` |
 | `space /` | `Picker(Open(Grep))` |
 | `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
@@ -622,3 +667,64 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `C-p` | `Picker(Previous)` |
 | `up` | `Picker(Previous)` |
 | `S-tab` | `Picker(Previous)` |
+
+## Changes
+
+| Keys | Command |
+| --- | --- |
+| `j` | `Changes(Down)` |
+| `down` | `Changes(Down)` |
+| `k` | `Changes(Up)` |
+| `up` | `Changes(Up)` |
+| `h` | `Changes(Collapse)` |
+| `left` | `Changes(Collapse)` |
+| `l` | `Changes(Open)` |
+| `right` | `Changes(Open)` |
+| `ret` | `Changes(Open)` |
+| `s` | `Changes(Stage)` |
+| `u` | `Changes(Unstage)` |
+| `d` | `Changes(Discard)` |
+| `esc` | `Changes(FocusEditor)` |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+
+## Confirm
+
+| Keys | Command |
+| --- | --- |
+| `y` | `Confirm(Yes)` |
+| `n` | `Confirm(No)` |
+| `esc` | `Confirm(No)` |
+| `C-c` | `Confirm(No)` |

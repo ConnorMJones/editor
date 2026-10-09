@@ -1,7 +1,8 @@
 use model::command::{
-    Align, Case, Command, Cycle, Direction, Find, HunkOp, HunkTarget, Inclusion, Join, Motion,
-    ObjectScope, Paste, Pending, PickerCommand, PromptCommand, PromptMotion, RegexOp, ScrollBy,
-    SyntaxObject, TreeCommand, WindowCommand, WordBounds, Yanking,
+    Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, Find, HunkOp, HunkTarget,
+    Inclusion, Join, Motion, ObjectScope, Paste, Pending, PickerCommand, PromptCommand,
+    PromptMotion, RegexOp, ScrollBy, SyntaxObject, Take, TreeCommand, WindowCommand, WordBounds,
+    Yanking,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -18,10 +19,14 @@ pub enum Context {
     Tree,
     TreeInput,
     Picker,
+    /// The Changes sidebar has focus.
+    Changes,
+    /// A destructive operation waits for `y` or `n`.
+    Confirm,
 }
 
 impl Context {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 9;
     pub const ALL: [Context; Context::COUNT] = [
         Context::Normal,
         Context::Insert,
@@ -30,6 +35,8 @@ impl Context {
         Context::Tree,
         Context::TreeInput,
         Context::Picker,
+        Context::Changes,
+        Context::Confirm,
     ];
 }
 
@@ -775,7 +782,14 @@ const WORKSPACE: Bindings = &[
         &[SPACE, Key::char('?')],
         Command::Picker(PickerCommand::Open(PickerKind::Commands)),
     ),
+    (
+        &[SPACE, Key::char('g')],
+        Command::Changes(ChangesCommand::Toggle),
+    ),
 ];
+
+/// Diff views; shared by normal and select mode.
+const DIFF: Bindings = &[(&[SPACE, Key::char('d')], Command::ToggleDiff)];
 
 const WINDOW: &[(&[Key], Command); 13] = &window_bindings!(CTRL_W);
 const SPACE_WINDOW: &[(&[Key], Command); 13] = &window_bindings!(SPACE, Key::char('w'));
@@ -874,6 +888,80 @@ const PICKER: Bindings = &[
     ),
 ];
 
+const CHANGES: Bindings = &[
+    (&[Key::char('j')], Command::Changes(ChangesCommand::Down)),
+    (
+        &[Key::code(KeyCode::Down)],
+        Command::Changes(ChangesCommand::Down),
+    ),
+    (&[Key::char('k')], Command::Changes(ChangesCommand::Up)),
+    (
+        &[Key::code(KeyCode::Up)],
+        Command::Changes(ChangesCommand::Up),
+    ),
+    (
+        &[Key::char('h')],
+        Command::Changes(ChangesCommand::Collapse),
+    ),
+    (
+        &[Key::code(KeyCode::Left)],
+        Command::Changes(ChangesCommand::Collapse),
+    ),
+    (&[Key::char('l')], Command::Changes(ChangesCommand::Open)),
+    (
+        &[Key::code(KeyCode::Right)],
+        Command::Changes(ChangesCommand::Open),
+    ),
+    (
+        &[Key::code(KeyCode::Enter)],
+        Command::Changes(ChangesCommand::Open),
+    ),
+    (&[Key::char('s')], Command::Changes(ChangesCommand::Stage)),
+    (&[Key::char('u')], Command::Changes(ChangesCommand::Unstage)),
+    (&[Key::char('d')], Command::Changes(ChangesCommand::Discard)),
+    (
+        &[Key::code(KeyCode::Esc)],
+        Command::Changes(ChangesCommand::FocusEditor),
+    ),
+    (&[Key::char(':')], Command::CommandMode),
+    (&SAVE_ALL, Command::WriteAll),
+];
+
+const CONFIRM: Bindings = &[
+    (&[Key::char('y')], Command::Confirm(Answer::Yes)),
+    (&[Key::char('n')], Command::Confirm(Answer::No)),
+    (&[Key::code(KeyCode::Esc)], Command::Confirm(Answer::No)),
+    (&[Key::ctrl('c')], Command::Confirm(Answer::No)),
+];
+
+/// Merge conflicts in the buffer text.
+const CONFLICTS: Bindings = &[
+    (
+        &[Key::char(']'), Key::char('m')],
+        Command::GotoConflict(Direction::Forward),
+    ),
+    (
+        &[Key::char('['), Key::char('m')],
+        Command::GotoConflict(Direction::Backward),
+    ),
+    (
+        &[SPACE, Key::char('m'), Key::char('o')],
+        Command::Resolve(Take::Ours),
+    ),
+    (
+        &[SPACE, Key::char('m'), Key::char('t')],
+        Command::Resolve(Take::Theirs),
+    ),
+    (
+        &[SPACE, Key::char('m'), Key::char('b')],
+        Command::Resolve(Take::Both),
+    ),
+    (
+        &[SPACE, Key::char('m'), Key::char('r')],
+        Command::Resolve(Take::Base),
+    ),
+];
+
 const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
         COMMON,
@@ -883,6 +971,8 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
         WINDOW,
         SPACE_WINDOW,
         GOTO_BUFFER,
+        DIFF,
+        CONFLICTS,
     ],
     &[INSERT],
     &[
@@ -893,11 +983,15 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
         WINDOW,
         SPACE_WINDOW,
         GOTO_BUFFER,
+        DIFF,
+        CONFLICTS,
     ],
     &[PROMPT],
     &[TREE, WORKSPACE, WINDOW, SPACE_WINDOW],
     &[TREE_INPUT],
     &[PICKER],
+    &[CHANGES, WORKSPACE, WINDOW, SPACE_WINDOW],
+    &[CONFIRM],
 ];
 
 fn tables(context: Context) -> &'static [Bindings] {
@@ -954,7 +1048,17 @@ fn build_trie(context: Context) -> Result<Trie, KeymapError> {
 
 impl Keymap {
     pub fn helix() -> Result<Keymap, KeymapError> {
-        let [normal, insert, select, prompt, tree, tree_input, picker] = Context::ALL;
+        let [
+            normal,
+            insert,
+            select,
+            prompt,
+            tree,
+            tree_input,
+            picker,
+            changes,
+            confirm,
+        ] = Context::ALL;
         Ok(Keymap {
             tries: [
                 build_trie(normal)?,
@@ -964,6 +1068,8 @@ impl Keymap {
                 build_trie(tree)?,
                 build_trie(tree_input)?,
                 build_trie(picker)?,
+                build_trie(changes)?,
+                build_trie(confirm)?,
             ],
         })
     }
@@ -990,6 +1096,8 @@ impl Keymap {
 const CUSTOM: &str = "\
 ## Custom bindings (not helix defaults)
 
+Source view keys are listed in their own section below.
+
 | Keys | Context | Action |
 | --- | --- | --- |
 | `C-k C-s` | normal, insert, select, tree | Save all modified buffers. Shadows helix's insert-mode `C-k` (kill to line end). |
@@ -998,11 +1106,36 @@ const CUSTOM: &str = "\
 | `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
 | `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
 | `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
-| `]g` / `[g` | normal, select | Next / previous change; past the last / first change of the file it opens the next / previous changed file (conflicts, staged, then unstaged and untracked, by path; wrapping) and lands on its first / last change. Helix stops at the file's ends. |
+";
+
+/// The git source view, kept by hand next to the tables.
+const SOURCE_VIEW: &str = "\
+## Source view (git)
+
+Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours are set under
+`[theme.diff]` in the config (`added`, `removed`, `modified`, `ours`, `theirs`, `base`).
+
+| Keys | Context | Action |
+| --- | --- | --- |
+| `space g` | normal, select, tree, changes | Toggle the Changes sidebar: Conflicts / Staged Changes / Changes (helix: changed-file picker). |
+| `j` / `k` | changes | Move between files and group headers. |
+| `l` / enter | changes | On a file: open its diff as a preview tab (conflicted files open as text; focus stays in the sidebar). On a header: collapse or expand the group. |
+| `h` / left | changes | Collapse the group (from a file, move to its header). |
+| `s` / `u` | changes | Stage / unstage the file, or the whole group on a header. |
+| `d` | changes | Discard the file's changes (asks `y` / `n`; untracked files are deleted). |
+| `esc` | changes | Back to the editor. |
+| mouse | changes | Click a file to open its diff, double-click to keep the tab, click a header to collapse it. Hover a row for `+` stage, `−` unstage and `↶` discard. |
+| `y` / `n` / `esc` | confirm | Answer a pending discard. |
+| `space d` | normal, select | Toggle the tab between the file and its side-by-side diff (helix: diagnostics picker). The right side is the live buffer and takes every key. |
+| `]g` / `[g` | normal, select | Next / previous change; past the file's last / first change, continue into the next / previous changed file (its diff when in a diff; conflicted files open as text). Helix stops at the file's ends. |
 | `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
-| `space h s` | normal, select | Stage the changes touched by the selections (helix: none). |
+| `space h s` | normal, select | Stage the changes touched by the selections. |
 | `space h u` | normal, select | Unstage the staged changes under the selections. |
 | `space h r` | normal, select | Revert the changes under the selections to HEAD, as one undoable edit. |
+| `]m` / `[m` | normal, select | Next / previous merge conflict, selecting it whole; select mode extends; takes a count. |
+| `space m o` / `space m t` | normal, select | Resolve the conflicts touched by the selections with ours (HEAD) / theirs (incoming), as one undoable edit. Also `:conflict-ours` / `:conflict-theirs`. |
+| `space m b` | normal, select | Resolve with both sides, ours then theirs. Also `:conflict-both`. |
+| `space m r` | normal, select | Resolve with the base section of a diff3 conflict. Also `:conflict-base`. |
 ";
 
 /// Markdown listing of every binding, generated from the tables; `docs/keymap.md` holds a copy.
@@ -1012,6 +1145,8 @@ pub fn reference() -> String {
          `UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference`.\n\n",
     );
     out.push_str(CUSTOM);
+    out.push_str("\n");
+    out.push_str(SOURCE_VIEW);
     out.push_str("\n## Typed commands (`:`)\n\n| Names |\n| --- |\n");
     for (names, _) in crate::prompt::COMMANDS {
         let names: Vec<String> = names.iter().map(|name| format!("`:{name}`")).collect();

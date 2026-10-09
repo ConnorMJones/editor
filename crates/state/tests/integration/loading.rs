@@ -7,6 +7,7 @@ use model::notice::Notice;
 use model::window::PickerKind;
 use state::apply::apply;
 use state::buffer::{Content, Disk, Jump, Position, Target};
+use state::changes::Arrive;
 use state::job::{self, Job};
 use state::{Effect, State};
 
@@ -182,6 +183,7 @@ fn grep_jump_waits_for_the_text() {
         },
         Some(Jump {
             pane: focus,
+            arrive: Arrive::Text,
             to: Target::Position(Position { line: 1, column: 4 }),
         })
     );
