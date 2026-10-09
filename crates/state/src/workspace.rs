@@ -18,7 +18,9 @@ use crate::path::RelPath;
 use crate::picker::{
     self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource, Search,
 };
-use crate::tree::{self, Dir, EntryKind, Fold, Listing, RowKind, TreeEdit};
+use crate::tree::{
+    self, Dir, EntryKind, Fold, Listing, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget,
+};
 use crate::{Effect, Focus, Overlay, Repo, Sidebar, State, scroll};
 
 /// Shows `buffer` in `pane` by zed's preview rules, committing the pane's current edits; a
@@ -262,19 +264,9 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
                 (RowKind::File | RowKind::Dir(Fold::Collapsed), None) => {}
             },
         },
-        TreeCommand::Create => {
-            let dir = match &selected {
-                Some(row) => match row.kind {
-                    RowKind::Dir(_) => row.path.as_str(),
-                    RowKind::File => row.path.parent().unwrap_or(""),
-                },
-                None => "",
-            };
-            let line = match dir.is_empty() {
-                true => String::new(),
-                false => format!("{dir}/"),
-            };
-            state.tree.edit = TreeEdit::Create { line };
+        TreeCommand::Create => begin_create(state, row_dir(selected.as_ref()), NewEntry::Infer),
+        TreeCommand::CreateFolder => {
+            begin_create(state, row_dir(selected.as_ref()), NewEntry::Folder)
         }
         TreeCommand::Rename => match selected {
             Some(row) => {
@@ -299,13 +291,13 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
             None => {}
         },
         TreeCommand::EditInsert(c) => match &mut state.tree.edit {
-            TreeEdit::Create { line }
+            TreeEdit::Create { line, .. }
             | TreeEdit::Rename { line, .. }
             | TreeEdit::Delete { line, .. } => line.push(c),
             TreeEdit::None => {}
         },
         TreeCommand::EditBackspace => match &mut state.tree.edit {
-            TreeEdit::Create { line }
+            TreeEdit::Create { line, .. }
             | TreeEdit::Rename { line, .. }
             | TreeEdit::Delete { line, .. } => {
                 line.pop();
@@ -316,10 +308,10 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
         TreeCommand::EditSubmit => {
             let op = match std::mem::take(&mut state.tree.edit) {
                 TreeEdit::None => return,
-                TreeEdit::Create { line } => {
-                    let kind = match line.ends_with('/') {
-                        true => EntryKind::Dir,
-                        false => EntryKind::File,
+                TreeEdit::Create { line, kind } => {
+                    let kind = match (kind, line.ends_with('/')) {
+                        (NewEntry::Folder, _) | (NewEntry::Infer, true) => EntryKind::Dir,
+                        (NewEntry::Infer, false) => EntryKind::File,
                     };
                     match RelPath::parse(line.trim_end_matches('/')) {
                         Ok(path) if !path.is_root() => FsOp::Create { path, kind },
@@ -693,4 +685,75 @@ pub fn changes_action(
     };
     state.git.cursor = changes::cursor_at(changes, &state.git.folds, row);
     changes::list(state, command, out);
+}
+
+/// Directory a create or drop on `row` targets: the row itself, or a file's parent.
+fn row_dir(row: Option<&tree::Row>) -> &str {
+    match row {
+        Some(row) => match row.kind {
+            RowKind::Dir(_) => row.path.as_str(),
+            RowKind::File => row.path.parent().unwrap_or(""),
+        },
+        None => "",
+    }
+}
+
+/// Opens the create prompt prefilled with `dir`.
+fn begin_create(state: &mut State, dir: &str, kind: NewEntry) {
+    let line = match dir.is_empty() {
+        true => String::new(),
+        false => format!("{dir}/"),
+    };
+    state.tree.edit = TreeEdit::Create { line, kind };
+}
+
+/// A file tree context menu entry chosen for `target`.
+pub fn tree_action(
+    state: &mut State,
+    target: TreeTarget,
+    action: TreeAction,
+    out: &mut Vec<Effect>,
+) {
+    state.sidebar = Sidebar::Files(Focus::Sidebar);
+    match target {
+        TreeTarget::Row(index) if index < state.tree.rows.len() => state.tree.cursor = index,
+        TreeTarget::Row(_) | TreeTarget::Root => {}
+    }
+    match (target, action) {
+        (TreeTarget::Root, TreeAction::NewFile) => begin_create(state, "", NewEntry::Infer),
+        (TreeTarget::Root, TreeAction::NewFolder) => begin_create(state, "", NewEntry::Folder),
+        (TreeTarget::Root, TreeAction::Rename | TreeAction::Delete) => {}
+        (TreeTarget::Row(_), TreeAction::NewFile) => tree(state, TreeCommand::Create, out),
+        (TreeTarget::Row(_), TreeAction::NewFolder) => tree(state, TreeCommand::CreateFolder, out),
+        (TreeTarget::Row(_), TreeAction::Rename) => tree(state, TreeCommand::Rename, out),
+        (TreeTarget::Row(_), TreeAction::Delete) => tree(state, TreeCommand::Delete, out),
+    }
+}
+
+/// Moves `from` into the directory of `onto` (a file's parent, or the root).
+pub fn move_entry(state: &mut State, from: RelPath, onto: TreeTarget, out: &mut Vec<Effect>) {
+    let row = match onto {
+        TreeTarget::Row(index) => state.tree.rows.get(index),
+        TreeTarget::Root => None,
+    };
+    let dir = row_dir(row);
+    let to = match dir.is_empty() {
+        true => RelPath::parse(from.name()),
+        false => RelPath::parse(&format!("{dir}/{}", from.name())),
+    };
+    match to {
+        Ok(to) if to == from => {}
+        Ok(_) if RelPath(dir.to_owned()).is_within(from.as_str()) => {
+            state.notice = Some(Notice::MoveIntoItself)
+        }
+        Ok(to) => out.push(Effect::Job(Job::Fs {
+            root: state.root.path().to_owned(),
+            op: FsOp::Rename { from, to },
+        })),
+        Err(_) => {
+            state.notice = Some(Notice::InvalidPath {
+                input: from.as_str().to_owned(),
+            })
+        }
+    }
 }

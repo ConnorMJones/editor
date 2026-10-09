@@ -5,11 +5,11 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations,
-    Div, ElementInputHandler, EntityInputHandler, HitboxBehavior, Hsla, IntoElement, KeyDownEvent,
-    MouseButton, MouseMoveEvent, Pixels, Point, Render, ResizeEdge, ScrollHandle, ScrollStrategy,
-    Size, Stateful, Tiling, UTF16Selection, UniformListScrollHandle, Window, WindowButton,
-    WindowButtonLayout, WindowControlArea, canvas, div, point, prelude::*, px, size,
-    transparent_black, uniform_list,
+    Deferred, Div, ElementInputHandler, EntityInputHandler, HitboxBehavior, Hsla, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ResizeEdge,
+    ScrollHandle, ScrollStrategy, SharedString, Size, Stateful, Tiling, UTF16Selection,
+    UniformListScrollHandle, Window, WindowButton, WindowButtonLayout, WindowControlArea, anchored,
+    canvas, deferred, div, point, prelude::*, px, size, transparent_black, uniform_list,
 };
 use helix_core::visual_offset_from_anchor;
 use model::command::{ChangesCommand, Command, PickerCommand};
@@ -27,9 +27,10 @@ use state::display::{self, Gutter, Indent};
 use state::job::{self, JobResult};
 use state::keymap::{self, Context as KeyContext};
 use state::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
+use state::path::RelPath;
 use state::picker::{Items, PALETTE, Search};
 use state::scroll;
-use state::tree::{self, Fold, RowKind, TreeEdit};
+use state::tree::{self, Fold, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget};
 use state::watch::{self, Watcher};
 use state::{
     Effect, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply, input, register, session,
@@ -62,9 +63,40 @@ pub struct Workspace {
     pub tab_scroll: SecondaryMap<PaneId, ScrollHandle>,
     /// Focused pane and active tab last scrolled into view.
     pub shown_tab: Option<(PaneId, usize)>,
+    /// The file tree context menu, opened by a right click at `at`.
+    pub tree_menu: Option<TreeMenu>,
 }
 
 /// Where the session is saved on exit, per `session.restore`.
+/// An open file tree context menu.
+pub struct TreeMenu {
+    pub target: TreeTarget,
+    pub at: Point<Pixels>,
+}
+
+/// A file tree entry being dragged to another folder.
+pub struct DraggedEntry {
+    pub path: RelPath,
+}
+
+/// What follows the pointer while dragging a tree entry.
+pub struct DragPreview {
+    pub name: SharedString,
+    pub bg: Hsla,
+    pub fg: Hsla,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .rounded_sm()
+            .bg(self.bg)
+            .text_color(self.fg)
+            .child(self.name.clone())
+    }
+}
+
 pub enum SessionFile {
     Disabled,
     At(PathBuf),
@@ -163,6 +195,8 @@ fn divider(axis: Axis, color: Hsla) -> Div {
 
 impl Workspace {
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        // Any key dismisses the tree menu; keys keep their usual meaning.
+        self.tree_menu = None;
         let Some(key) = crate::input::translate(&event.keystroke) else {
             return;
         };
@@ -868,6 +902,7 @@ impl Workspace {
 
     fn sidebar(&self, focus: Focus, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
+        let drop_bg = theme.chrome.selection;
         let border = match focus {
             Focus::Sidebar => theme.chrome.accent,
             Focus::Editor => theme.chrome.border,
@@ -1136,41 +1171,79 @@ impl Workspace {
                         .track_scroll(&self.changes_scroll)
                         .flex_1()
                         .into_any_element(),
-                        Sidebar::Files(_) | Sidebar::Hidden => uniform_list(
-                            "file-tree",
-                            self.state.tree.rows.len(),
-                            cx.processor(|this, range: Range<usize>, _window, cx| {
-                                let state = &this.state;
-                                let theme = &this.theme;
-                                let focused =
-                                    matches!(state.sidebar, Sidebar::Files(Focus::Sidebar));
-                                range
-                                    .map(|index| {
-                                        let row = &state.tree.rows[index];
-                                        let status = match &state.git.repo {
-                                            Repo::Found { snapshot, .. } => snapshot.get(&row.path),
-                                            Repo::None | Repo::Unknown => None,
-                                        };
-                                        let color = match status {
-                                            Some(status) => theme.chrome[status],
-                                            None => theme.text,
-                                        };
-                                        let icon = match row.kind {
-                                            RowKind::File => "  ",
-                                            RowKind::Dir(Fold::Collapsed) => "▸ ",
-                                            RowKind::Dir(Fold::Expanded) => "▾ ",
-                                        };
-                                        let unsaved =
-                                            match state.tree.unsaved.paths.contains(&row.path) {
-                                                true => "●",
-                                                false => "",
-                                            };
-                                        let bg = match (index == state.tree.cursor, focused) {
-                                            (true, true) => theme.chrome.selection,
-                                            (true, false) => theme.background,
-                                            (false, _) => theme.surface,
-                                        };
-                                        div()
+                        Sidebar::Files(_) | Sidebar::Hidden => div()
+                            .id("file-tree-area")
+                            .flex_1()
+                            .min_h_0()
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                    this.tree_menu = Some(TreeMenu {
+                                        target: TreeTarget::Root,
+                                        at: event.position,
+                                    });
+                                    cx.notify();
+                                }),
+                            )
+                            .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(drop_bg))
+                            .on_drop(cx.listener(|this, dragged: &DraggedEntry, window, cx| {
+                                workspace::move_entry(
+                                    &mut this.state,
+                                    dragged.path.clone(),
+                                    TreeTarget::Root,
+                                    &mut this.effects,
+                                );
+                                window.focus(&this.focus, cx);
+                                this.changed(cx);
+                            }))
+                            .child(
+                                uniform_list(
+                                    "file-tree",
+                                    self.state.tree.rows.len(),
+                                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                                        let state = &this.state;
+                                        let theme = &this.theme;
+                                        let (drop_bg, preview_bg, preview_fg) = (
+                                            theme.chrome.selection,
+                                            theme.chrome.title,
+                                            theme.text,
+                                        );
+                                        let focused =
+                                            matches!(state.sidebar, Sidebar::Files(Focus::Sidebar));
+                                        range
+                                            .map(|index| {
+                                                let row = &state.tree.rows[index];
+                                                let status = match &state.git.repo {
+                                                    Repo::Found { snapshot, .. } => {
+                                                        snapshot.get(&row.path)
+                                                    }
+                                                    Repo::None | Repo::Unknown => None,
+                                                };
+                                                let color = match status {
+                                                    Some(status) => theme.chrome[status],
+                                                    None => theme.text,
+                                                };
+                                                let icon = match row.kind {
+                                                    RowKind::File => "  ",
+                                                    RowKind::Dir(Fold::Collapsed) => "▸ ",
+                                                    RowKind::Dir(Fold::Expanded) => "▾ ",
+                                                };
+                                                let unsaved = match state
+                                                    .tree
+                                                    .unsaved
+                                                    .paths
+                                                    .contains(&row.path)
+                                                {
+                                                    true => "●",
+                                                    false => "",
+                                                };
+                                                let bg = match (index == state.tree.cursor, focused)
+                                                {
+                                                    (true, true) => theme.chrome.selection,
+                                                    (true, false) => theme.background,
+                                                    (false, _) => theme.surface,
+                                                };
+                                                div()
                                             .id(index)
                                             .flex()
                                             .flex_row()
@@ -1179,6 +1252,46 @@ impl Workspace {
                                             .pl(px(4.0 + INDENT * row.depth as f32))
                                             .pr_2()
                                             .text_color(color)
+                                            .on_mouse_down(
+                                                MouseButton::Right,
+                                                cx.listener(
+                                                    move |this, event: &MouseDownEvent, _, cx| {
+                                                        this.tree_menu = Some(TreeMenu {
+                                                            target: TreeTarget::Row(index),
+                                                            at: event.position,
+                                                        });
+                                                        cx.stop_propagation();
+                                                        cx.notify();
+                                                    },
+                                                ),
+                                            )
+                                            .on_drag(
+                                                DraggedEntry {
+                                                    path: row.path.clone(),
+                                                },
+                                                move |dragged, _, _, cx| {
+                                                    cx.new(|_| DragPreview {
+                                                        name: dragged.path.name().to_owned().into(),
+                                                        bg: preview_bg,
+                                                        fg: preview_fg,
+                                                    })
+                                                },
+                                            )
+                                            .drag_over::<DraggedEntry>(move |style, _, _, _| {
+                                                style.bg(drop_bg)
+                                            })
+                                            .on_drop(cx.listener(
+                                                move |this, dragged: &DraggedEntry, window, cx| {
+                                                    workspace::move_entry(
+                                                        &mut this.state,
+                                                        dragged.path.clone(),
+                                                        TreeTarget::Row(index),
+                                                        &mut this.effects,
+                                                    );
+                                                    window.focus(&this.focus, cx);
+                                                    this.changed(cx);
+                                                },
+                                            ))
                                             .on_click(cx.listener(
                                                 move |this, event: &ClickEvent, window, cx| {
                                                     let click = match event.click_count() {
@@ -1207,13 +1320,14 @@ impl Workspace {
                                                     .text_color(theme.chrome.unsaved)
                                                     .child(unsaved),
                                             )
-                                    })
-                                    .collect()
-                            }),
-                        )
-                        .track_scroll(&self.tree_scroll)
-                        .flex_1()
-                        .into_any_element(),
+                                            })
+                                            .collect()
+                                    }),
+                                )
+                                .track_scroll(&self.tree_scroll)
+                                .size_full(),
+                            )
+                            .into_any_element(),
                     }),
             )
             .child(divider(Axis::Row, border).on_mouse_down(
@@ -1223,6 +1337,63 @@ impl Workspace {
                     cx.stop_propagation();
                 }),
             ))
+    }
+
+    fn tree_menu(&self, cx: &mut Context<Self>) -> Option<Deferred> {
+        let menu = self.tree_menu.as_ref()?;
+        let theme = &self.theme;
+        let target = menu.target;
+        const ITEMS: [(TreeAction, &str); 4] = [
+            (TreeAction::NewFile, "New File"),
+            (TreeAction::NewFolder, "New Folder"),
+            (TreeAction::Rename, "Rename"),
+            (TreeAction::Delete, "Delete"),
+        ];
+        let shown = match target {
+            TreeTarget::Row(_) => ITEMS.len(),
+            TreeTarget::Root => 2,
+        };
+        let hover = theme.chrome.hover;
+        let items = ITEMS[..shown].iter().map(|&(action, label)| {
+            div()
+                .id(label)
+                .px_3()
+                .py_0p5()
+                .rounded_sm()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.tree_menu = None;
+                    workspace::tree_action(&mut this.state, target, action, &mut this.effects);
+                    window.focus(&this.focus, cx);
+                    this.changed(cx);
+                }))
+                .child(label)
+        });
+        Some(
+            deferred(
+                anchored().position(menu.at).snap_to_window().child(
+                    div()
+                        .id("tree-menu")
+                        .min_w(px(140.))
+                        .p_1()
+                        .flex()
+                        .flex_col()
+                        .bg(theme.surface)
+                        .border_1()
+                        .border_color(theme.chrome.border)
+                        .rounded_md()
+                        .font(theme.ui.clone())
+                        .text_size(theme.ui_size)
+                        .text_color(theme.text)
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.tree_menu = None;
+                            cx.notify();
+                        }))
+                        .children(items),
+                ),
+            )
+            .with_priority(1),
+        )
     }
 
     fn picker(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
@@ -1546,8 +1717,25 @@ impl Render for Workspace {
             &state.notice,
         ) {
             (Overlay::Prompt(_), ..) => String::new(),
-            (_, TreeEdit::Create { line }, ..) => {
-                format!("new path (end with / for a directory): {line}")
+            (
+                _,
+                TreeEdit::Create {
+                    line,
+                    kind: NewEntry::Infer,
+                },
+                ..,
+            ) => {
+                format!("new file (end with / for a folder): {line}")
+            }
+            (
+                _,
+                TreeEdit::Create {
+                    line,
+                    kind: NewEntry::Folder,
+                },
+                ..,
+            ) => {
+                format!("new folder: {line}")
             }
             (_, TreeEdit::Rename { from, line }, ..) => format!("rename {from} to: {line}"),
             (_, TreeEdit::Delete { path, line, .. }, ..) => {
@@ -1645,6 +1833,7 @@ impl Render for Workspace {
             .child(main)
             .child(div().flex_none().px_2().h(line_height).child(bottom))
             .children(self.picker(window, cx))
+            .children(self.tree_menu(cx))
             .children(crate::prompt::prompt(
                 &self.state.overlay,
                 &self.theme,

@@ -105,6 +105,8 @@ pub enum Notice {
     DiffPending,
     NoHunks,
     NoChangedFiles,
+    /// A folder cannot move into itself or one of its folders.
+    MoveIntoItself,
     /// Discard works on one file at a time.
     DiscardGroup,
     Unchanged {
@@ -214,6 +216,7 @@ impl std::fmt::Display for Notice {
             Notice::DiffPending => f.write_str("diff is still updating; try again"),
             Notice::NoHunks => f.write_str("no change under the selection"),
             Notice::NoChangedFiles => f.write_str("no changed files"),
+            Notice::MoveIntoItself => f.write_str("cannot move a folder into itself"),
             Notice::DiscardGroup => f.write_str("discard files one at a time"),
             Notice::Unchanged { path } => write!(f, "{} has no changes", path.display()),
             Notice::IndexChanged { path } => {

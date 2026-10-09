@@ -1105,6 +1105,7 @@ Source view keys are listed in their own section below.
 | `g up` / `g down` | normal, select | File start / last line (aliases of `gg` / `ge`). |
 | `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
 | `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
+| mouse | tree | Click to open, double-click to keep the tab. Right-click a row (or the empty area for the root): New File, New Folder, Rename, Delete. Drag a file or folder onto a folder (or onto a file, for its folder; the empty area for the root) to move it; open buffers follow. |
 | `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
 ";
 

@@ -2,12 +2,14 @@ use std::fs;
 use std::path::Path;
 
 use model::git::GitStatus;
+use model::notice::Notice;
 use state::buffer::Disk;
 use state::files::Files;
 use state::layout::Node;
 use state::path::RelPath;
 use state::picker::Items;
-use state::tree::RowKind;
+use state::tree::{RowKind, TreeAction, TreeTarget};
+use state::workspace;
 use state::{Focus, Overlay, Repo, Sidebar, State};
 
 use crate::harness::{Harness, disk_of};
@@ -355,4 +357,131 @@ fn reading_watched_files_raises_no_events() {
         !h.events_arrive(),
         "opening files must not look like changes"
     );
+}
+
+fn row(h: &Harness, path: &str) -> usize {
+    h.state
+        .tree
+        .rows
+        .iter()
+        .position(|r| r.path.as_str() == path)
+        .unwrap_or_else(|| panic!("{path} not listed"))
+}
+
+#[test]
+fn tree_menu_creates_files_and_folders_renames_and_deletes() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("a.txt"), "").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>e");
+
+    // New Folder on the root never needs a trailing slash.
+    h.run(|state, out| workspace::tree_action(state, TreeTarget::Root, TreeAction::NewFolder, out));
+    h.keys("docs<ret>");
+    assert!(dir.path().join("docs").is_dir());
+
+    // New File on a folder row creates inside it.
+    let src = row(&h, "src");
+    h.run(|state, out| {
+        workspace::tree_action(state, TreeTarget::Row(src), TreeAction::NewFile, out)
+    });
+    h.keys("main.rs<ret>");
+    assert!(dir.path().join("src/main.rs").is_file());
+
+    h.keys("<space>e");
+    let a = row(&h, "a.txt");
+    h.run(|state, out| workspace::tree_action(state, TreeTarget::Row(a), TreeAction::Rename, out));
+    h.keys("<bs><bs><bs><bs><bs>b.txt<ret>");
+    assert!(dir.path().join("b.txt").is_file());
+
+    let b = row(&h, "b.txt");
+    h.run(|state, out| workspace::tree_action(state, TreeTarget::Row(b), TreeAction::Delete, out));
+    h.keys("y<ret>");
+    assert!(!dir.path().join("b.txt").exists());
+}
+
+#[test]
+fn dragging_moves_entries_between_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src/inner")).unwrap();
+    fs::create_dir(dir.path().join("docs")).unwrap();
+    fs::write(dir.path().join("a.txt"), "a").unwrap();
+    fs::write(dir.path().join("docs/b.md"), "b").unwrap();
+    fs::write(dir.path().join("src/c.rs"), "c").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.txt<ret><space>e");
+
+    // Onto a folder moves into it, and an open buffer follows the file.
+    let docs = row(&h, "docs");
+    h.run(|state, out| {
+        workspace::move_entry(
+            state,
+            RelPath::parse("a.txt").unwrap(),
+            TreeTarget::Row(docs),
+            out,
+        )
+    });
+    assert!(dir.path().join("docs/a.txt").is_file());
+    assert_eq!(h.focused_path(), Some(canonical(dir.path(), "docs/a.txt")));
+
+    // Onto a file moves into that file's folder; onto the empty area moves to the root.
+    let docs = row(&h, "docs");
+    h.state.tree.cursor = docs;
+    match h.state.tree.rows[docs].kind {
+        RowKind::Dir(state::tree::Fold::Collapsed) => h.keys("l"),
+        RowKind::Dir(state::tree::Fold::Expanded) | RowKind::File => {}
+    }
+    let b = row(&h, "docs/b.md");
+    h.run(|state, out| {
+        workspace::move_entry(
+            state,
+            RelPath::parse("src/c.rs").unwrap(),
+            TreeTarget::Row(b),
+            out,
+        )
+    });
+    assert!(dir.path().join("docs/c.rs").is_file());
+    h.run(|state, out| {
+        workspace::move_entry(
+            state,
+            RelPath::parse("docs/b.md").unwrap(),
+            TreeTarget::Root,
+            out,
+        )
+    });
+    assert!(dir.path().join("b.md").is_file());
+
+    // A folder cannot move into itself or below itself.
+    let src = row(&h, "src");
+    h.state.tree.cursor = src;
+    h.keys("l");
+    let inner = row(&h, "src/inner");
+    h.run(|state, out| {
+        workspace::move_entry(
+            state,
+            RelPath::parse("src").unwrap(),
+            TreeTarget::Row(inner),
+            out,
+        )
+    });
+    assert!(matches!(h.state.notice, Some(Notice::MoveIntoItself)));
+    assert!(dir.path().join("src/inner").is_dir());
+
+    // An existing name at the destination is never overwritten.
+    fs::write(dir.path().join("src/b.md"), "other").unwrap();
+    let src = row(&h, "src");
+    h.run(|state, out| {
+        workspace::move_entry(
+            state,
+            RelPath::parse("b.md").unwrap(),
+            TreeTarget::Row(src),
+            out,
+        )
+    });
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/b.md")).unwrap(),
+        "other"
+    );
+    assert!(dir.path().join("b.md").is_file());
 }

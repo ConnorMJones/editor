@@ -65,9 +65,10 @@ pub enum RowKind {
 pub enum TreeEdit {
     #[default]
     None,
-    /// Path relative to the root; a trailing `/` creates a directory.
+    /// Path relative to the root; with `NewEntry::Infer` a trailing `/` creates a directory.
     Create {
         line: String,
+        kind: NewEntry,
     },
     Rename {
         from: RelPath,
@@ -197,4 +198,28 @@ pub fn sync_unsaved(unsaved: &mut Unsaved, root: &Path, buffers: &SlotMap<Buffer
         }
         unsaved.paths.insert(file);
     }
+}
+
+/// What a create prompt makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewEntry {
+    /// A file, or a directory when the name ends in `/`.
+    Infer,
+    Folder,
+}
+
+/// Where a tree context menu or drop applies: a row, or the root below the last row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeTarget {
+    Row(usize),
+    Root,
+}
+
+/// Context menu entries of the file tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeAction {
+    NewFile,
+    NewFolder,
+    Rename,
+    Delete,
 }

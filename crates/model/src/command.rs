@@ -434,6 +434,8 @@ pub enum TreeCommand {
     /// Collapses a directory or moves to its parent.
     Close,
     Create,
+    /// Like `Create`, but the typed name is always a folder.
+    CreateFolder,
     Rename,
     Delete,
     EditInsert(char),
