@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use helix_core::syntax::Loader;
+use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Range, Rope, Selection};
 use model::color::Base16;
 use model::mode::Mode;
@@ -95,6 +96,8 @@ fn whitespace_and_indent_guides() {
         scroll(10, 40),
         &loader,
         Focus::Focused(Mode::Normal),
+        &TextAnnotations::default(),
+        &[],
     );
     assert_eq!(
         rows(&frame),
@@ -121,6 +124,8 @@ fn soft_wrap_marks_continuation_rows() {
         scroll(10, 20),
         &loader,
         Focus::Focused(Mode::Normal),
+        &TextAnnotations::default(),
+        &[],
     );
     let kinds: Vec<RowKind> = frame.rows.iter().map(|r| r.kind).collect();
     assert_eq!(
@@ -152,6 +157,8 @@ fn selections_and_cursors_land_on_cells() {
         scroll(10, 40),
         &loader,
         Focus::Focused(Mode::Insert),
+        &TextAnnotations::default(),
+        &[],
     );
     let spans: Vec<(u16, std::ops::Range<u16>, Rank)> = frame
         .selections
@@ -200,6 +207,8 @@ fn rust_captures_fall_back_to_theme_prefixes() {
         scroll(4, 80),
         &loader,
         Focus::Unfocused,
+        &TextAnnotations::default(),
+        &[],
     );
     let text = rows(&frame)[0];
     let at = |needle: &str| style_at(&frame, 0, text.find(needle).expect("needle in row"));

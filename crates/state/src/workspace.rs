@@ -8,7 +8,7 @@ use model::notice::Notice;
 use model::window::PickerKind;
 
 use crate::apply::{Force, apply};
-use crate::buffer::{BufferId, Content, Position};
+use crate::buffer::{BufferId, Content, Position, Target};
 use crate::files::Files;
 use crate::job::{FsOp, Job};
 use crate::layout::{LastPane, Layout, Pane, PaneId, Tabs, TextView, Tick, View};
@@ -422,10 +422,10 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                     crate::apply::open(
                         state,
                         PathBuf::from(hit.path.as_str()),
-                        Some(Position {
+                        Some(Target::Position(Position {
                             line: hit.line as usize,
                             column: hit.column as usize,
-                        }),
+                        })),
                         open,
                         out,
                     );

@@ -5920,6 +5920,7 @@ dependencies = [
  "helix-core",
  "helix-stdx",
  "ignore",
+ "imara-diff",
  "model",
  "notify",
  "nucleo",

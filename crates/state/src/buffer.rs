@@ -8,6 +8,7 @@ use helix_core::syntax::{HighlighterError, Loader};
 use helix_core::{Language, LineEnding, Rope, Selection, Syntax, Transaction};
 use slotmap::new_key_type;
 
+use crate::diff::{Diff, Edge};
 use crate::layout::PaneId;
 
 new_key_type! {
@@ -28,6 +29,7 @@ pub enum Content {
         disk: Disk,
         /// Modification time of the disk copy the text last matched; `None` before the first write.
         mtime: Option<SystemTime>,
+        diff: Diff,
     },
 }
 
@@ -35,7 +37,14 @@ pub enum Content {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Jump {
     pub pane: PaneId,
-    pub to: Position,
+    pub to: Target,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Position(Position),
+    /// Waits further, for the buffer's first diff.
+    Hunk(Edge),
 }
 
 /// Zero-based line and character column.
@@ -59,6 +68,8 @@ const DEFAULT_TEXT_WIDTH: usize = 80;
 
 pub struct TextDoc {
     pub text: Rope,
+    /// Bumped by every change to `text`; diffs are stamped with it.
+    pub version: u64,
     pub history: History,
     pub uncommitted: Uncommitted,
     pub saved_revision: usize,
@@ -99,6 +110,7 @@ impl TextDoc {
                 .and_then(|config| config.text_width)
                 .unwrap_or(DEFAULT_TEXT_WIDTH),
             text,
+            version: 0,
             history: History::default(),
             uncommitted: Uncommitted::Clean,
             saved_revision: 0,
@@ -141,6 +153,7 @@ impl TextDoc {
         if !tx.apply(&mut self.text) || tx.changes().is_empty() {
             return;
         }
+        self.version += 1;
         let updated = self
             .syntax
             .as_mut()
@@ -183,6 +196,7 @@ impl TextDoc {
         for tx in &txs {
             let old = self.text.clone();
             tx.apply(&mut self.text);
+            self.version += 1;
             let updated = self.syntax.as_mut().map(|syntax| {
                 syntax.update(old.slice(..), self.text.slice(..), tx.changes(), loader)
             });

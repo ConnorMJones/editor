@@ -2,6 +2,7 @@ use std::hint::black_box;
 use std::path::Path;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Rope, Selection};
 use model::mode::Mode;
 use state::buffer::TextDoc;
@@ -45,6 +46,8 @@ fn display(c: &mut Criterion) {
                 scroll,
                 &loader,
                 Focus::Focused(Mode::Normal),
+                &TextAnnotations::default(),
+                &[],
             );
             frame.rows.len()
         })

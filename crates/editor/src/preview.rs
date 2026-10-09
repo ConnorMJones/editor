@@ -6,6 +6,7 @@ use gpui::{
     relative, size,
 };
 use helix_core::Selection;
+use helix_core::text_annotations::TextAnnotations;
 use model::theme as roles;
 use state::Overlay;
 use state::buffer::{Content, TextDoc};
@@ -172,6 +173,8 @@ impl Element for PreviewElement {
                         scroll,
                         &state.languages,
                         Focus::Unfocused,
+                        &TextAnnotations::default(),
+                        &[],
                     );
                     for row in &frame.rows {
                         cache.runs.clear();

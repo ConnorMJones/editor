@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
+use git2::Oid;
 use helix_core::regex::bytes::Regex;
 use helix_core::syntax::Loader;
 use helix_core::{Range, Rope, Selection};
@@ -12,15 +13,17 @@ use model::command::{Command, Dirs};
 use model::notice::Notice;
 
 use crate::apply::{line_column, map_views};
-use crate::buffer::{BufferId, Content, Disk, TextDoc};
+use crate::buffer::{BufferId, Content, Disk, Target, TextDoc};
+use crate::diff::{Base, BaseRead, Diff, Edge, Landing, Lines, Outcome, Stamp};
 use crate::files::{self, Files, Rescan, Walked};
-use crate::git::{self, GitSnapshot};
+use crate::git::{self, IndexError, IndexOp, RepoPath};
 use crate::layout::View;
 use crate::path::RelPath;
 use crate::picker::{self, Hit, Items, Preview, Search};
 use crate::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
 use crate::{
-    Effect, Exit, Focus, Overlay, Refresh, Repo, Sidebar, State, request_git, scroll, watch,
+    Effect, Exit, Focus, Overlay, Refresh, Repo, Sidebar, State, changes, request_git, scroll,
+    watch,
 };
 
 /// Blocking work run off the UI thread.
@@ -77,6 +80,31 @@ pub enum Job {
         path: RelPath,
         languages: Arc<Loader>,
     },
+
+    // Git diffs and index changes.
+    /// Reads a buffer's HEAD and index blobs, skipping sides still at `known`.
+    DiffBase {
+        buffer: BufferId,
+        git_dir: PathBuf,
+        path: RepoPath,
+        known: [Option<Oid>; 2],
+    },
+    /// Diffs a snapshot of the buffer against both bases; `lines` comes back in the result.
+    Diff {
+        buffer: BufferId,
+        stamp: Stamp,
+        head: Base,
+        index: Base,
+        text: Rope,
+        lines: Box<Lines>,
+    },
+    GitIndex {
+        git_dir: PathBuf,
+        file: RepoPath,
+        /// The buffer path, for notices and reloads.
+        path: PathBuf,
+        op: IndexOp,
+    },
 }
 
 /// What a reload does to a buffer with unsaved edits.
@@ -114,7 +142,7 @@ pub enum JobResult {
         result: io::Result<Vec<Entry>>,
     },
     Rescanned(Rescan),
-    Git(Result<Option<(PathBuf, GitSnapshot)>, git2::Error>),
+    Git(Result<Option<git::Found>, git2::Error>),
     Reloaded {
         buffer: BufferId,
         read: DiskRead,
@@ -132,6 +160,22 @@ pub enum JobResult {
     Previewed {
         path: RelPath,
         preview: Preview,
+    },
+
+    Bases {
+        buffer: BufferId,
+        result: Result<[BaseRead; 2], git2::Error>,
+    },
+    Diffed {
+        buffer: BufferId,
+        stamp: Stamp,
+        lines: Box<Lines>,
+        outcome: Outcome,
+    },
+    GitIndexed {
+        path: PathBuf,
+        op: IndexOp,
+        result: Result<(), IndexError>,
     },
 }
 
@@ -329,10 +373,51 @@ pub fn run(job: Job) -> JobResult {
             };
             JobResult::Previewed { path, preview }
         }
+        Job::DiffBase {
+            buffer,
+            git_dir,
+            path,
+            known,
+        } => JobResult::Bases {
+            buffer,
+            result: git::read_bases(&git_dir, &path, known),
+        },
+        Job::Diff {
+            buffer,
+            stamp,
+            head,
+            index,
+            text,
+            mut lines,
+        } => {
+            let outcome = lines.compute(stamp, &head, &index, text);
+            JobResult::Diffed {
+                buffer,
+                stamp,
+                lines,
+                outcome,
+            }
+        }
+        Job::GitIndex {
+            git_dir,
+            file,
+            path,
+            op,
+        } => JobResult::GitIndexed {
+            result: git::change_index(&git_dir, &file, &op),
+            path,
+            op,
+        },
     }
 }
 
+/// Applies a finished job, then starts diffs its changes made stale.
 pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
+    finish(state, result, out);
+    changes::sync(state, out);
+}
+
+fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
     match result {
         JobResult::Opened { buffer, read } => {
             let Some(entry) = state.buffers.get_mut(buffer) else {
@@ -345,8 +430,19 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             let notice = match read {
                 OpenRead::Text { doc, disk, mtime } => {
                     let len = doc.text.len_chars();
-                    let jump = jump.map(|jump| (jump.pane, line_column(&doc.text, jump.to)));
-                    entry.content = Content::Text { doc, disk, mtime };
+                    let jump = jump.map(|jump| match jump.to {
+                        Target::Position(to) => {
+                            (jump.pane, Arrival::At(line_column(&doc.text, to)))
+                        }
+                        Target::Hunk(edge) => (jump.pane, Arrival::Hunk(edge)),
+                    });
+                    entry.content = Content::Text {
+                        doc,
+                        disk,
+                        mtime,
+                        diff: Diff::LOADING,
+                    };
+                    changes::request_bases(state, buffer, out);
                     // Views restored from a session were placed before the length was known.
                     for pane in state.layout.panes.values_mut() {
                         for item in pane.items_mut() {
@@ -363,7 +459,10 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         }
                     }
                     match jump {
-                        Some((pane, at)) => {
+                        Some((pane, Arrival::Hunk(edge))) => {
+                            changes::expect_landing(state, buffer, Landing { pane, edge })
+                        }
+                        Some((pane, Arrival::At(at))) => {
                             let target = (state.layout.panes.get_mut(pane)).and_then(|target| {
                                 let index = target.tabs.as_ref()?.find(buffer)?;
                                 Some(&mut target.items_mut()[index].view)
@@ -423,6 +522,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     doc,
                     disk,
                     mtime: known,
+                    ..
                 }) => {
                     doc.saved_revision = revision;
                     *disk = Disk::Synced;
@@ -526,16 +626,36 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         }
         JobResult::Git(result) => {
             match result {
-                Ok(Some((git_dir, snapshot))) => {
+                Ok(Some(git::Found {
+                    git_dir,
+                    workdir,
+                    snapshot,
+                })) => {
                     match &state.git.repo {
                         Repo::Found { git_dir: known, .. } if *known == git_dir => {}
-                        Repo::Found { .. } | Repo::None | Repo::Unknown => {
-                            out.push(Effect::Watch(vec![git_dir.clone()]))
-                        }
+                        // Commits move refs and the reflog without touching the git dir itself.
+                        Repo::Found { .. } | Repo::None | Repo::Unknown => out.push(Effect::Watch(
+                            [
+                                git_dir.clone(),
+                                git_dir.join("refs/heads"),
+                                git_dir.join("logs"),
+                            ]
+                            .into_iter()
+                            .filter(|dir| dir.is_dir())
+                            .collect(),
+                        )),
                     }
-                    state.git.repo = Repo::Found { git_dir, snapshot };
+                    state.git.repo = Repo::Found {
+                        git_dir,
+                        workdir,
+                        snapshot,
+                    };
+                    changes::request_all_bases(state, out);
                 }
-                Ok(None) => state.git.repo = Repo::None,
+                Ok(None) => {
+                    state.git.repo = Repo::None;
+                    changes::request_all_bases(state, out);
+                }
                 Err(error) => tracing::warn!(%error, "git status failed"),
             }
             match state.git.refresh {
@@ -566,6 +686,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 doc,
                 disk,
                 mtime: known,
+                ..
             } = &mut entry.content
             else {
                 return;
@@ -687,6 +808,16 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             tree::rebuild(&mut state.tree);
             watch::changed(state, changed, out);
         }
+        JobResult::Bases { buffer, result } => changes::bases_read(state, buffer, result, out),
+        JobResult::Diffed {
+            buffer,
+            stamp,
+            lines,
+            outcome,
+        } => changes::diffed(state, buffer, stamp, lines, outcome),
+        JobResult::GitIndexed { path, op, result } => {
+            changes::indexed(state, path, op, result, out)
+        }
         JobResult::Grepped {
             generation,
             hits,
@@ -708,4 +839,10 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             crate::workspace::request_preview(state, out);
         }
     }
+}
+
+/// Where a jump puts the cursor once the opened text is in.
+enum Arrival {
+    At(usize),
+    Hunk(Edge),
 }

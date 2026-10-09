@@ -139,3 +139,74 @@ pub const MENU: Base16 = Base01;
 pub const MENU_SELECTED: Base16 = Base02;
 pub const MENU_TEXT: Base16 = Base05;
 pub const MENU_DIR: Base16 = Base0D;
+
+/// Row background roles of diff and conflict views.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Background {
+    Added,
+    Removed,
+    Modified,
+    /// Virtual rows that keep two sides of a diff aligned.
+    Filler,
+    Ours,
+    Theirs,
+    /// The common ancestor section of a diff3 conflict.
+    Base,
+}
+
+impl Background {
+    pub const COUNT: usize = 7;
+    pub const ALL: [Background; Background::COUNT] = [
+        Background::Added,
+        Background::Removed,
+        Background::Modified,
+        Background::Filler,
+        Background::Ours,
+        Background::Theirs,
+        Background::Base,
+    ];
+}
+
+/// A palette slot blended over the editor background at `alpha` percent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tint {
+    pub slot: Base16,
+    pub alpha: u8,
+}
+
+pub const fn background(role: Background) -> Tint {
+    match role {
+        Background::Added => Tint {
+            slot: Base0B,
+            alpha: 14,
+        },
+        Background::Removed => Tint {
+            slot: Base08,
+            alpha: 14,
+        },
+        Background::Modified => Tint {
+            slot: Base09,
+            alpha: 14,
+        },
+        Background::Filler => Tint {
+            slot: Base01,
+            alpha: 100,
+        },
+        Background::Ours => Tint {
+            slot: Base0D,
+            alpha: 16,
+        },
+        Background::Theirs => Tint {
+            slot: Base0E,
+            alpha: 16,
+        },
+        Background::Base => Tint {
+            slot: Base03,
+            alpha: 16,
+        },
+    }
+}
+
+/// Opacity of gutter signs for hunks that are already staged, in percent.
+pub const STAGED_SIGN_ALPHA: u8 = 40;

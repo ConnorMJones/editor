@@ -4,11 +4,11 @@ use helix_core::doc_formatter::{DocumentFormatter, GraphemeSource, TextFormat};
 use helix_core::graphemes::Grapheme;
 use helix_core::indent::IndentStyle;
 use helix_core::syntax::{HighlightEvent, Highlighter, Loader};
-use helix_core::text_annotations::TextAnnotations;
-use helix_core::{RopeSlice, Selection, visual_offset_from_block};
+use helix_core::text_annotations::{LineAnnotation, TextAnnotations};
+use helix_core::{Position, RopeSlice, Selection, visual_offset_from_block};
 use helix_stdx::rope::RopeSliceExt;
 use model::mode::Mode;
-use model::theme::{self, Style};
+use model::theme::{self, Background, Style};
 
 use crate::buffer::TextDoc;
 use crate::layout::{Scroll, Viewport};
@@ -95,10 +95,8 @@ pub fn line_label(line: usize, primary_line: usize, numbering: Numbering) -> usi
 }
 
 /// Git change marker for a document line.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffSign {
-    #[default]
-    Unchanged,
     Added,
     Modified,
     Removed,
@@ -127,6 +125,8 @@ pub enum CursorShape {
 pub enum RowKind {
     First,
     Wrapped,
+    /// A row inserted by a line annotation after `Row::line`, counted from 0 within its run.
+    Virtual(u16),
 }
 
 /// Whether any selection's cursor sits on the row's document line.
@@ -144,6 +144,14 @@ pub struct Row {
     pub mark: LineMark,
     pub text: Range<usize>,
     pub runs: Range<usize>,
+    pub background: Option<Background>,
+}
+
+/// A background role over document lines; `layout` takes them sorted and non-overlapping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shade {
+    pub lines: Range<usize>,
+    pub role: Background,
 }
 
 /// `len` bytes of row text drawn in `style`.
@@ -203,7 +211,8 @@ pub struct Frame {
     lead: Vec<Lead>,
 }
 
-/// Lays out the rows that fit `scroll`'s viewport into `frame`.
+/// Lays out the rows that fit `scroll`'s viewport into `frame`. Line annotations in
+/// `annotations` become `RowKind::Virtual` rows shaded as filler; `shades` colour text rows.
 pub fn layout(
     frame: &mut Frame,
     doc: &TextDoc,
@@ -211,6 +220,8 @@ pub fn layout(
     scroll: Scroll,
     loader: &Loader,
     focus: Focus,
+    annotations: &TextAnnotations,
+    shades: &[Shade],
 ) {
     frame.rows.clear();
     frame.text.clear();
@@ -232,9 +243,8 @@ pub fn layout(
     let indent = Indent::of(doc, loader);
     let unit = indent.unit.max(1);
     let format = text_format(viewport, indent);
-    let annotations = TextAnnotations::default();
     let anchor = scroll.anchor.min(text.len_chars());
-    let row_off = visual_offset_from_block(text, anchor, anchor, &format, &annotations)
+    let row_off = visual_offset_from_block(text, anchor, anchor, &format, annotations)
         .0
         .row;
     let first_line = text.char_to_line(anchor);
@@ -256,8 +266,10 @@ pub fn layout(
     let mut mark = LineMark::Plain;
     let mut level: u16 = 0;
     let mut area = Area::Indent;
+    let mut text_line = usize::MAX;
+    let mut shade_i = 0;
 
-    let formatter = DocumentFormatter::new_at_prev_checkpoint(text, &format, &annotations, anchor);
+    let formatter = DocumentFormatter::new_at_prev_checkpoint(text, &format, annotations, anchor);
     for g in formatter {
         while g.char_idx >= next_event {
             match highlighter.as_mut() {
@@ -278,16 +290,20 @@ pub fn layout(
         let Some(row) = g.visual_pos.row.checked_sub(row_off) else {
             continue;
         };
+        // Every text row holds a grapheme, so rows skipped over come from line annotations.
         if row >= viewport.rows as usize {
+            push_virtual(frame, viewport.rows as usize, &mut area, level, unit);
             break;
         }
+        push_virtual(frame, row, &mut area, level, unit);
         let row = row as u16;
         let col = g.visual_pos.col as u16;
         let width = g.width() as u16;
 
-        while frame.rows.len() <= row as usize {
-            if let Some(last) = frame.rows.last() {
-                finish_row(frame, last.runs.start, area, level, unit);
+        if frame.rows.len() == row as usize {
+            match frame.rows.last() {
+                Some(last) => finish_row(frame, last.runs.start, area, level, unit),
+                None => {}
             }
             if g.line_idx != mark_line {
                 mark_line = g.line_idx;
@@ -299,9 +315,20 @@ pub fn layout(
                     Some(_) | None => LineMark::Plain,
                 };
             }
-            let kind = match frame.rows.last() {
-                Some(last) if last.line == g.line_idx => RowKind::Wrapped,
-                Some(_) | None => RowKind::First,
+            let kind = match text_line == g.line_idx {
+                true => RowKind::Wrapped,
+                false => RowKind::First,
+            };
+            text_line = g.line_idx;
+            while shades
+                .get(shade_i)
+                .is_some_and(|shade| shade.lines.end <= g.line_idx)
+            {
+                shade_i += 1;
+            }
+            let background = match shades.get(shade_i) {
+                Some(shade) if shade.lines.start <= g.line_idx => Some(shade.role),
+                Some(_) | None => None,
             };
             frame.rows.push(Row {
                 line: g.line_idx,
@@ -309,6 +336,7 @@ pub fn layout(
                 mark,
                 text: frame.text.len()..frame.text.len(),
                 runs: frame.runs.len()..frame.runs.len(),
+                background,
             });
             area = Area::Indent;
         }
@@ -523,4 +551,82 @@ fn finish_row(frame: &mut Frame, runs_start: usize, area: Area, level: u16, unit
     let last = &mut frame.rows[row];
     last.text.end = frame.text.len();
     last.runs.end = frame.runs.len();
+}
+
+/// Pads `frame` to `end` rows with annotation rows following the last row's line.
+fn push_virtual(frame: &mut Frame, end: usize, area: &mut Area, level: u16, unit: u16) {
+    while frame.rows.len() < end {
+        let (line, index) = match frame.rows.last() {
+            Some(last) => {
+                finish_row(frame, last.runs.start, *area, level, unit);
+                let last = &frame.rows[frame.rows.len() - 1];
+                match last.kind {
+                    RowKind::Virtual(index) => (last.line, index + 1),
+                    RowKind::First | RowKind::Wrapped => (last.line, 0),
+                }
+            }
+            None => (0, 0),
+        };
+        frame.rows.push(Row {
+            line,
+            kind: RowKind::Virtual(index),
+            mark: LineMark::Plain,
+            text: frame.text.len()..frame.text.len(),
+            runs: frame.runs.len()..frame.runs.len(),
+            background: Some(Background::Filler),
+        });
+        *area = Area::Text;
+    }
+}
+
+/// Inserts `count` virtual rows after each listed document line; entries are sorted by line.
+/// Rows after a soft-wrapped line follow its last visual row.
+pub struct Fillers<'a> {
+    pub text: RopeSlice<'a>,
+    pub after: &'a [(usize, u16)],
+    next: usize,
+}
+
+impl<'a> Fillers<'a> {
+    pub fn new(text: RopeSlice<'a>, after: &'a [(usize, u16)]) -> Fillers<'a> {
+        Fillers {
+            text,
+            after,
+            next: 0,
+        }
+    }
+}
+
+impl LineAnnotation for Fillers<'_> {
+    fn reset_pos(&mut self, char_idx: usize) -> usize {
+        let line = self.text.char_to_line(char_idx.min(self.text.len_chars()));
+        self.next = self.after.partition_point(|&(after, _)| after < line);
+        usize::MAX
+    }
+
+    fn insert_virtual_lines(
+        &mut self,
+        line_end_char_idx: usize,
+        _line_end_visual_pos: Position,
+        doc_line: usize,
+    ) -> Position {
+        // Called after soft wraps too; only the end of the document line counts.
+        let line_end = self
+            .text
+            .line_to_char((doc_line + 1).min(self.text.len_lines()));
+        while self
+            .after
+            .get(self.next)
+            .is_some_and(|&(after, _)| after < doc_line)
+        {
+            self.next += 1;
+        }
+        match self.after.get(self.next) {
+            Some(&(after, count)) if after == doc_line && line_end == line_end_char_idx => {
+                self.next += 1;
+                Position::new(count as usize, 0)
+            }
+            Some(_) | None => Position::new(0, 0),
+        }
+    }
 }

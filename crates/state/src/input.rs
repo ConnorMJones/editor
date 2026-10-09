@@ -11,7 +11,7 @@ use model::register::Register;
 use crate::apply::{apply, commit_focused};
 use crate::keymap::{Context, Resolved};
 use crate::tree::TreeEdit;
-use crate::{Effect, Focus, Overlay, Sidebar, State, Sticky, scroll};
+use crate::{Effect, Focus, Overlay, Sidebar, State, Sticky, changes, scroll};
 
 pub fn context(state: &State) -> Context {
     match (
@@ -109,6 +109,7 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
     }
     let focus = state.layout.focus;
     scroll::follow_cursor(state, focus);
+    changes::sync(state, out);
 }
 
 /// Handles one insert-mode key without recording it; `.` replays through here.
@@ -281,6 +282,7 @@ pub fn text(state: &mut State, text: &str, out: &mut Vec<Effect>) {
     }
     let focus = state.layout.focus;
     scroll::follow_cursor(state, focus);
+    changes::sync(state, out);
 }
 
 /// The command inserting `c` in contexts that take typed text.

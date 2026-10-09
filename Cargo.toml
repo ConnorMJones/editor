@@ -45,6 +45,8 @@ tracy-client = "=0.18.4"
 ignore = "0.4.33"
 notify = { version = "8.2.0", default-features = false }
 git2 = { version = "0.21.0", default-features = false }
+# Same version helix-core uses, so the tree keeps one copy.
+imara-diff = "0.2.0"
 
 # Vendored from helix.
 helix-core = { path = "vendor/helix-core" }

@@ -158,6 +158,7 @@ pub fn clipboard_contents(
     clipboard: Clipboard,
     then: ClipboardUse,
     text: Option<String>,
+    out: &mut Vec<Effect>,
 ) {
     let saved = state.registers.values.get(&Register::Clipboard(clipboard));
     let values = match (text, saved) {
@@ -183,4 +184,5 @@ pub fn clipboard_contents(
         }
     }
     exit_select_mode(state);
+    crate::changes::sync(state, out);
 }

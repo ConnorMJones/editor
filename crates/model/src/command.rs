@@ -127,6 +127,46 @@ pub enum Command {
     CycleBuffer(Cycle),
     Tree(TreeCommand),
     Picker(PickerCommand),
+
+    // Git: hunks against HEAD, staging and changed files.
+    /// Select mode extends to the hunk; past the last or first hunk it opens the next changed file.
+    GotoHunk(HunkTarget),
+    /// Acts on the hunks touched by any selection.
+    Hunk(HunkOp),
+    /// Paths are relative to the root or absolute.
+    File(FileOp),
+    /// Answers the pending confirmation, such as a discard.
+    Confirm(Answer),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HunkTarget {
+    Next,
+    Previous,
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HunkOp {
+    Stage,
+    Unstage,
+    /// Restores HEAD's lines as an undoable edit.
+    Revert,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileOp {
+    Stage(PathBuf),
+    Unstage(PathBuf),
+    /// Restores the index copy, or deletes an untracked file; asks for confirmation first.
+    Discard(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Yes,
+    No,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

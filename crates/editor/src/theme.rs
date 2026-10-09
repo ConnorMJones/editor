@@ -5,7 +5,7 @@ use model::color::{Base16, Palette, Rgb};
 use model::config::Config;
 use model::git::GitStatus;
 use model::mode::Mode;
-use model::theme::Modifiers;
+use model::theme::{Background, Modifiers};
 
 /// Resolved UI colours and fonts; mirrors the base16 mapping of the user's helix theme.
 pub struct Theme {
@@ -23,6 +23,18 @@ pub struct Theme {
     pub ui: Font,
     pub ui_size: Pixels,
     pub chrome: Chrome,
+    /// Row backgrounds of diff and conflict views, tinted over `background`.
+    pub rows: RowColors,
+}
+
+pub struct RowColors(pub [Hsla; Background::COUNT]);
+
+impl Index<Background> for RowColors {
+    type Output = Hsla;
+
+    fn index(&self, role: Background) -> &Hsla {
+        &self.0[role as usize]
+    }
 }
 
 pub struct ModeColors {
@@ -104,6 +116,10 @@ impl Theme {
                     colors[Base16::Base0E],
                 ],
             },
+            rows: RowColors(Background::ALL.map(|role| {
+                let tint = model::theme::background(role);
+                colors[tint.slot].opacity(tint.alpha as f32 / 100.0)
+            })),
             colors,
         }
     }

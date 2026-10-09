@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::regex::bytes::{Regex, RegexBuilder};
-use model::command::{Command, Cycle, PickerCommand, TreeCommand, WindowCommand};
+use model::command::{
+    Command, Cycle, HunkOp, HunkTarget, PickerCommand, TreeCommand, WindowCommand,
+};
 use model::window::{Axis, PickerKind, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
@@ -296,6 +298,11 @@ pub static PALETTE: &[(&str, Command)] = &[
         "global-search",
         Command::Picker(PickerCommand::Open(PickerKind::Grep)),
     ),
+    ("goto-next-change", Command::GotoHunk(HunkTarget::Next)),
+    ("goto-prev-change", Command::GotoHunk(HunkTarget::Previous)),
+    ("stage-hunk", Command::Hunk(HunkOp::Stage)),
+    ("unstage-hunk", Command::Hunk(HunkOp::Unstage)),
+    ("revert-hunk", Command::Hunk(HunkOp::Revert)),
     ("undo", Command::Undo),
     ("redo", Command::Redo),
 ];

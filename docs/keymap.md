@@ -12,6 +12,11 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
 | `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
 | `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
+| `]g` / `[g` | normal, select | Next / previous change; past the last / first change of the file it opens the next / previous changed file (conflicts, staged, then unstaged and untracked, by path; wrapping) and lands on its first / last change. Helix stops at the file's ends. |
+| `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
+| `space h s` | normal, select | Stage the changes touched by the selections (helix: none). |
+| `space h u` | normal, select | Unstage the staged changes under the selections. |
+| `space h r` | normal, select | Revert the changes under the selections to HEAD, as one undoable edit. |
 
 ## Typed commands (`:`)
 
@@ -143,6 +148,13 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `] T` | `GotoSyntaxObject(Test, Forward)` |
 | `] x` | `GotoSyntaxObject(XmlElement, Forward)` |
 | `] p` | `Move(NextParagraph)` |
+| `] g` | `GotoHunk(Next)` |
+| `[ g` | `GotoHunk(Previous)` |
+| `] G` | `GotoHunk(Last)` |
+| `[ G` | `GotoHunk(First)` |
+| `space h s` | `Hunk(Stage)` |
+| `space h u` | `Hunk(Unstage)` |
+| `space h r` | `Hunk(Revert)` |
 | `] space` | `AddNewline(Forward)` |
 | `/` | `RegexPrompt(Search(Forward))` |
 | `?` | `RegexPrompt(Search(Backward))` |
@@ -384,6 +396,13 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `] T` | `GotoSyntaxObject(Test, Forward)` |
 | `] x` | `GotoSyntaxObject(XmlElement, Forward)` |
 | `] p` | `Move(NextParagraph)` |
+| `] g` | `GotoHunk(Next)` |
+| `[ g` | `GotoHunk(Previous)` |
+| `] G` | `GotoHunk(Last)` |
+| `[ G` | `GotoHunk(First)` |
+| `space h s` | `Hunk(Stage)` |
+| `space h u` | `Hunk(Unstage)` |
+| `space h r` | `Hunk(Revert)` |
 | `] space` | `AddNewline(Forward)` |
 | `/` | `RegexPrompt(Search(Forward))` |
 | `?` | `RegexPrompt(Search(Backward))` |

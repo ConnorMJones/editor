@@ -1,5 +1,7 @@
 pub mod apply;
 pub mod buffer;
+pub mod changes;
+pub mod diff;
 pub mod display;
 pub mod edit;
 pub mod files;
@@ -145,6 +147,7 @@ impl State {
             git: Git {
                 repo: Repo::Unknown,
                 refresh: Refresh::Idle,
+                confirm: None,
             },
             matcher: nucleo::Matcher::default(),
             grep: Arc::new(AtomicU64::new(0)),
@@ -320,6 +323,8 @@ pub enum Focus {
 pub struct Git {
     pub repo: Repo,
     pub refresh: Refresh,
+    /// A destructive operation waiting for `Command::Confirm`.
+    pub confirm: Option<changes::Confirm>,
 }
 
 pub enum Repo {
@@ -328,6 +333,8 @@ pub enum Repo {
     None,
     Found {
         git_dir: PathBuf,
+        /// Canonical worktree root; buffer paths strip it to get repository paths.
+        workdir: PathBuf,
         snapshot: GitSnapshot,
     },
 }

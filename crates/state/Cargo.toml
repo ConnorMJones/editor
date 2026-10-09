@@ -15,6 +15,7 @@ git2.workspace = true
 helix-core.workspace = true
 helix-stdx.workspace = true
 ignore.workspace = true
+imara-diff.workspace = true
 model.workspace = true
 serde.workspace = true
 notify.workspace = true
@@ -44,4 +45,8 @@ harness = false
 
 [[bench]]
 name = "files"
+harness = false
+
+[[bench]]
+name = "diff"
 harness = false

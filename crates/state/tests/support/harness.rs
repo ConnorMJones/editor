@@ -152,7 +152,13 @@ impl Harness {
                 }
                 Effect::ReadClipboard { clipboard, then } => {
                     let text = self.clipboard[slot(clipboard)].clone();
-                    register::clipboard_contents(&mut self.state, clipboard, then, text);
+                    register::clipboard_contents(
+                        &mut self.state,
+                        clipboard,
+                        then,
+                        text,
+                        &mut self.effects,
+                    );
                 }
             }
         }

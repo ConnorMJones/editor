@@ -282,7 +282,13 @@ impl Workspace {
                             Clipboard::Primary => cx.read_from_primary(),
                         };
                         let text = item.and_then(|item| item.text());
-                        register::clipboard_contents(&mut self.state, clipboard, then, text);
+                        register::clipboard_contents(
+                            &mut self.state,
+                            clipboard,
+                            then,
+                            text,
+                            &mut self.effects,
+                        );
                     }
                 }
             }

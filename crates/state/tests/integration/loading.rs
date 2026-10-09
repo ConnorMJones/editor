@@ -6,7 +6,7 @@ use model::command::{Command, PickerCommand};
 use model::notice::Notice;
 use model::window::PickerKind;
 use state::apply::apply;
-use state::buffer::{Content, Disk, Jump, Position};
+use state::buffer::{Content, Disk, Jump, Position, Target};
 use state::job::{self, Job};
 use state::{Effect, State};
 
@@ -74,7 +74,9 @@ fn open_reads_and_parses_in_a_job() {
 
     finish(&mut h, held);
     match &h.state.buffers[id].content {
-        Content::Text { doc, disk, mtime } => {
+        Content::Text {
+            doc, disk, mtime, ..
+        } => {
             assert_eq!(doc.text, "fn a() {}\n");
             assert!(doc.syntax.is_some(), "parsed off the UI thread");
             assert_eq!(*disk, Disk::Synced);
@@ -180,7 +182,7 @@ fn grep_jump_waits_for_the_text() {
         },
         Some(Jump {
             pane: focus,
-            to: Position { line: 1, column: 4 },
+            to: Target::Position(Position { line: 1, column: 4 }),
         })
     );
     finish(&mut h, held);

@@ -1,7 +1,7 @@
 use model::command::{
-    Align, Case, Command, Cycle, Direction, Find, Inclusion, Join, Motion, ObjectScope, Paste,
-    Pending, PickerCommand, PromptCommand, PromptMotion, RegexOp, ScrollBy, SyntaxObject,
-    TreeCommand, WindowCommand, WordBounds, Yanking,
+    Align, Case, Command, Cycle, Direction, Find, HunkOp, HunkTarget, Inclusion, Join, Motion,
+    ObjectScope, Paste, Pending, PickerCommand, PromptCommand, PromptMotion, RegexOp, ScrollBy,
+    SyntaxObject, TreeCommand, WindowCommand, WordBounds, Yanking,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -332,6 +332,34 @@ const COMMON: Bindings = &[
     (
         &[Key::char(']'), Key::char('p')],
         Command::Move(Motion::NextParagraph),
+    ),
+    (
+        &[Key::char(']'), Key::char('g')],
+        Command::GotoHunk(HunkTarget::Next),
+    ),
+    (
+        &[Key::char('['), Key::char('g')],
+        Command::GotoHunk(HunkTarget::Previous),
+    ),
+    (
+        &[Key::char(']'), Key::char('G')],
+        Command::GotoHunk(HunkTarget::Last),
+    ),
+    (
+        &[Key::char('['), Key::char('G')],
+        Command::GotoHunk(HunkTarget::First),
+    ),
+    (
+        &[Key::char(' '), Key::char('h'), Key::char('s')],
+        Command::Hunk(HunkOp::Stage),
+    ),
+    (
+        &[Key::char(' '), Key::char('h'), Key::char('u')],
+        Command::Hunk(HunkOp::Unstage),
+    ),
+    (
+        &[Key::char(' '), Key::char('h'), Key::char('r')],
+        Command::Hunk(HunkOp::Revert),
     ),
     (
         &[Key::char(']'), Key::char(' ')],
@@ -970,6 +998,11 @@ const CUSTOM: &str = "\
 | `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
 | `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
 | `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
+| `]g` / `[g` | normal, select | Next / previous change; past the last / first change of the file it opens the next / previous changed file (conflicts, staged, then unstaged and untracked, by path; wrapping) and lands on its first / last change. Helix stops at the file's ends. |
+| `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
+| `space h s` | normal, select | Stage the changes touched by the selections (helix: none). |
+| `space h u` | normal, select | Unstage the staged changes under the selections. |
+| `space h r` | normal, select | Revert the changes under the selections to HEAD, as one undoable edit. |
 ";
 
 /// Markdown listing of every binding, generated from the tables; `docs/keymap.md` holds a copy.

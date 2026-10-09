@@ -95,6 +95,28 @@ pub enum Notice {
         path: PathBuf,
         reason: String,
     },
+
+    // Git: hunks, staging and changed-file navigation.
+    /// The buffer is outside a repository or not tracked.
+    NotTracked {
+        path: PathBuf,
+    },
+    /// The buffer changed since its diff; the command can run once the diff catches up.
+    DiffPending,
+    NoHunks,
+    NoChangedFiles,
+    Unchanged {
+        path: PathBuf,
+    },
+    /// The index entry moved since the diff was computed.
+    IndexChanged {
+        path: PathBuf,
+    },
+    GitFailed {
+        path: PathBuf,
+        error: String,
+    },
+    DiscardNotConfirmed,
 }
 
 /// Mirrors `helix_core::surround::Error`.
@@ -178,6 +200,22 @@ impl std::fmt::Display for Notice {
             Notice::SessionInvalid { path, reason } => {
                 write!(f, "ignored session {}: {reason}", path.display())
             }
+            Notice::NotTracked { path } => {
+                write!(f, "{} is not tracked by git", path.display())
+            }
+            Notice::DiffPending => f.write_str("diff is still updating; try again"),
+            Notice::NoHunks => f.write_str("no change under the selection"),
+            Notice::NoChangedFiles => f.write_str("no changed files"),
+            Notice::Unchanged { path } => write!(f, "{} has no changes", path.display()),
+            Notice::IndexChanged { path } => {
+                write!(
+                    f,
+                    "index of {} changed meanwhile; try again",
+                    path.display()
+                )
+            }
+            Notice::GitFailed { path, error } => write!(f, "git: {}: {error}", path.display()),
+            Notice::DiscardNotConfirmed => f.write_str("discard cancelled"),
         }
     }
 }

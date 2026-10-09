@@ -9,17 +9,19 @@ use gpui::{
     ScrollWheelEvent, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle,
     Window, fill, point, px, relative, size,
 };
+use helix_core::text_annotations::TextAnnotations;
 use model::mode::Mode;
 use model::theme::{self as roles, Modifiers};
 use slotmap::Key as _;
 use state::buffer::Content;
+use state::diff::{self, Bases, Diff, Stage};
 use state::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
 use state::layout::{Pane, PaneId, View, Viewport};
 use state::scroll::{self, Gesture, Press, Scrollbar, Unit};
 
-use crate::theme::{Colors, Theme};
+use crate::theme::{Colors, RowColors, Theme};
 use crate::workspace::Workspace;
 
 /// Right-edge strip for the scrollbar; a minimap would widen the strip and sit left of the bar.
@@ -48,6 +50,8 @@ pub struct Cache {
     pub lines: [Vec<Rc<ShapedLine>>; 2],
     pub numbers: [Vec<Number>; 2],
     pub runs: Vec<TextRun>,
+    /// Gutter git sign of each row of `frames[0]`.
+    pub signs: Vec<Option<(DiffSign, Stage)>>,
     pub label: String,
     pub pointer: Rc<Pointer>,
 }
@@ -245,6 +249,8 @@ impl Element for TextElement {
                         view.scroll,
                         &state.languages,
                         focus,
+                        &TextAnnotations::default(),
+                        &[],
                     ),
                     Content::Loading { .. } => {
                         frame.rows.clear();
@@ -368,10 +374,37 @@ impl Element for TextElement {
                             line,
                         });
                     }
-                    RowKind::Wrapped => {}
+                    RowKind::Wrapped | RowKind::Virtual(_) => {}
                 }
             }
             drop(span);
+
+            let tracked = match state.layout.panes.get(pane).and_then(Pane::active) {
+                Some(View::Text(view)) => match &state.buffers[view.buffer()].content {
+                    Content::Text {
+                        diff:
+                            Diff {
+                                bases: Bases::Tracked(tracked),
+                                ..
+                            },
+                        ..
+                    } => Some(tracked),
+                    Content::Text { .. } | Content::Loading { .. } => None,
+                },
+                None => None,
+            };
+            cache.signs.clear();
+            cache.signs.extend(frame.rows.iter().map(|row| {
+                match (
+                    tracked.and_then(|tracked| diff::sign_at(tracked, row.line)),
+                    row.kind,
+                ) {
+                    (Some((DiffSign::Removed, _)), RowKind::Wrapped)
+                    | (_, RowKind::Virtual(_))
+                    | (None, _) => None,
+                    (Some(sign), RowKind::First | RowKind::Wrapped) => Some(sign),
+                }
+            }));
 
             let visible = match (frame.rows.first(), frame.rows.last()) {
                 (Some(first), Some(last)) => first.line..last.line + 1,
@@ -454,10 +487,9 @@ impl Element for TextElement {
             bar,
         } = prepaint;
         let (origin, cell, gutter, focus) = (*text_origin, *cell, *gutter, *focus);
-        let colors = Colors(self.workspace.read(cx).theme.colors.0);
+        let theme = &self.workspace.read(cx).theme;
+        let (colors, rows) = (Colors(theme.colors.0), RowColors(theme.rows.0));
         let pane = self.pane;
-        // Git status is not tracked yet; signs are indexed by document line.
-        let diff: &[DiffSign] = &[];
         let id = id.expect("text element has an id");
         let pointer = window.with_element_state(id, |cache: Option<Cache>, window| {
             let cache = cache.unwrap_or_default();
@@ -469,19 +501,31 @@ impl Element for TextElement {
             match focus {
                 Focus::Focused(_) => {
                     for (index, row) in frame.rows.iter().enumerate() {
-                        match row.line == frame.primary_line {
-                            true => window.paint_quad(fill(
+                        match (row.line == frame.primary_line, row.kind) {
+                            (_, RowKind::Virtual(_)) | (false, _) => {}
+                            (true, RowKind::First | RowKind::Wrapped) => window.paint_quad(fill(
                                 Bounds::new(
                                     point(origin.x, y(index as u16)),
                                     size(text_width, cell.height),
                                 ),
                                 colors[roles::CURSORLINE],
                             )),
-                            false => {}
                         }
                     }
                 }
                 Focus::Unfocused => {}
+            }
+            for (index, row) in frame.rows.iter().enumerate() {
+                match row.background {
+                    Some(role) => window.paint_quad(fill(
+                        Bounds::new(
+                            point(origin.x, y(index as u16)),
+                            size(text_width, cell.height),
+                        ),
+                        rows[role],
+                    )),
+                    None => {}
+                }
             }
             for span in &frame.selections {
                 window.paint_quad(fill(
@@ -548,21 +592,23 @@ impl Element for TextElement {
                 );
             }
             let diff_x = bounds.origin.x + cell.width * (gutter.cols - 1) as f32;
-            for (index, row) in frame.rows.iter().enumerate() {
+            for (index, sign) in cache.signs.iter().enumerate() {
                 let top = y(index as u16);
-                let sign = match diff.get(row.line).copied().unwrap_or_default() {
-                    DiffSign::Unchanged => None,
-                    DiffSign::Added => Some((roles::DIFF_PLUS, size(cell.width / 4., cell.height))),
-                    DiffSign::Modified => {
-                        Some((roles::DIFF_DELTA, size(cell.width / 4., cell.height)))
-                    }
-                    DiffSign::Removed => Some((roles::DIFF_MINUS, size(cell.width, px(2.)))),
+                let (sign, stage) = match sign {
+                    Some(sign) => *sign,
+                    None => continue,
                 };
-                match sign {
-                    Some((slot, extent)) => window
-                        .paint_quad(fill(Bounds::new(point(diff_x, top), extent), colors[slot])),
-                    None => {}
-                }
+                let (slot, extent) = match sign {
+                    DiffSign::Added => (roles::DIFF_PLUS, size(cell.width / 4., cell.height)),
+                    DiffSign::Modified => (roles::DIFF_DELTA, size(cell.width / 4., cell.height)),
+                    DiffSign::Removed => (roles::DIFF_MINUS, size(cell.width, px(2.))),
+                };
+                // Staged changes are dimmed; partly staged ones still need attention.
+                let color = match stage {
+                    Stage::Staged => colors[slot].opacity(roles::STAGED_SIGN_ALPHA as f32 / 100.),
+                    Stage::Unstaged | Stage::Partial => colors[slot],
+                };
+                window.paint_quad(fill(Bounds::new(point(diff_x, top), extent), color));
             }
 
             let track = bar.hitbox.bounds;

@@ -1,4 +1,5 @@
 mod commands;
+mod diff;
 mod display;
 #[path = "../support/harness.rs"]
 mod harness;

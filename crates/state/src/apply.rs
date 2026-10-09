@@ -20,15 +20,16 @@ use model::register::Register;
 use slotmap::SlotMap;
 
 use crate::buffer::{
-    Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, TextDoc, Uncommitted,
+    Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, Target, TextDoc, Uncommitted,
 };
+use crate::diff::Landing;
 use crate::job::{Job, ReloadPolicy};
 use crate::layout::{Layout, Pane, Tabs, TextView, View};
 use crate::prompt::{Candidate, Chosen};
 use crate::register::{self, ClipboardUse, Values};
 use crate::{
-    Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky, edit, input,
-    motion, prompt, select, workspace,
+    Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky, changes,
+    edit, input, motion, prompt, select, workspace,
 };
 
 pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
@@ -779,6 +780,11 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::CycleBuffer(cycle) => workspace::cycle_tab(state, cycle),
         Command::Tree(command) => workspace::tree(state, command, out),
         Command::Picker(command) => workspace::picker(state, command, out),
+
+        Command::GotoHunk(target) => changes::goto_hunk(state, target, out),
+        Command::Hunk(op) => changes::hunk_op(state, op, out),
+        Command::File(op) => changes::file_op(state, op, out),
+        Command::Confirm(answer) => changes::confirm(state, answer, out),
     }
 }
 
@@ -1171,11 +1177,12 @@ pub(crate) fn load(state: &mut State, path: PathBuf, out: &mut Vec<Effect>) -> O
     }
 }
 
-/// Shows `path` in the focused pane; `to` places the cursor, once the text arrives if need be.
+/// Shows `path` in the focused pane; `to` places the cursor, once the text or diff arrives if
+/// need be.
 pub(crate) fn open(
     state: &mut State,
     path: PathBuf,
-    to: Option<Position>,
+    to: Option<Target>,
     open: OpenAs,
     out: &mut Vec<Effect>,
 ) {
@@ -1190,12 +1197,18 @@ pub(crate) fn open(
     match (
         &mut state.buffers[id].content,
         state.layout.panes.get_mut(focus).and_then(Pane::active_mut),
+        to,
     ) {
-        (Content::Loading { jump }, _) => *jump = Some(Jump { pane: focus, to }),
-        (Content::Text { doc, .. }, Some(View::Text(view))) if view.buffer() == id => {
+        (Content::Loading { jump }, _, to) => *jump = Some(Jump { pane: focus, to }),
+        (Content::Text { .. }, _, Target::Hunk(edge)) => {
+            changes::expect_landing(state, id, Landing { pane: focus, edge })
+        }
+        (Content::Text { doc, .. }, Some(View::Text(view)), Target::Position(to))
+            if view.buffer() == id =>
+        {
             view.selection = Selection::point(line_column(&doc.text, to));
         }
-        (Content::Text { .. }, Some(_) | None) => {}
+        (Content::Text { .. }, Some(_) | None, Target::Position(_)) => {}
     }
 }
 
