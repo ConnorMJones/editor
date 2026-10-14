@@ -163,7 +163,9 @@ fn previews_load_in_jobs_and_are_cached() {
                     Effect::Quit
                     | Effect::Watch(_)
                     | Effect::WriteClipboard { .. }
-                    | Effect::ReadClipboard { .. } => {}
+                    | Effect::ReadClipboard { .. }
+                    | Effect::OpenUrl(_)
+                    | Effect::Typeset(_) => {}
                 }
             }
         });

@@ -22,6 +22,11 @@ pub struct Theme {
     pub cell: Size<Pixels>,
     pub ui: Font,
     pub ui_size: Pixels,
+    /// Rendered markdown prose per `Modifiers` bold/italic combination, in the UI family.
+    pub prose: [Font; 4],
+    pub prose_size: Pixels,
+    /// Distance from a prose line's baseline to its bottom, at `prose_size` and `PROSE_LINE`.
+    pub prose_depth: Pixels,
     pub chrome: Chrome,
     /// Row backgrounds of diff and conflict views, tinted over `background`.
     pub rows: RowColors,
@@ -74,7 +79,15 @@ fn hsla(c: Rgb) -> Hsla {
 }
 
 impl Theme {
-    pub fn new(palette: &Palette, config: &Config, cell: Size<Pixels>) -> Theme {
+    /// `prose_extent` is the UI font's ascent and descent at 1px.
+    pub fn new(
+        palette: &Palette,
+        config: &Config,
+        cell: Size<Pixels>,
+        prose_extent: [f32; 2],
+    ) -> Theme {
+        let prose_size = prose_size(config);
+        let [ascent, descent] = prose_extent.map(|extent| extent * prose_size);
         let colors = Colors(palette.0.map(hsla));
         let diff = &config.theme.diff;
         let tones = Tone::ALL.map(|tone| {
@@ -112,6 +125,18 @@ impl Theme {
             cell,
             ui: font(config.font.ui.family.clone()),
             ui_size: px(config.font.ui.size_px),
+            prose: {
+                let ui = font(config.font.ui.family.clone());
+                [
+                    ui.clone(),
+                    ui.clone().bold(),
+                    ui.clone().italic(),
+                    ui.bold().italic(),
+                ]
+            },
+            prose_size: px(prose_size),
+            // GPUI centres the glyph box in the line.
+            prose_depth: px((prose_size * PROSE_LINE - ascent - descent) / 2.0 + descent),
             chrome: Chrome {
                 border: colors[Base16::Base02],
                 selection: colors[Base16::Base02],
@@ -146,6 +171,14 @@ impl Theme {
     pub fn mono_font(&self, modifiers: Modifiers) -> &Font {
         &self.mono[(modifiers & (Modifiers::BOLD | Modifiers::ITALIC)).bits() as usize]
     }
+}
+
+/// Line height of rendered prose, relative to its size.
+pub const PROSE_LINE: f32 = 1.5;
+
+/// Rendered prose size in pixels; Obsidian reads at 16px beside a 14px interface.
+pub fn prose_size(config: &Config) -> f32 {
+    config.font.ui.size_px * 8.0 / 7.0
 }
 
 // Workspace chrome colours: title bar, tab line, tree, pickers.

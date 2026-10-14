@@ -10,13 +10,14 @@ use model::register::Register;
 
 use crate::apply::{apply, commit_focused};
 use crate::keymap::{Context, Resolved};
+use crate::layout::{Pane, View};
 use crate::tree::TreeEdit;
-use crate::{Effect, Focus, Overlay, Sidebar, State, Sticky, changes, scroll};
+use crate::{Effect, Focus, Overlay, Sidebar, State, Sticky, scroll};
 
 pub fn context(state: &State) -> Context {
     match (
         &state.overlay,
-        &state.git.confirm,
+        &state.confirm,
         state.sidebar,
         &state.tree.edit,
         state.input.mode,
@@ -34,11 +35,21 @@ pub fn context(state: &State) -> Context {
         ) => Context::TreeInput,
         (Overlay::None, None, Sidebar::Changes(Focus::Sidebar), ..) => Context::Changes,
         (Overlay::None, None, Sidebar::Hidden | Sidebar::Files(Focus::Editor), _, mode)
-        | (Overlay::None, None, Sidebar::Changes(Focus::Editor), _, mode) => match mode {
-            Mode::Normal => Context::Normal,
-            Mode::Insert => Context::Insert,
-            Mode::Select => Context::Select,
-        },
+        | (Overlay::None, None, Sidebar::Changes(Focus::Editor), _, mode) => {
+            match (
+                state
+                    .layout
+                    .panes
+                    .get(state.layout.focus)
+                    .and_then(Pane::active),
+                mode,
+            ) {
+                (Some(View::Rendered(_)), _) => Context::Rendered,
+                (Some(View::Text(_) | View::Diff(_)) | None, Mode::Normal) => Context::Normal,
+                (Some(View::Text(_) | View::Diff(_)) | None, Mode::Insert) => Context::Insert,
+                (Some(View::Text(_) | View::Diff(_)) | None, Mode::Select) => Context::Select,
+            }
+        }
     }
 }
 
@@ -102,7 +113,8 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::TreeInput
             | Context::Picker
             | Context::Changes
-            | Context::Confirm),
+            | Context::Confirm
+            | Context::Rendered),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -115,7 +127,6 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
     }
     let focus = state.layout.focus;
     scroll::follow_cursor(state, focus);
-    changes::sync(state, out);
 }
 
 /// Handles one insert-mode key without recording it; `.` replays through here.
@@ -288,7 +299,6 @@ pub fn text(state: &mut State, text: &str, out: &mut Vec<Effect>) {
     }
     let focus = state.layout.focus;
     scroll::follow_cursor(state, focus);
-    changes::sync(state, out);
 }
 
 /// The command inserting `c` in contexts that take typed text.
@@ -298,8 +308,11 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         Context::Prompt => Some(Command::PromptInsert(c)),
         Context::Picker => Some(Command::Picker(PickerCommand::Insert(c))),
         Context::TreeInput => Some(Command::Tree(TreeCommand::EditInsert(c))),
-        Context::Normal | Context::Select | Context::Tree | Context::Changes | Context::Confirm => {
-            None
-        }
+        Context::Normal
+        | Context::Select
+        | Context::Tree
+        | Context::Changes
+        | Context::Confirm
+        | Context::Rendered => None,
     }
 }

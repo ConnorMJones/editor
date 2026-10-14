@@ -221,7 +221,7 @@ impl Element for TextElement {
                 left: Left::Head { doc, .. },
                 ..
             })) => len_lines.max(doc.text.len_lines()),
-            Some(View::Diff(_) | View::Text(_)) | None => len_lines,
+            Some(View::Diff(_) | View::Text(_) | View::Rendered(_)) | None => len_lines,
         };
         let gutter = Gutter::new(gutter_lines);
         let text_origin = point(
@@ -334,6 +334,7 @@ impl Element for TextElement {
                 },
                 (Part::Text, Some(View::Diff(_)))
                 | (Part::Head | Part::Buffer, Some(View::Text(_)))
+                | (_, Some(View::Rendered(_)))
                 | (_, None) => display::blank(frame, 0),
             }
 

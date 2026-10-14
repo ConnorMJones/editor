@@ -50,13 +50,13 @@ fn restores_tabs_splits_selections_and_tree() {
 }
 
 #[test]
-fn deleted_files_leave_empty_panes() {
+fn deleted_files_close_their_panes() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("keep.txt"), "k").unwrap();
     fs::write(dir.path().join("gone.txt"), "g").unwrap();
 
     let mut before = Harness::new(dir.path());
-    before.keys(":o keep.txt<ret><C-w>v:o gone.txt<ret>gp:bc<ret>");
+    before.keys(":o keep.txt<ret><C-w>v:o gone.txt<ret>");
     assert_eq!(before.focused_tabs(), ["gone.txt"]);
     let saved = session::snapshot(&before.state);
     fs::remove_file(dir.path().join("gone.txt")).unwrap();
@@ -66,9 +66,12 @@ fn deleted_files_leave_empty_panes() {
         .run(|state, out| session::restore(state, saved, out))
         .expect("valid session");
     assert_eq!(after.state.buffers.len(), 1);
-    let leaves = after.state.layout.leaves();
-    assert_eq!(after.tabs(leaves[0]), ["keep.txt"]);
-    assert!(after.state.layout.panes[leaves[1]].tabs.is_none());
+    assert_eq!(
+        after.state.layout.leaves().len(),
+        1,
+        "the emptied pane closes"
+    );
+    assert_eq!(after.focused_tabs(), ["keep.txt"]);
 }
 
 #[test]

@@ -1,0 +1,30 @@
+[package]
+name = "typeset"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+merman.workspace = true
+mitex.workspace = true
+model.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+typst.workspace = true
+typst-kit.workspace = true
+typst-layout.workspace = true
+typst-pdf.workspace = true
+typst-svg.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+usvg.workspace = true
+
+[[bench]]
+name = "typeset"
+harness = false

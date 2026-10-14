@@ -4,7 +4,8 @@ use helix_core::Selection;
 use model::command::ChangesCommand;
 use model::git::Group;
 use model::notice::Notice;
-use state::changes::{self, Confirm, Discard, ListCursor, ListRow};
+use state::Confirm;
+use state::changes::{self, Discard, ListCursor, ListRow};
 use state::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
 use state::input;
 use state::keymap::Context;
@@ -22,7 +23,7 @@ const FIVE: &str = "a\nb\nc\nd\ne\n";
 fn diff(h: &Harness) -> &DiffView {
     match h.state.layout.panes[h.state.layout.focus].active() {
         Some(View::Diff(diff)) => diff,
-        Some(View::Text(_)) => panic!("focused tab is a text view"),
+        Some(View::Text(_) | View::Rendered(_)) => panic!("focused tab is not a diff"),
         None => panic!("focused pane has no tab"),
     }
 }
@@ -258,7 +259,7 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
     // Discarding asks first; `n` keeps the file, `y` deletes the untracked file.
     h.keys("jd");
     assert!(matches!(
-        h.state.git.confirm,
+        h.state.confirm,
         Some(Confirm::Discard {
             how: Discard::Delete(_),
             ..

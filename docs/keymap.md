@@ -31,7 +31,7 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `d` | changes | Discard the file's changes (asks `y` / `n`; untracked files are deleted). |
 | `esc` | changes | Back to the editor. |
 | mouse | changes | Click a file to open its diff, double-click to keep the tab, click a header to collapse it. Hover a row for `+` stage, `−` unstage and `↶` discard. |
-| `y` / `n` / `esc` | confirm | Answer a pending discard. |
+| `y` / `n` / `esc` | confirm | Answer a pending discard (or note creation, below). |
 | `space d` | normal, select | Toggle the tab between the file and its side-by-side diff (helix: diagnostics picker). The right side is the live buffer and takes every key. |
 | `]g` / `[g` | normal, select | Next / previous change; past the file's last / first change, continue into the next / previous changed file (its diff when in a diff; conflicted files open as text). Helix stops at the file's ends. |
 | `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
@@ -42,6 +42,51 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `space m o` / `space m t` | normal, select | Resolve the conflicts touched by the selections with ours (HEAD) / theirs (incoming), as one undoable edit. Also `:conflict-ours` / `:conflict-theirs`. |
 | `space m b` | normal, select | Resolve with both sides, ours then theirs. Also `:conflict-both`. |
 | `space m r` | normal, select | Resolve with the base section of a diff3 conflict. Also `:conflict-base`. |
+
+## Markdown and typst
+
+`.md` and `.typ` files have a rendered view: an Obsidian-like reading view of headings, lists,
+task checkboxes, callouts (`> [!note]`, folded with `[!tip]-`, foldable with `[!tip]+`),
+highlighted code, tables, images, wikilinks, math and mermaid. LaTeX math (`$inline$`,
+`$$display$$`, ```` ```math ````) and ```` ```mermaid ```` diagrams are typeset in the
+background in the theme's colours; until then, or when they fail, a muted box shows the source
+(and the error). Inline math sits on the text baseline; its paragraph wraps between words.
+Typst files show their pages, recompiled on every edit (imports and images resolve from the
+project root). Errors show in a strip above the pages with the first error's
+`file:line:col` and a count, and in the status line when they appear; the last good pages stay,
+dimmed. Clicking the strip puts the text cursor on the error.
+
+| Keys | Context | Action |
+| --- | --- | --- |
+| `space v` | normal, select, rendered | Open a rendered view of the file in a split to the right that follows the text pane; again (from either side) closes it. Focus stays in the text. |
+| `space V` | normal, select, rendered | Toggle the tab between the file's text and its rendered view in place, keeping the position. |
+| `j` / `k`, down / up | rendered | Scroll a little. |
+| `C-d` / `C-u` | rendered | Scroll half a page. |
+| `C-f` / `C-b`, pagedown / pageup, `space space` | rendered | Scroll a page. |
+| `gg` / `ge` / `G`, home / end | rendered | Top / bottom. |
+| `]]` / `[[` | rendered | Next / previous top-level heading. |
+| `esc` | rendered | Back to the text pane it follows; a standalone view toggles back to text. |
+| `f` | rendered | Typst preview: fit pages to the pane width, or each page whole. |
+| `:export-pdf` | typst file | Compile the focused typst file to `<file>.pdf` beside it (also in the `space ?` palette). Markdown export is not supported yet. |
+| mouse | rendered | Wheel scrolls. Click a block to put the text cursor on its first line (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
+| `gf` | normal, select | Follow the link under the cursor: a wikilink, a markdown link or a URL in a markdown file; elsewhere the URL or file path under the cursor (or the selected text), relative to the file's folder, then the root, as in helix. |
+| `space l` | normal, select, rendered | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
+| `y` / `n` / `esc` | confirm | Create the note an unresolved link names, or not. |
+
+A following view scrolls to the block under the text cursor, or under the text's top line
+when it scrolls; scrolling the rendered view scrolls the text (not its cursor).
+
+Links resolve the way Obsidian does, with the project root as the vault. `[[name]]` names
+`name.md`, or a file named exactly `name` (`[[photo.png]]`), anywhere in the vault, ignoring
+case; `[[folder/name]]` matches a path ending in it. When several files match, an exact-case
+match wins, then the shallowest path, then one in the note's folder. Markdown links
+(`[text](path.md)`) resolve against the note's folder, then the root, then by name.
+`#heading` puts the cursor (or the rendered view) on that heading; `#^block` just opens the
+note; `|alias` changes only the text shown. Links are followed into a rendered view when
+followed from one, else into the text. Unresolved links render dimmed and in italics;
+following one asks `create <path>? y/n` and creates an empty note next to the linking note
+(or at the vault path the link names). `![[image.png]]` embeds images from anywhere in the
+vault; `![[note]]` shows a box naming the resolved note that opens it when clicked.
 
 ## Typed commands (`:`)
 
@@ -72,6 +117,7 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `:conflict-theirs` |
 | `:conflict-both` |
 | `:conflict-base` |
+| `:export-pdf` |
 
 ## Normal
 
@@ -113,6 +159,7 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `g k` | `Move(LineUp)` |
 | `g j` | `Move(LineDown)` |
 | `g .` | `Move(LastModification)` |
+| `g f` | `GotoFile` |
 | `g left` | `Move(LineStart)` |
 | `g right` | `Move(LineEnd)` |
 | `g up` | `Move(FileStart)` |
@@ -297,6 +344,9 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `space m t` | `Resolve(Theirs)` |
 | `space m b` | `Resolve(Both)` |
 | `space m r` | `Resolve(Base)` |
+| `space v` | `RenderedSplit` |
+| `space V` | `ToggleRendered` |
+| `space l` | `Picker(Open(Backlinks))` |
 
 ## Insert
 
@@ -369,6 +419,7 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `g k` | `Move(LineUp)` |
 | `g j` | `Move(LineDown)` |
 | `g .` | `Move(LastModification)` |
+| `g f` | `GotoFile` |
 | `g left` | `Move(LineStart)` |
 | `g right` | `Move(LineEnd)` |
 | `g up` | `Move(FileStart)` |
@@ -553,6 +604,9 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `space m t` | `Resolve(Theirs)` |
 | `space m b` | `Resolve(Both)` |
 | `space m r` | `Resolve(Base)` |
+| `space v` | `RenderedSplit` |
+| `space V` | `ToggleRendered` |
+| `space l` | `Picker(Open(Backlinks))` |
 
 ## Prompt
 
@@ -729,3 +783,67 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `n` | `Confirm(No)` |
 | `esc` | `Confirm(No)` |
 | `C-c` | `Confirm(No)` |
+
+## Rendered
+
+| Keys | Command |
+| --- | --- |
+| `j` | `Rendered(Scroll(Forward, Lines))` |
+| `down` | `Rendered(Scroll(Forward, Lines))` |
+| `k` | `Rendered(Scroll(Backward, Lines))` |
+| `up` | `Rendered(Scroll(Backward, Lines))` |
+| `C-d` | `Rendered(Scroll(Forward, HalfPageCursor))` |
+| `C-u` | `Rendered(Scroll(Backward, HalfPageCursor))` |
+| `C-f` | `Rendered(Scroll(Forward, Page))` |
+| `pagedown` | `Rendered(Scroll(Forward, Page))` |
+| `space space` | `Rendered(Scroll(Forward, Page))` |
+| `C-b` | `Rendered(Scroll(Backward, Page))` |
+| `pageup` | `Rendered(Scroll(Backward, Page))` |
+| `g g` | `Rendered(Top)` |
+| `home` | `Rendered(Top)` |
+| `g e` | `Rendered(Bottom)` |
+| `G` | `Rendered(Bottom)` |
+| `end` | `Rendered(Bottom)` |
+| `] ]` | `Rendered(Heading(Forward))` |
+| `[ [` | `Rendered(Heading(Backward))` |
+| `esc` | `Rendered(Leave)` |
+| `f` | `Rendered(Fit)` |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `space v` | `RenderedSplit` |
+| `space V` | `ToggleRendered` |
+| `space l` | `Picker(Open(Backlinks))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |

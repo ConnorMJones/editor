@@ -537,7 +537,7 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
                             None
                         }
                     },
-                    View::Diff(_) | View::Text(_) => None,
+                    View::Diff(_) | View::Text(_) | View::Rendered(_) => None,
                 });
             Some(match shared {
                 Some(left) => left,
@@ -562,7 +562,7 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
             diff.left = left;
             diff.align = Align::default();
         }
-        (Some(_), Some(View::Text(_)) | None) | (None, _) => {}
+        (Some(_), Some(View::Text(_) | View::Rendered(_)) | None) | (None, _) => {}
     }
     sync_left(state, pane);
 }
@@ -592,7 +592,7 @@ pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) 
                     }
                     Left::Pending | Left::Absent | Left::Parsing { .. } | Left::Head { .. } => {}
                 },
-                View::Diff(_) | View::Text(_) => {}
+                View::Diff(_) | View::Text(_) | View::Rendered(_) => {}
             }
         }
     }
@@ -605,7 +605,7 @@ pub fn prepare(state: &mut State, pane: PaneId, viewport: Viewport, out: &mut Ve
             diff.text.scroll.viewport = viewport;
             scroll::follow_cursor(state, pane);
         }
-        Some(View::Diff(_) | View::Text(_)) | None => {}
+        Some(View::Diff(_) | View::Text(_) | View::Rendered(_)) | None => {}
     }
     refresh_pane(state, pane, out);
 }

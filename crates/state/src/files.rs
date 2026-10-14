@@ -94,24 +94,42 @@ pub fn rescan(root: &Path, paths: &[RelPath]) -> Rescan {
     rescan
 }
 
-pub fn apply_rescan(files: &mut Vec<RelPath>, rescan: Rescan) {
-    files.retain(|file| {
-        !rescan
-            .removed
-            .iter()
-            .any(|gone| file.is_within(gone.as_str()))
-            && !rescan
-                .relisted
+/// Whether a rescan changed the set of indexed files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Changed {
+    Yes,
+    No,
+}
+
+pub fn apply_rescan(files: &mut Vec<RelPath>, rescan: Rescan) -> Changed {
+    let dropped: Vec<RelPath> = files
+        .extract_if(.., |file| {
+            rescan
+                .removed
                 .iter()
-                .any(|(dir, _)| file.parent() == Some(dir.as_str()))
-            && !rescan
-                .subtrees
-                .iter()
-                .any(|(dir, _)| file.is_within(dir.as_str()))
-    });
+                .any(|gone| file.is_within(gone.as_str()))
+                || rescan
+                    .relisted
+                    .iter()
+                    .any(|(dir, _)| file.parent() == Some(dir.as_str()))
+                || rescan
+                    .subtrees
+                    .iter()
+                    .any(|(dir, _)| file.is_within(dir.as_str()))
+        })
+        .collect();
+    let mut added: Vec<RelPath> = Vec::new();
     for (_, walked) in rescan.relisted.into_iter().chain(rescan.subtrees) {
-        files.extend(walked.files);
+        added.extend(walked.files);
     }
+    added.sort_unstable();
+    added.dedup();
+    let changed = match dropped == added {
+        true => Changed::No,
+        false => Changed::Yes,
+    };
+    files.extend(added);
     files.sort_unstable();
     files.dedup();
+    changed
 }

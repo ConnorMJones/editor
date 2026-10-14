@@ -8,7 +8,9 @@ publish.workspace = true
 workspace = true
 
 [features]
-integration = []
+# Runs typeset requests in-process, for hosts and headless tests.
+typeset = ["dep:typeset"]
+integration = ["typeset"]
 
 [dependencies]
 git2.workspace = true
@@ -20,11 +22,13 @@ model.workspace = true
 serde.workspace = true
 notify.workspace = true
 nucleo.workspace = true
+pulldown-cmark.workspace = true
 ropey.workspace = true
 slotmap.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
+typeset = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -54,3 +58,16 @@ harness = false
 [[bench]]
 name = "diffview"
 harness = false
+
+[[bench]]
+name = "markdown"
+harness = false
+
+[[bench]]
+name = "backlinks"
+harness = false
+
+[[bench]]
+name = "figures"
+harness = false
+required-features = ["typeset"]

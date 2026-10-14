@@ -4,9 +4,10 @@ use git2::{IndexAddOption, Repository, Signature};
 use helix_core::Selection;
 use model::command::{Answer, Command, FileOp};
 use model::notice::Notice;
+use state::Confirm;
 use state::apply::apply;
 use state::buffer::Content;
-use state::changes::{Confirm, Discard};
+use state::changes::Discard;
 use state::diff::{Bases, Diff, Hunk, Stage, Tracked, stage};
 
 use crate::harness::Harness;
@@ -201,7 +202,7 @@ fn stage_unstage_and_discard_files() {
     // Discarding waits for confirmation and restores the index copy.
     run(&mut h, Command::File(FileOp::Discard("a.txt".into())));
     assert!(matches!(
-        &h.state.git.confirm,
+        &h.state.confirm,
         Some(Confirm::Discard {
             how: Discard::Checkout,
             ..
@@ -223,7 +224,7 @@ fn stage_unstage_and_discard_files() {
     // An untracked file is deleted.
     run(&mut h, Command::File(FileOp::Discard("new.txt".into())));
     assert!(matches!(
-        &h.state.git.confirm,
+        &h.state.confirm,
         Some(Confirm::Discard {
             how: Discard::Delete(_),
             ..
@@ -231,7 +232,7 @@ fn stage_unstage_and_discard_files() {
     ));
     run(&mut h, Command::Confirm(Answer::Yes));
     assert!(!dir.path().join("new.txt").exists());
-    assert_eq!(h.state.git.confirm, None);
+    assert_eq!(h.state.confirm, None);
 
     run(&mut h, Command::File(FileOp::Discard("a.txt".into())));
     assert!(matches!(h.state.notice, Some(Notice::Unchanged { .. })));

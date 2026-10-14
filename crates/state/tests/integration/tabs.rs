@@ -114,7 +114,7 @@ fn modified_previews_are_kept_and_never_replaced() {
     // A modified buffer opened from the tree in another pane opens permanently.
     h.keys("<C-w>v");
     tree_click(&mut h, "a.txt", Click::Single);
-    assert_eq!(h.focused_tabs(), ["b.txt", "a.txt"]);
+    assert_eq!(h.focused_tabs(), ["a.txt"], "it replaces the split's copy");
 }
 
 #[test]
@@ -130,12 +130,13 @@ fn edits_from_another_pane_keep_the_preview() {
 
 #[test]
 fn undo_counts_as_an_edit() {
-    let (_dir, mut h) = files(&["a.txt"]);
-    h.keys(":o a.txt<ret>ix<esc>:w<ret><C-w>v:bc<ret>");
+    let (_dir, mut h) = files(&["a.txt", "b.txt"]);
+    // a.txt keeps its history in the first pane while the second opens it as a preview.
+    h.keys(":o a.txt<ret>ix<esc>:w<ret><C-w>v:o b.txt<ret>");
     tree_click(&mut h, "a.txt", Click::Single);
-    assert_eq!(h.focused_tabs(), ["a.txt*"]);
+    assert_eq!(h.focused_tabs(), ["b.txt", "a.txt*"]);
     h.keys("u");
-    assert_eq!(h.focused_tabs(), ["a.txt"]);
+    assert_eq!(h.focused_tabs(), ["b.txt", "a.txt"]);
 }
 
 #[test]
@@ -212,9 +213,9 @@ fn closing_a_modified_buffers_last_view_is_refused_unless_forced() {
     let (_dir, mut h) = files(&["a.txt"]);
     h.keys(":o a.txt<ret>ix<esc><C-w>v:bc<ret>");
     assert!(h.state.notice.is_none(), "another pane still shows it");
-    assert_eq!(h.state.layout.panes.len(), 2);
+    assert_eq!(h.state.layout.panes.len(), 1, "the emptied pane closes");
 
-    h.keys("<C-w>h:bc<ret>");
+    h.keys(":bc<ret>");
     assert!(matches!(
         h.state.notice,
         Some(Notice::UnsavedBuffers { count: 1 })
@@ -236,7 +237,8 @@ fn one_buffer_in_two_panes_maps_every_tab_through_edits() {
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>");
     let first = h.state.layout.focus;
-    h.keys("<C-w>vj");
+    // Opened permanently, the split's copy stays when b.txt opens beside it.
+    h.keys("<C-w>vj:o a.txt<ret>");
     let second = h.state.layout.focus;
     let selection = |h: &Harness, pane, index: usize| {
         h.state.layout.panes[pane].items()[index]
@@ -275,7 +277,9 @@ fn buffer_picker_lists_most_recently_used_first() {
     let labels: Vec<String> = match &h.state.overlay {
         Overlay::Picker(picker) => match &picker.items {
             Items::Buffers(buffers) => buffers.iter().map(|(_, label)| label.clone()).collect(),
-            Items::Files(_) | Items::Grep(_) | Items::Commands => panic!("wrong picker"),
+            Items::Files(_) | Items::Grep(_) | Items::Commands | Items::Backlinks(_) => {
+                panic!("wrong picker")
+            }
         },
         Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
     };
@@ -292,7 +296,7 @@ fn buffer_picker_lists_most_recently_used_first() {
 #[test]
 fn tab_cycling_stays_within_the_focused_pane() {
     let (_dir, mut h) = files(&["a.txt", "b.txt", "c.txt"]);
-    h.keys(":o a.txt<ret>:o b.txt<ret><C-w>v:o c.txt<ret>");
+    h.keys(":o a.txt<ret>:o b.txt<ret><C-w>v:o b.txt<ret>:o c.txt<ret>");
     assert_eq!(h.focused_tabs(), ["b.txt", "c.txt"]);
     h.keys("gn");
     assert_eq!(h.focused_path().unwrap().file_name().unwrap(), "b.txt");
@@ -316,7 +320,7 @@ fn split_copies_only_the_active_item() {
     let first = h.state.layout.focus;
     let selection = h.view().selection.clone();
     h.keys("<C-w>s");
-    assert_eq!(h.focused_tabs(), ["b.txt"]);
+    assert_eq!(h.focused_tabs(), ["b.txt*"]);
     assert_eq!(h.view().selection, selection);
 
     h.keys("b");
@@ -345,7 +349,8 @@ fn round_trip(saved: &Session) -> Session {
 #[test]
 fn session_restores_tabs_selections_and_the_preview() {
     let (dir, mut before) = files(&["a.txt", "b.txt", "c.txt", "d.txt"]);
-    before.keys(":o a.txt<ret>:o b.txt<ret>l<C-w>v:o c.txt<ret>");
+    // Opening the split's preview copy permanently keeps it.
+    before.keys(":o a.txt<ret>:o b.txt<ret>l<C-w>v:o b.txt<ret>:o c.txt<ret>");
     tree_click(&mut before, "d.txt", Click::Single);
     before.keys("gp");
     assert_eq!(before.focused_tabs(), ["b.txt", "c.txt", "d.txt*"]);

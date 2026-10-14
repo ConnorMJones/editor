@@ -6,7 +6,7 @@ use helix_core::indent::{IndentStyle, auto_detect_indent_style};
 use helix_core::syntax::config::LanguageConfiguration;
 use helix_core::syntax::{HighlighterError, Loader};
 use helix_core::{Language, LineEnding, Rope, Selection, Syntax, Transaction};
-use slotmap::new_key_type;
+use slotmap::{SlotMap, new_key_type};
 
 use crate::changes::Arrive;
 use crate::conflict::{self, Conflicts};
@@ -36,18 +36,20 @@ pub enum Content {
 }
 
 /// Cursor placement in `pane` waiting for a loading buffer's text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Jump {
     pub pane: PaneId,
     pub arrive: Arrive,
     pub to: Target,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Position(Position),
     /// Waits further, for the buffer's first diff.
     Hunk(Edge),
+    /// A markdown heading, by its text as a link names it.
+    Heading(String),
 }
 
 /// Zero-based line and character column.
@@ -252,5 +254,20 @@ impl Content {
             Content::Loading { .. } => false,
             Content::Text { doc, .. } => doc.is_modified(),
         }
+    }
+}
+
+/// The text of `buffer`, once loaded.
+pub fn doc(buffers: &SlotMap<BufferId, Buffer>, buffer: BufferId) -> Option<&TextDoc> {
+    match &buffers.get(buffer)?.content {
+        Content::Text { doc, .. } => Some(doc),
+        Content::Loading { .. } => None,
+    }
+}
+
+pub fn doc_mut(buffers: &mut SlotMap<BufferId, Buffer>, buffer: BufferId) -> Option<&mut TextDoc> {
+    match &mut buffers.get_mut(buffer)?.content {
+        Content::Text { doc, .. } => Some(doc),
+        Content::Loading { .. } => None,
     }
 }

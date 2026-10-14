@@ -1,7 +1,8 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use gpui::{
     AnyElement, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations,
@@ -19,7 +20,7 @@ use model::register::Clipboard;
 use model::window::Axis;
 use slotmap::SecondaryMap;
 use state::buffer::{Content, Disk};
-use state::changes::{self, Confirm, Discard, ListRow};
+use state::changes::{self, Discard, ListRow};
 use state::conflict;
 use state::diff::{self, Bases, Removal, Side};
 use state::diffview::{Left, RIGHT};
@@ -28,16 +29,19 @@ use state::job::{self, JobResult};
 use state::keymap::{self, Context as KeyContext};
 use state::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
 use state::path::RelPath;
-use state::picker::{Items, PALETTE, Search};
+use state::picker::{Grep, Items, PALETTE, Referrers, Search};
+use state::rendered::{Fit, Link};
 use state::scroll;
 use state::tree::{self, Fold, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget};
+use state::typeset::Request;
 use state::watch::{self, Watcher};
 use state::{
-    Effect, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply, input, register, session,
-    workspace,
+    Confirm, Effect, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply, input, register,
+    session, workspace,
 };
 
 use crate::preview::PreviewElement;
+use crate::rendered::{Rasterized, Rasters, RenderedPane};
 use crate::text::{Part, TextElement};
 use crate::theme::Theme;
 
@@ -65,6 +69,12 @@ pub struct Workspace {
     pub shown_tab: Option<(PaneId, usize)>,
     /// The file tree context menu, opened by a right click at `at`.
     pub tree_menu: Option<TreeMenu>,
+    /// Lists of the panes showing a rendered view.
+    pub rendered: SecondaryMap<PaneId, RenderedPane>,
+    /// Requests to the typeset thread.
+    pub typeset: mpsc::Sender<Request>,
+    /// Rasters of the typeset SVGs drawn last frame.
+    pub rasters: Rc<RefCell<Rasters>>,
 }
 
 /// Where the session is saved on exit, per `session.restore`.
@@ -251,7 +261,17 @@ impl Workspace {
     }
 
     fn on_job(&mut self, result: JobResult, cx: &mut Context<Self>) {
-        job::complete(&mut self.state, result, &mut self.effects);
+        self.on_jobs([result], cx)
+    }
+
+    pub fn on_jobs(
+        &mut self,
+        results: impl IntoIterator<Item = JobResult>,
+        cx: &mut Context<Self>,
+    ) {
+        for result in results {
+            job::complete(&mut self.state, result, &mut self.effects);
+        }
         self.flush(cx);
         cx.notify();
     }
@@ -306,10 +326,17 @@ impl Workspace {
         }
     }
 
+    /// Syncs the state once per change, brings the lists along and runs what they queued.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
-        // Clipboard reads apply synchronously and may queue more effects.
-        while !self.effects.is_empty() {
-            for effect in std::mem::take(&mut self.effects) {
+        loop {
+            state::changes::sync(&mut self.state, &mut self.effects);
+            crate::rendered::sync(self, cx);
+            let effects = std::mem::take(&mut self.effects);
+            match effects.as_slice() {
+                [] => break,
+                [_, ..] => {}
+            }
+            for effect in effects {
                 match effect {
                     Effect::Job(work) => {
                         let task = cx.background_spawn(async move { job::run(work) });
@@ -324,6 +351,11 @@ impl Workspace {
                         cx.quit()
                     }
                     Effect::Watch(dirs) => watch::watch(&mut self.watcher, &dirs),
+                    Effect::OpenUrl(url) => cx.open_url(&url),
+                    Effect::Typeset(request) => match self.typeset.send(request) {
+                        Ok(()) => {}
+                        Err(_) => tracing::error!("the typeset thread is gone"),
+                    },
                     Effect::WriteClipboard { clipboard, text } => {
                         let item = ClipboardItem::new_string(text);
                         match clipboard {
@@ -337,13 +369,7 @@ impl Workspace {
                             Clipboard::Primary => cx.read_from_primary(),
                         };
                         let text = item.and_then(|item| item.text());
-                        register::clipboard_contents(
-                            &mut self.state,
-                            clipboard,
-                            then,
-                            text,
-                            &mut self.effects,
-                        );
+                        register::clipboard_contents(&mut self.state, clipboard, then, text);
                     }
                 }
             }
@@ -668,6 +694,10 @@ impl Workspace {
                             };
                             let hunks = match (shown, &diff.bases) {
                                 (View::Text(_), _) => String::new(),
+                                (View::Rendered(view), _) => match view.link {
+                                    Link::Follows { .. } => "rendered: following".to_owned(),
+                                    Link::Standalone => "rendered".to_owned(),
+                                },
                                 (View::Diff(_), Bases::Tracked(tracked)) => {
                                     let at = diff::hunk_at(
                                         &tracked.hunks,
@@ -823,6 +853,14 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(element(Part::Buffer)),
                                 ),
+                            (Content::Text { .. }, View::Rendered(_)) => div()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .flex_col()
+                                .overflow_hidden()
+                                .bg(self.theme.background)
+                                .child(crate::rendered::body(self, pane, cx)),
                             (Content::Loading { .. }, _) => div()
                                 .flex_1()
                                 .p_2()
@@ -1402,7 +1440,7 @@ impl Workspace {
         };
         let theme = &self.theme;
         let previewed = match picker.items {
-            Items::Files(_) | Items::Buffers(_) | Items::Grep(_) => true,
+            Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Backlinks(_) => true,
             Items::Commands => false,
         };
         let viewport = window.viewport_size();
@@ -1417,7 +1455,11 @@ impl Workspace {
                 Search::Done => format!("{} hits", grep.hits.len()),
                 Search::Truncated => format!("{}+ hits", grep.hits.len()),
             },
-            Items::Files(_) | Items::Buffers(_) | Items::Commands => {
+            Items::Backlinks(Referrers {
+                search: Search::Running,
+                ..
+            }) => "indexing notes…".to_owned(),
+            Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
                 format!("{}/{}", picker.matches.len(), picker.items.len())
             }
         };
@@ -1448,8 +1490,9 @@ impl Workspace {
                                     .unwrap_or_default();
                                 ((*name).to_owned(), keys)
                             }
-                            Items::Grep(grep) => {
-                                let hit = &grep.hits[index as usize];
+                            Items::Grep(Grep { hits, .. })
+                            | Items::Backlinks(Referrers { hits, .. }) => {
+                                let hit = &hits[index as usize];
                                 (
                                     format!("{}:{}: {}", hit.path, hit.line + 1, hit.text),
                                     String::new(),
@@ -1638,6 +1681,7 @@ impl EntityInputHandler for Workspace {
         };
         let text = doc.text.slice(..);
         let (padding, gutter_lines) = match shown {
+            View::Rendered(_) => return None,
             View::Text(_) => (conflict::padding(doc), text.len_lines()),
             View::Diff(diff) => (
                 diff.align.sides[RIGHT].padding(),
@@ -1686,6 +1730,31 @@ impl EntityInputHandler for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut rasters = self.rasters.borrow_mut();
+        let frame = rasters.frame;
+        rasters
+            .entries
+            .retain(|_, raster| match (raster.drawn == frame, &raster.image) {
+                (true, _) => true,
+                (false, Rasterized::Ready(image)) => {
+                    cx.drop_image(image.clone(), Some(window));
+                    false
+                }
+                (false, Rasterized::Pending | Rasterized::Failed) => false,
+            });
+        rasters.frame += 1;
+        drop(rasters);
+        // Whole typst pages fit the viewport their list was last laid out in.
+        for cache in self.rendered.values_mut() {
+            let height = cache.list.viewport_bounds().size.height;
+            match (cache.measured.fit, cache.measured.height == height) {
+                (Fit::Width, _) | (Fit::Page, true) => {}
+                (Fit::Page, false) => {
+                    cache.measured.height = height;
+                    cache.list.remeasure();
+                }
+            }
+        }
         let State {
             tree,
             root,
@@ -1713,7 +1782,7 @@ impl Render for Workspace {
         let bottom = match (
             &state.overlay,
             &state.tree.edit,
-            &state.git.confirm,
+            &state.confirm,
             &state.notice,
         ) {
             (Overlay::Prompt(_), ..) => String::new(),
@@ -1759,6 +1828,7 @@ impl Render for Workspace {
                 }),
                 _,
             ) => format!("delete untracked {}? y/n", relative(path)),
+            (_, TreeEdit::None, Some(Confirm::Create(path)), _) => format!("create {path}? y/n"),
             (Overlay::None | Overlay::Picker(_), TreeEdit::None, None, Some(notice)) => {
                 notice.to_string()
             }

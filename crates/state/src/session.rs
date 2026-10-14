@@ -7,14 +7,15 @@ use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
 use crate::apply;
-use crate::buffer::Content;
-use crate::changes::Arrive;
+use crate::buffer::{BufferId, Content};
 use crate::diffview::DiffView;
 use crate::job::Job;
 use crate::layout::{
-    Child, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs, TextView, View,
+    Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, TabKey, Tabs, TextView,
+    View,
 };
 use crate::path::RelPath;
+use crate::rendered::{Link, RenderedView, Scroll};
 use crate::tree::{self, Dir, Fold, Listing};
 use crate::{Effect, Focus, Sidebar, SidebarWidth, State};
 use model::git::Group;
@@ -93,13 +94,41 @@ pub enum SessionItem {
         primary: usize,
         scroll: usize,
     },
+    /// A rendered view; the selection and scroll are the source position it toggles back to.
+    Rendered {
+        path: PathBuf,
+        ranges: Vec<[usize; 2]>,
+        primary: usize,
+        scroll: usize,
+        top: Top,
+        /// Reading-order index of the pane it follows; standalone when absent.
+        #[serde(default)]
+        follows: Option<usize>,
+    },
+}
+
+/// Where a rendered view stood: a block, or a source line not yet resolved into one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Top {
+    Item(usize),
+    Line(usize),
+}
+
+/// Which kind of tab a saved item restores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Saved {
+    Text,
+    Diff,
+    Rendered { top: Top, follows: Option<usize> },
 }
 
 impl SessionItem {
-    fn path(&self) -> (Arrive, &Path) {
+    fn key(&self) -> (std::mem::Discriminant<SessionItem>, &Path) {
         match self {
-            SessionItem::Text { path, .. } => (Arrive::Text, path),
-            SessionItem::Diff { path, .. } => (Arrive::Diff, path),
+            SessionItem::Text { path, .. }
+            | SessionItem::Diff { path, .. }
+            | SessionItem::Rendered { path, .. } => (std::mem::discriminant(self), path),
         }
     }
 }
@@ -182,7 +211,7 @@ pub fn snapshot(state: &State) -> Session {
                             .collect();
                         let (primary, scroll) =
                             (view.selection.primary_index(), view.scroll.anchor);
-                        match item.view {
+                        match &item.view {
                             View::Text(_) => SessionItem::Text {
                                 path,
                                 ranges,
@@ -194,6 +223,22 @@ pub fn snapshot(state: &State) -> Session {
                                 ranges,
                                 primary,
                                 scroll,
+                            },
+                            View::Rendered(rendered) => SessionItem::Rendered {
+                                path,
+                                ranges,
+                                primary,
+                                scroll,
+                                top: match rendered.scroll {
+                                    Scroll::Line(line) => Top::Line(line),
+                                    Scroll::At(at) | Scroll::Moved { from: at, .. } => {
+                                        Top::Item(at.item)
+                                    }
+                                },
+                                follows: match rendered.link {
+                                    Link::Follows { pane, .. } => index.get(&pane).copied(),
+                                    Link::Standalone => None,
+                                },
                             },
                         }
                     })
@@ -271,7 +316,7 @@ pub fn restore(
         let duplicate = tabs.iter().enumerate().position(|(index, item)| {
             tabs[..index]
                 .iter()
-                .any(|earlier| earlier.path() == item.path())
+                .any(|earlier| earlier.key() == item.key())
         });
         let reason = match (tabs.len(), duplicate, preview) {
             (0, _, _) => InvalidTabs::Empty,
@@ -286,6 +331,8 @@ pub fn restore(
 
     let mut panes = slotmap::SlotMap::with_key();
     let mut ids: Vec<PaneId> = Vec::with_capacity(session.panes.len());
+    // Rendered views and the pane slot each follows, linked once every pane exists.
+    let mut follows: Vec<(usize, BufferId, usize)> = Vec::new();
     for (pane, saved) in session.panes.into_iter().enumerate() {
         let SessionPane::Tabs {
             tabs,
@@ -300,24 +347,40 @@ pub fn restore(
         let mut kept: Vec<usize> = Vec::with_capacity(tabs.len());
         let mut items: Vec<Item> = Vec::with_capacity(tabs.len());
         for (saved_index, item) in tabs.into_iter().enumerate() {
-            let (arrive, path, ranges, primary, scroll) = match item {
+            let (saved, path, ranges, primary, scroll) = match item {
                 SessionItem::Text {
                     path,
                     ranges,
                     primary,
                     scroll,
-                } => (Arrive::Text, path, ranges, primary, scroll),
+                } => (Saved::Text, path, ranges, primary, scroll),
                 SessionItem::Diff {
                     path,
                     ranges,
                     primary,
                     scroll,
-                } => (Arrive::Diff, path, ranges, primary, scroll),
+                } => (Saved::Diff, path, ranges, primary, scroll),
+                SessionItem::Rendered {
+                    path,
+                    ranges,
+                    primary,
+                    scroll,
+                    top,
+                    follows,
+                } => (
+                    Saved::Rendered { top, follows },
+                    path,
+                    ranges,
+                    primary,
+                    scroll,
+                ),
             };
             // A diff also shows a file deleted from the worktree.
-            let buffer = match (arrive, path.is_file(), path.exists()) {
-                (_, true, _) | (Arrive::Diff, false, false) => apply::load(state, path, out),
-                (Arrive::Text, false, _) | (Arrive::Diff, false, true) => None,
+            let buffer = match (saved, path.is_file(), path.exists()) {
+                (_, true, _) | (Saved::Diff, false, false) => apply::load(state, path, out),
+                (Saved::Text | Saved::Rendered { .. }, false, _) | (Saved::Diff, false, true) => {
+                    None
+                }
             };
             let Some(buffer) = buffer else {
                 continue;
@@ -340,12 +403,26 @@ pub fn restore(
                 }
             };
             view.scroll.anchor = scroll.min(len);
-            let view = match arrive {
-                Arrive::Text => View::Text(view),
-                Arrive::Diff => View::Diff(DiffView {
+            let view = match saved {
+                Saved::Text => View::Text(view),
+                Saved::Diff => View::Diff(DiffView {
                     text: view,
                     ..DiffView::new(buffer)
                 }),
+                Saved::Rendered { top, follows: link } => {
+                    match link {
+                        Some(slot) => follows.push((pane, buffer, slot)),
+                        None => {}
+                    }
+                    let scroll = match top {
+                        Top::Item(item) => Scroll::item(item),
+                        Top::Line(line) => Scroll::Line(line),
+                    };
+                    View::Rendered(RenderedView {
+                        text: view,
+                        ..RenderedView::new(buffer, Link::Standalone, scroll)
+                    })
+                }
             };
             items.push(Item {
                 view,
@@ -369,6 +446,24 @@ pub fn restore(
         };
         ids.push(panes.insert(Pane { tabs }));
     }
+    for (slot, buffer, source) in follows {
+        let Some(&source) = ids.get(source).filter(|id| panes[**id].tabs.is_some()) else {
+            continue;
+        };
+        let tabs = panes[ids[slot]].tabs.as_mut();
+        match tabs.and_then(|tabs| {
+            let index = tabs.find(TabKey::Rendered(buffer))?;
+            Some(&mut tabs.items_mut()[index].view)
+        }) {
+            Some(View::Rendered(view)) => {
+                view.link = Link::Follows {
+                    pane: source,
+                    seen: None,
+                }
+            }
+            Some(View::Text(_) | View::Diff(_)) | None => {}
+        }
+    }
     state.layout = match ids.get(focus_slot) {
         Some(&focus) => Layout {
             root: restore_node(session.layout, &ids).node,
@@ -378,6 +473,17 @@ pub fn restore(
         },
         None => Layout::new(),
     };
+    // Panes whose files were all deleted close, as an emptied pane does.
+    let empty: SmallVec<[PaneId; 4]> = (state.layout.panes.iter())
+        .filter(|(_, pane)| pane.tabs.is_none())
+        .map(|(id, _)| id)
+        .collect();
+    for pane in empty {
+        match state.layout.close(pane) {
+            Ok(()) | Err(CloseError::LastPane) => {}
+            Err(CloseError::NotInLayout) => unreachable!("restored panes are leaves"),
+        }
+    }
 
     state.sidebar = match session.sidebar {
         SessionSidebar::Hidden => Sidebar::Hidden,

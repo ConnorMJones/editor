@@ -7,4 +7,5 @@ pub mod mode;
 pub mod notice;
 pub mod register;
 pub mod theme;
+pub mod typeset;
 pub mod window;

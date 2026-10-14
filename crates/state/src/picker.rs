@@ -32,11 +32,20 @@ pub enum Items {
     Buffers(Vec<(BufferId, String)>),
     Commands,
     Grep(Grep),
+    Backlinks(Referrers),
 }
 
 pub struct Grep {
     /// Matches the job generation in `State::grep`; stale results are dropped.
     pub generation: u64,
+    pub search: Search,
+    pub hits: Vec<Hit>,
+}
+
+/// Notes linking to `note`, filled once the backlinks index has its first read.
+pub struct Referrers {
+    pub note: RelPath,
+    /// `Running` until the first read of every note finishes.
     pub search: Search,
     pub hits: Vec<Hit>,
 }
@@ -67,6 +76,7 @@ impl Items {
             Items::Buffers(_) => PickerKind::Buffers,
             Items::Commands => PickerKind::Commands,
             Items::Grep(_) => PickerKind::Grep,
+            Items::Backlinks(_) => PickerKind::Backlinks,
         }
     }
 
@@ -76,6 +86,7 @@ impl Items {
             Items::Buffers(buffers) => buffers.len(),
             Items::Commands => PALETTE.len(),
             Items::Grep(grep) => grep.hits.len(),
+            Items::Backlinks(referrers) => referrers.hits.len(),
         }
     }
 
@@ -91,6 +102,7 @@ impl Items {
             Items::Buffers(buffers) => &buffers[index].1,
             Items::Commands => PALETTE[index].0,
             Items::Grep(grep) => &grep.hits[index].text,
+            Items::Backlinks(referrers) => referrers.hits[index].path.as_str(),
         }
     }
 }
@@ -114,7 +126,7 @@ impl Picker {
 pub fn filter(picker: &mut Picker, matcher: &mut Matcher, narrowing: Narrowing) {
     matcher.config = nucleo::Config::DEFAULT;
     match picker.items.kind() {
-        PickerKind::Files => matcher.config.set_match_paths(),
+        PickerKind::Files | PickerKind::Backlinks => matcher.config.set_match_paths(),
         PickerKind::Buffers | PickerKind::Commands | PickerKind::Grep => {}
     }
     picker.cursor = 0;
@@ -317,6 +329,13 @@ pub static PALETTE: &[(&str, Command)] = &[
     ("conflict-theirs", Command::Resolve(Take::Theirs)),
     ("conflict-both", Command::Resolve(Take::Both)),
     ("conflict-base", Command::Resolve(Take::Base)),
+    ("markdown-preview", Command::RenderedSplit),
+    ("markdown-toggle", Command::ToggleRendered),
+    ("export-pdf", Command::ExportPdf),
+    (
+        "backlinks",
+        Command::Picker(PickerCommand::Open(PickerKind::Backlinks)),
+    ),
 ];
 
 /// Previews kept per picker; loads beyond this evict the oldest.
@@ -373,10 +392,12 @@ pub fn preview_source(picker: &Picker) -> Option<PreviewSource<'_>> {
             line: 0,
         }),
         Items::Buffers(buffers) => Some(PreviewSource::Buffer(buffers[index].0)),
-        Items::Grep(grep) => grep.hits.get(index).map(|hit| PreviewSource::File {
-            path: &hit.path,
-            line: hit.line as usize,
-        }),
+        Items::Grep(Grep { hits, .. }) | Items::Backlinks(Referrers { hits, .. }) => {
+            hits.get(index).map(|hit| PreviewSource::File {
+                path: &hit.path,
+                line: hit.line as usize,
+            })
+        }
         Items::Commands => None,
     }
 }

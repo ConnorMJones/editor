@@ -105,6 +105,8 @@ pub enum Command {
     PromptCancel,
 
     Open(PathBuf),
+    /// `gf`: follows the link, URL or file path under the primary cursor.
+    GotoFile,
     Write,
     WriteAs(PathBuf, Dirs),
     ForceWrite,
@@ -147,6 +149,30 @@ pub enum Command {
     GotoConflict(Direction),
     /// Resolves every conflict touched by a selection, as one edit.
     Resolve(Take),
+
+    // Rendered markdown and typst views.
+    /// Opens a rendered view of the focused file in a split to the right that follows it, or
+    /// closes the one already following it.
+    RenderedSplit,
+    /// Switches the focused tab between a file's text and its rendered view.
+    ToggleRendered,
+    Rendered(RenderedCommand),
+    /// Compiles the focused typst file to a PDF beside it.
+    ExportPdf,
+}
+
+/// Keys of a focused rendered view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderedCommand {
+    Scroll(Direction, ScrollBy),
+    Top,
+    Bottom,
+    /// The next or previous top-level heading.
+    Heading(Direction),
+    /// Back to the source pane it follows, or to the text of a standalone view.
+    Leave,
+    /// Switches a typst preview between fitting the page width and the whole page.
+    Fit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

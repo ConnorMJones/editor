@@ -80,13 +80,26 @@ fn split_ratios_survive_a_session_round_trip() {
 #[test]
 fn sessions_without_weights_or_width_still_load() {
     let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
     let mut h = Harness::new(dir.path());
-    let saved: Session = toml::from_str(
+    let root = dir.path().canonicalize().unwrap();
+    let pane = |name: &str| {
+        format!(
+            "{{ kind = \"tabs\", active = 0, tabs = [{{ kind = \"text\", path = {:?}, \
+             ranges = [[0, 0]], primary = 0, scroll = 0 }}] }}",
+            root.join(name)
+        )
+    };
+    let saved: Session = toml::from_str(&format!(
         "focus = 0\nsidebar = \"shown\"\nexpanded = []\n\
-         panes = [{ kind = \"empty\" }, { kind = \"empty\" }]\n\
+         panes = [{}, {}]\n\
          [layout]\nkind = \"split\"\naxis = \"row\"\n\
-         children = [{ kind = \"pane\", pane = 0 }, { kind = \"pane\", pane = 1 }]\n",
-    )
+         children = [{{ kind = \"pane\", pane = 0 }}, {{ kind = \"pane\", pane = 1 }}]\n",
+        pane("a.txt"),
+        pane("b.txt")
+    ))
     .expect("older session parses");
     h.run(|state, out| session::restore(state, saved, out))
         .expect("valid session");

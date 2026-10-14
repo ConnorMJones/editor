@@ -8,7 +8,7 @@ use crate::buffer::Content;
 use crate::files::Files;
 use crate::job::{Job, ReloadPolicy};
 use crate::path::RelPath;
-use crate::{Effect, Repo, State, request_git};
+use crate::{Effect, Repo, State, backlinks, request_git};
 
 /// Long-lived watcher owned by the host; dropping it stops events.
 pub type Watcher = RecommendedWatcher;
@@ -95,6 +95,7 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
             dir,
         }));
     }
+    backlinks::changed(state, &rescan, out);
     match (&state.files, rescan.is_empty()) {
         (Files::Ready(_), false) => out.push(Effect::Job(Job::Rescan {
             root,

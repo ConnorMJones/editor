@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use state::files::{self, Rescan, Walked};
+use state::files::{self, Changed, Rescan, Walked};
 use state::path::{RelPath, RelPathError};
 
 fn p(path: &str) -> RelPath {
@@ -45,7 +45,7 @@ fn rescan_replaces_direct_children_and_subtrees() {
         p("b/gone/x.rs"),
         p("c.rs"),
     ];
-    files::apply_rescan(
+    let changed = files::apply_rescan(
         &mut index,
         Rescan {
             removed: vec![p("b/gone")],
@@ -65,6 +65,27 @@ fn rescan_replaces_direct_children_and_subtrees() {
             )],
         },
     );
+    assert_eq!(
+        index,
+        [p("a/new.rs"), p("a/sub/keep.rs"), p("c.rs"), p("d/e/f.rs")]
+    );
+    assert_eq!(changed, Changed::Yes);
+    // Relisting a folder whose files stayed the same changes nothing.
+    let unchanged = files::apply_rescan(
+        &mut index,
+        Rescan {
+            removed: Vec::new(),
+            relisted: vec![(
+                p("a"),
+                Walked {
+                    files: vec![p("a/new.rs")],
+                    dirs: vec![p("a/sub")],
+                },
+            )],
+            subtrees: Vec::new(),
+        },
+    );
+    assert_eq!(unchanged, Changed::No);
     assert_eq!(
         index,
         [p("a/new.rs"), p("a/sub/keep.rs"), p("c.rs"), p("d/e/f.rs")]

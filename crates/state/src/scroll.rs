@@ -366,6 +366,7 @@ pub(crate) fn pane_text<'a>(
             padding: diff.align.sides[RIGHT].padding(),
             right: diffview::right(content),
         },
+        View::Rendered(_) => return None,
     })
 }
 

@@ -65,7 +65,7 @@ pub enum Completes {
 }
 
 /// Typed command names, canonical first, as `parse` accepts them.
-pub const COMMANDS: [(&[&str], Completes); 25] = [
+pub const COMMANDS: [(&[&str], Completes); 26] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
     (&["write-all", "wa"], Completes::Nothing),
@@ -91,6 +91,7 @@ pub const COMMANDS: [(&[&str], Completes); 25] = [
     (&["conflict-theirs"], Completes::Nothing),
     (&["conflict-both"], Completes::Nothing),
     (&["conflict-base"], Completes::Nothing),
+    (&["export-pdf"], Completes::Nothing),
 ];
 
 /// A fresh prompt, with completions listed up front like helix.
@@ -422,6 +423,7 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
         ("conflict-theirs", _) => bare(Command::Resolve(Take::Theirs), "conflict-theirs"),
         ("conflict-both", _) => bare(Command::Resolve(Take::Both), "conflict-both"),
         ("conflict-base", _) => bare(Command::Resolve(Take::Base), "conflict-base"),
+        ("export-pdf", _) => bare(Command::ExportPdf, "export-pdf"),
         // `:<n>` jumps to line n, like helix.
         (name, None) if name.parse::<NonZeroUsize>().is_ok() => {
             number("goto", name).map(Command::GotoLine)

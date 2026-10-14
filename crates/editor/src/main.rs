@@ -1,6 +1,7 @@
 mod input;
 mod preview;
 mod prompt;
+mod rendered;
 mod tabs;
 mod text;
 mod theme;
@@ -14,14 +15,17 @@ use gpui::{
     App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowDecorations,
     WindowOptions, font, px, size,
 };
-use model::color::Palette;
+use model::color::{Base16, Palette};
 use model::config::{Config, Restore};
 use model::notice::Notice;
+use state::job::JobResult;
+use state::typeset::{Look, Request};
 use state::workspace::{self as commands, Close};
 use state::{Root, State, session, watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
+use typeset::{FontSource, Typesetter};
 
 use crate::theme::Theme;
 use crate::workspace::{Drag, SessionFile, Workspace};
@@ -55,7 +59,42 @@ fn main() -> anyhow::Result<()> {
         )),
     };
     let title = root.path().display().to_string();
-    let state = State::new(root, helix_core::config::default_lang_loader(), config.tabs)?;
+    let look = Look {
+        text: palette[Base16::Base05],
+        // New Computer Modern reads smaller than the prose font at the same size.
+        inline_pt: theme::prose_size(&config) * PT_PER_PX * 1.2,
+        block_pt: theme::prose_size(&config) * PT_PER_PX * 1.4,
+        palette,
+    };
+    let state = State::new(
+        root,
+        helix_core::config::default_lang_loader(),
+        config.tabs,
+        look,
+    )?;
+    let (typeset_tx, typeset_rx) = std::sync::mpsc::channel::<Request>();
+    let (typeset_done_tx, typeset_done_rx) = async_channel::unbounded::<JobResult>();
+    // One thread owns the typesetter, so its fonts load once and its caches stay warm.
+    std::thread::Builder::new()
+        .name("typeset".to_owned())
+        .spawn(move || {
+            let mut typesetter = match Typesetter::new(FontSource::SystemAndEmbedded) {
+                Ok(typesetter) => typesetter,
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the typesetter");
+                    std::process::exit(1);
+                }
+            };
+            let mut text = String::new();
+            while let Ok(request) = typeset_rx.recv() {
+                let done = state::typeset::run(&mut typesetter, request, &mut text);
+                match typeset_done_tx.send_blocking(JobResult::Typeset(done)) {
+                    Ok(()) => {}
+                    Err(_) => break,
+                }
+            }
+        })
+        .context("starting the typeset thread")?;
     let (changed_tx, changed_rx) = async_channel::unbounded::<Vec<PathBuf>>();
     let watcher = watch::start(move |paths| {
         // A closed channel means the window is gone; nothing left to notify.
@@ -91,7 +130,12 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         };
-        let theme = Theme::new(&palette, &config, cell);
+        let ui = text_system.resolve_font(&font(config.font.ui.family.clone()));
+        let prose_extent = [
+            text_system.ascent(ui, px(1.)) / px(1.),
+            text_system.descent(ui, px(1.)).abs() / px(1.),
+        ];
+        let theme = Theme::new(&palette, &config, cell, prose_extent);
         let opened = cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -125,6 +169,9 @@ fn main() -> anyhow::Result<()> {
                         areas: Default::default(),
                         tab_scroll: Default::default(),
                         shown_tab: None,
+                        rendered: Default::default(),
+                        typeset: typeset_tx,
+                        rasters: Default::default(),
                     }
                 });
                 workspace.update(cx, |workspace, cx| {
@@ -152,6 +199,19 @@ fn main() -> anyhow::Result<()> {
                         SessionFile::Disabled => {}
                     }
                     workspace.flush(cx);
+                    cx.spawn(async move |this, cx| {
+                        while let Ok(done) = typeset_done_rx.recv().await {
+                            let mut batch = vec![done];
+                            while let Ok(more) = typeset_done_rx.try_recv() {
+                                batch.push(more);
+                            }
+                            match this.update(cx, |workspace, cx| workspace.on_jobs(batch, cx)) {
+                                Ok(()) => {}
+                                Err(_) => break,
+                            }
+                        }
+                    })
+                    .detach();
                     cx.spawn(async move |this, cx| {
                         while let Ok(mut paths) = changed_rx.recv().await {
                             cx.background_executor().timer(watch::DEBOUNCE).await;
@@ -202,6 +262,9 @@ fn main() -> anyhow::Result<()> {
     });
     Ok(())
 }
+
+/// Typographic points per CSS pixel; figures are drawn at the inverse.
+const PT_PER_PX: f32 = 0.75;
 
 fn read_config(path: &Path) -> anyhow::Result<Config> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {path:?}"))?;

@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod backlinks;
 pub mod buffer;
 pub mod changes;
 pub mod conflict;
@@ -12,15 +13,19 @@ pub mod input;
 pub mod job;
 pub mod keymap;
 pub mod layout;
+pub mod markdown;
 pub mod motion;
 pub mod path;
 pub mod picker;
 pub mod prompt;
 pub mod register;
+pub mod rendered;
 pub mod scroll;
 pub mod select;
 pub mod session;
 pub mod tree;
+pub mod typeset;
+pub mod vault;
 pub mod watch;
 pub mod workspace;
 
@@ -104,6 +109,14 @@ pub struct State {
     pub matcher: nucleo::Matcher,
     /// Generation of the newest grep; older grep jobs stop when it moves on.
     pub grep: Arc<AtomicU64>,
+    /// Typeset math and diagrams of the parsed documents.
+    pub figures: typeset::Figures,
+    /// What the rendered tabs of each buffer show, while any is open.
+    pub previews: rendered::Previews,
+    pub vault: vault::Vault,
+    pub backlinks: backlinks::Backlinks,
+    /// An action waiting for `Command::Confirm`; the status line asks.
+    pub confirm: Option<Confirm>,
 }
 
 impl State {
@@ -111,6 +124,7 @@ impl State {
         root: Root,
         languages: Loader,
         tab_config: TabsConfig,
+        look: typeset::Look,
     ) -> Result<State, KeymapError> {
         languages.set_scopes(
             model::theme::SCOPES
@@ -150,12 +164,16 @@ impl State {
             git: Git {
                 repo: Repo::Unknown,
                 refresh: Refresh::Idle,
-                confirm: None,
                 cursor: None,
                 folds: [Fold::Expanded; Group::COUNT],
             },
             matcher: nucleo::Matcher::default(),
             grep: Arc::new(AtomicU64::new(0)),
+            figures: typeset::Figures::new(look),
+            previews: rendered::Previews::new(),
+            vault: vault::Vault::new(),
+            backlinks: backlinks::Backlinks::default(),
+            confirm: None,
         })
     }
 }
@@ -326,11 +344,20 @@ pub enum Focus {
     Editor,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Confirm {
+    /// Discards a file's changes, as `how` says.
+    Discard {
+        path: PathBuf,
+        how: changes::Discard,
+    },
+    /// Creates the empty note an unresolved link names, and opens it.
+    Create(RelPath),
+}
+
 pub struct Git {
     pub repo: Repo,
     pub refresh: Refresh,
-    /// A destructive operation waiting for `Command::Confirm`.
-    pub confirm: Option<changes::Confirm>,
     /// Row selected in the Changes sidebar, kept by value so it survives refreshes.
     pub cursor: Option<changes::ListCursor>,
     /// Per `Group`, whether the sidebar shows its entries.
@@ -372,4 +399,8 @@ pub enum Effect {
         clipboard: Clipboard,
         then: ClipboardUse,
     },
+    /// Opens a URL in the browser.
+    OpenUrl(String),
+    /// The host answers with `JobResult::Typeset`.
+    Typeset(typeset::Request),
 }

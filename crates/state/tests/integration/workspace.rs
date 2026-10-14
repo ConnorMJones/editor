@@ -91,6 +91,11 @@ fn split_focus_and_close_panes() {
     let second = h.state.layout.focus;
     assert_ne!(first, second);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
+    assert_eq!(
+        h.focused_tabs(),
+        ["a.txt*"],
+        "the copy is a preview the next open replaces"
+    );
 
     h.keys("<C-w>h");
     assert_eq!(h.state.layout.focus, first);
@@ -129,11 +134,15 @@ fn closing_buffer_keeps_panes_valid() {
             None => panic!("pane lost its buffer"),
         }
     }
-    // a.txt is still shown in the first pane, so its buffer stays.
-    h.keys(":bc<ret>");
-    assert!(h.state.layout.panes[second].tabs.is_none());
+    assert!(
+        !h.state.layout.panes.contains_key(second),
+        "the emptied pane closes"
+    );
     assert_eq!(h.tabs(first), ["a.txt"]);
-    assert_eq!(h.state.buffers.len(), 1);
+    // The last pane stays, empty, once its last buffer closes.
+    h.keys(":bc<ret>");
+    assert!(h.state.layout.panes[first].tabs.is_none());
+    assert!(h.state.buffers.is_empty());
 }
 
 #[test]
@@ -326,7 +335,9 @@ fn grep_picker_jumps_to_hit() {
                 assert_eq!(grep.hits[0].line, 1);
                 assert_eq!(grep.hits[0].column, 4);
             }
-            Items::Files(_) | Items::Buffers(_) | Items::Commands => panic!("wrong picker"),
+            Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
+                panic!("wrong picker")
+            }
         },
         Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
     }

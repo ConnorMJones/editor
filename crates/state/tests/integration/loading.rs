@@ -47,7 +47,9 @@ fn finish(h: &mut Harness, effects: Vec<Effect>) {
                 Effect::Quit
                 | Effect::Watch(_)
                 | Effect::WriteClipboard { .. }
-                | Effect::ReadClipboard { .. } => {}
+                | Effect::ReadClipboard { .. }
+                | Effect::OpenUrl(_)
+                | Effect::Typeset(_) => {}
             }
         }
     });
@@ -178,7 +180,7 @@ fn grep_jump_waits_for_the_text() {
     let id = h.state.buffers.keys().next().unwrap();
     assert_eq!(
         match &h.state.buffers[id].content {
-            Content::Loading { jump } => *jump,
+            Content::Loading { jump } => jump.clone(),
             Content::Text { .. } => panic!("opened synchronously"),
         },
         Some(Jump {

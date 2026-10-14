@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use helix_core::{Range, RopeSlice, Selection, Tendril, Transaction};
-use model::command::{Answer, ChangesCommand, FileOp, HunkOp, HunkTarget};
+use model::command::{ChangesCommand, FileOp, HunkOp, HunkTarget};
 use model::config::OpenAs;
 use model::git::{Change, Group};
 use model::mode::Mode;
@@ -20,13 +20,9 @@ use crate::job::{FsOp, Job};
 use crate::layout::{Pane, TabKey, View};
 use crate::path::RelPath;
 use crate::tree::{EntryKind, Fold};
-use crate::{Effect, Focus, Refresh, Repo, Sidebar, State, request_git, scroll, watch, workspace};
-
-/// A destructive git operation waiting for `Command::Confirm`; a sidebar shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Confirm {
-    Discard { path: PathBuf, how: Discard },
-}
+use crate::{
+    Confirm, Effect, Focus, Refresh, Repo, Sidebar, State, request_git, scroll, watch, workspace,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Discard {
@@ -41,6 +37,7 @@ pub enum Discard {
 pub enum Arrive {
     Text,
     Diff,
+    Rendered,
 }
 
 impl Arrive {
@@ -48,6 +45,7 @@ impl Arrive {
         match self {
             Arrive::Text => TabKey::Text(buffer),
             Arrive::Diff => TabKey::Diff(buffer),
+            Arrive::Rendered => TabKey::Rendered(buffer),
         }
     }
 }
@@ -160,6 +158,7 @@ pub fn bases_read(
 /// Starts a diff for every tracked buffer whose hunks no longer match its text or bases.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     crate::conflict::sync(state);
+    crate::rendered::sync(state, out);
     for (buffer, entry) in state.buffers.iter_mut() {
         let (doc, tracked) = match &mut entry.content {
             Content::Text {
@@ -298,7 +297,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
         return;
     };
     let arrive = match view {
-        View::Text(_) => Arrive::Text,
+        View::Text(_) | View::Rendered(_) => Arrive::Text,
         View::Diff(_) => Arrive::Diff,
     };
     let view = view.text_mut();
@@ -534,7 +533,7 @@ pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
     }
 }
 
-/// Whole-file staging; a discard waits in `state.git.confirm` for `Command::Confirm`.
+/// Whole-file staging; a discard waits in `state.confirm` for `Command::Confirm`.
 pub fn file_op(state: &mut State, op: FileOp, out: &mut Vec<Effect>) {
     let resolve = |path: &Path| helix_stdx::path::normalize(state.root.path().join(path));
     match op {
@@ -559,7 +558,7 @@ pub fn file_op(state: &mut State, op: FileOp, out: &mut Vec<Effect>) {
                     state.notice = Some(Notice::Unchanged { path })
                 }
                 Some((file, Change::Untracked)) => {
-                    state.git.confirm = Some(Confirm::Discard {
+                    state.confirm = Some(Confirm::Discard {
                         path,
                         how: Discard::Delete(file),
                     })
@@ -571,7 +570,7 @@ pub fn file_op(state: &mut State, op: FileOp, out: &mut Vec<Effect>) {
                     | Change::Unstaged(_)
                     | Change::Both { .. },
                 )) => {
-                    state.git.confirm = Some(Confirm::Discard {
+                    state.confirm = Some(Confirm::Discard {
                         path,
                         how: Discard::Checkout,
                     })
@@ -581,26 +580,13 @@ pub fn file_op(state: &mut State, op: FileOp, out: &mut Vec<Effect>) {
     }
 }
 
-pub fn confirm(state: &mut State, answer: Answer, out: &mut Vec<Effect>) {
-    match (state.git.confirm.take(), answer) {
-        (None, _) => {}
-        (Some(Confirm::Discard { .. }), Answer::No) => {
-            state.notice = Some(Notice::DiscardNotConfirmed)
+/// Runs a confirmed discard.
+pub fn discard(state: &mut State, path: PathBuf, how: Discard, out: &mut Vec<Effect>) {
+    match how {
+        Discard::Checkout => {
+            out.extend(index_job(state, &path, IndexOp::Checkout).map(Effect::Job))
         }
-        (
-            Some(Confirm::Discard {
-                path,
-                how: Discard::Checkout,
-            }),
-            Answer::Yes,
-        ) => out.extend(index_job(state, &path, IndexOp::Checkout).map(Effect::Job)),
-        (
-            Some(Confirm::Discard {
-                how: Discard::Delete(file),
-                ..
-            }),
-            Answer::Yes,
-        ) => out.push(Effect::Job(Job::Fs {
+        Discard::Delete(file) => out.push(Effect::Job(Job::Fs {
             root: state.root.path().to_owned(),
             op: FsOp::Remove {
                 path: file,

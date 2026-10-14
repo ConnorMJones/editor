@@ -108,6 +108,11 @@ impl Workspace {
                     "diff-tab-close",
                     Some(div().text_color(theme.text_muted).child("±")),
                 ),
+                TabKey::Rendered(_) => (
+                    "rendered-tab",
+                    "rendered-tab-close",
+                    Some(div().text_color(theme.text_muted).child("◉")),
+                ),
             };
             let key = item.view.buffer().data().as_ffi();
             let close = div()

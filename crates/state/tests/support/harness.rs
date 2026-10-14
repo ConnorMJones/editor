@@ -5,22 +5,75 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use model::color::{Palette, Rgb};
 use model::config::TabsConfig;
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
 use state::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
+
 use state::layout::{PaneId, TextView, View};
+use state::typeset::{Look, Request};
 use state::watch::{self, Watcher};
-use state::{Effect, Root, State, input, job, register};
+use state::{Effect, Root, State, changes, input, job, register};
 
 pub struct Harness {
     pub state: State,
     pub quit: bool,
     /// Stands in for the host clipboards: `[system, primary]`.
     pub clipboard: [Option<String>; 2],
+    /// URLs the host was asked to open, in order.
+    pub urls: Vec<String>,
+    pub typesetting: Typesetting,
+    /// Typeset requests waiting for `release`.
+    pub held: Vec<Request>,
     effects: Vec<Effect>,
     watcher: Option<(Watcher, mpsc::Receiver<Vec<PathBuf>>)>,
     _dir: Option<tempfile::TempDir>,
+}
+
+/// Light text on a base16 palette, for figures typeset in tests.
+pub const LOOK: Look = Look {
+    text: Rgb {
+        r: 0xd0,
+        g: 0xd0,
+        b: 0xd0,
+    },
+    inline_pt: 12.0,
+    block_pt: 14.0,
+    palette: Palette(
+        [Rgb {
+            r: 0x80,
+            g: 0x80,
+            b: 0x80,
+        }; 16],
+    ),
+};
+
+/// Typesets on one process-wide typesetter with the embedded fonts, so results do not depend
+/// on the machine.
+#[cfg(feature = "integration")]
+fn run_typeset(request: Request) -> state::typeset::Done {
+    use std::sync::{Mutex, OnceLock};
+    static TYPESETTER: OnceLock<Mutex<(typeset::Typesetter, String)>> = OnceLock::new();
+    let mut guard = TYPESETTER
+        .get_or_init(|| {
+            Mutex::new((
+                typeset::Typesetter::new(typeset::FontSource::Embedded)
+                    .expect("embedded math font"),
+                String::new(),
+            ))
+        })
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (typesetter, text) = &mut *guard;
+    state::typeset::run(typesetter, request, text)
+}
+
+/// Whether typeset requests run as they arrive or wait in `Harness::held`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Typesetting {
+    Run,
+    Hold,
 }
 
 fn slot(clipboard: Clipboard) -> usize {
@@ -37,12 +90,16 @@ impl Harness {
             root,
             helix_core::config::default_lang_loader(),
             TabsConfig::default(),
+            LOOK,
         )
         .expect("keymap builds");
         let mut harness = Harness {
             state,
             quit: false,
             clipboard: [None, None],
+            urls: Vec::new(),
+            typesetting: Typesetting::Run,
+            held: Vec::new(),
             effects: Vec::new(),
             watcher,
             _dir: None,
@@ -134,9 +191,36 @@ impl Harness {
         }
     }
 
-    /// Runs queued effects synchronously, as the host would.
+    /// Runs a typeset request as the host's typeset thread would; without the typesetter
+    /// (unit tests) it is held.
+    fn typeset(&mut self, request: Request) {
+        #[cfg(feature = "integration")]
+        {
+            let done = run_typeset(request);
+            job::complete(
+                &mut self.state,
+                job::JobResult::Typeset(done),
+                &mut self.effects,
+            );
+        }
+        #[cfg(not(feature = "integration"))]
+        self.held.push(request);
+    }
+
+    /// Runs held typeset request `index`, then what it queued.
+    pub fn release(&mut self, index: usize) {
+        let request = self.held.remove(index);
+        self.typeset(request);
+        self.drain();
+    }
+
+    /// Syncs and runs queued effects synchronously, as the host's flush does.
     fn drain(&mut self) {
-        while let Some(effect) = self.effects.pop() {
+        loop {
+            changes::sync(&mut self.state, &mut self.effects);
+            let Some(effect) = self.effects.pop() else {
+                break;
+            };
             match effect {
                 Effect::Job(work) => {
                     let result = job::run(work);
@@ -150,15 +234,14 @@ impl Harness {
                 Effect::WriteClipboard { clipboard, text } => {
                     self.clipboard[slot(clipboard)] = Some(text)
                 }
+                Effect::OpenUrl(url) => self.urls.push(url),
+                Effect::Typeset(request) => match self.typesetting {
+                    Typesetting::Run => self.typeset(request),
+                    Typesetting::Hold => self.held.push(request),
+                },
                 Effect::ReadClipboard { clipboard, then } => {
                     let text = self.clipboard[slot(clipboard)].clone();
-                    register::clipboard_contents(
-                        &mut self.state,
-                        clipboard,
-                        then,
-                        text,
-                        &mut self.effects,
-                    );
+                    register::clipboard_contents(&mut self.state, clipboard, then, text);
                 }
             }
         }
@@ -194,7 +277,8 @@ impl Harness {
             .map(|view| self.state.buffers[view.buffer()].path.clone())
     }
 
-    /// File names of `pane`'s tabs in bar order, diffs prefixed `±` and the preview marked `*`.
+    /// File names of `pane`'s tabs in bar order, diffs prefixed `±`, rendered views `◉` and the
+    /// preview marked `*`.
     pub fn tabs(&self, pane: PaneId) -> Vec<String> {
         let target = &self.state.layout.panes[pane];
         let preview = target.tabs.as_ref().and_then(|tabs| tabs.preview());
@@ -208,6 +292,7 @@ impl Harness {
                 let kind = match item.view {
                     View::Text(_) => "",
                     View::Diff(_) => "±",
+                    View::Rendered(_) => "◉",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),

@@ -1,0 +1,110 @@
+//! Typesetting output shared by the typesetter, the state that requests it and the host.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// CSS pixels per typographic point; host logical pixels are CSS pixels.
+pub const PX_PER_PT: f32 = 96.0 / 72.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Display {
+    Inline,
+    Block,
+}
+
+#[derive(Clone)]
+pub struct Svg {
+    pub bytes: Arc<[u8]>,
+    pub width_pt: f32,
+    pub height_pt: f32,
+    /// Distance from the top edge to the text baseline, known for inline math.
+    pub baseline_pt: Option<f32>,
+}
+
+impl std::fmt::Debug for Svg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Svg")
+            .field("bytes", &self.bytes.len())
+            .field("width_pt", &self.width_pt)
+            .field("height_pt", &self.height_pt)
+            .field("baseline_pt", &self.baseline_pt)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Pages {
+    pub pages: Vec<Svg>,
+    pub warnings: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub origin: Origin,
+    pub message: String,
+    pub hints: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Detached,
+    Span {
+        file: SourceFile,
+        start: LineColumn,
+        end: LineColumn,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceFile {
+    /// A file under the document root, joined onto the root.
+    Project(PathBuf),
+    /// A file compiled into the typesetter, such as the mitex definitions.
+    Embedded(&'static str),
+}
+
+/// Zero-based line, and column counted in characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineColumn {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostics {
+    pub errors: Vec<Diagnostic>,
+    pub warnings: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum DocumentError {
+    #[error("{main} is not inside the root {root}")]
+    OutsideRoot { root: PathBuf, main: PathBuf },
+    #[error("typst reported {} errors", .0.errors.len())]
+    Compile(Diagnostics),
+}
+
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.origin {
+            Origin::Detached => {}
+            Origin::Span {
+                file: SourceFile::Project(path),
+                start,
+                ..
+            } => write!(
+                f,
+                "{}:{}:{}: ",
+                path.display(),
+                start.line + 1,
+                start.column + 1
+            )?,
+            Origin::Span {
+                file: SourceFile::Embedded(path),
+                start,
+                ..
+            } => write!(f, "{path}:{}:{}: ", start.line + 1, start.column + 1)?,
+        }
+        f.write_str(&self.message)
+    }
+}

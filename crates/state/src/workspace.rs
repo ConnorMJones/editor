@@ -8,16 +8,20 @@ use model::notice::Notice;
 use model::window::PickerKind;
 
 use crate::apply::{Force, apply};
+use crate::backlinks::{self, Build};
 use crate::buffer::{BufferId, Content, Position, Target};
 use crate::changes::{self, Arrive, ListRow};
 use crate::diffview::DiffView;
 use crate::files::Files;
 use crate::job::{FsOp, Job};
-use crate::layout::{LastPane, Layout, Pane, PaneId, TabKey, Tabs, TextView, Tick, View};
+use crate::layout::{CloseError, Layout, Pane, PaneId, TabKey, Tabs, TextView, Tick, View};
+use crate::markdown::Format;
 use crate::path::RelPath;
 use crate::picker::{
-    self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource, Search,
+    self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource,
+    Referrers, Search,
 };
+use crate::rendered::{Link, RenderedView, Scroll};
 use crate::tree::{
     self, Dir, EntryKind, Fold, Listing, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget,
 };
@@ -49,6 +53,9 @@ pub fn show(state: &mut State, pane: PaneId, key: TabKey, open: OpenAs) {
     let view = match key {
         TabKey::Text(buffer) => View::Text(TextView::new(buffer)),
         TabKey::Diff(buffer) => View::Diff(DiffView::new(buffer)),
+        TabKey::Rendered(buffer) => {
+            View::Rendered(RenderedView::new(buffer, Link::Standalone, Scroll::item(0)))
+        }
     };
     let displaced = match &mut target.tabs {
         Some(tabs) => {
@@ -112,12 +119,7 @@ pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
         }
         (true, _, _) | (false, false, _) | (false, true, Force::Yes) => {}
     }
-    let now = state.layout.tick();
-    let target = &mut state.layout.panes[pane];
-    target.tabs = match target.tabs.take() {
-        Some(tabs) => tabs.remove(index, now).0,
-        None => None,
-    };
+    state.layout.remove_tab(pane, index);
     match elsewhere {
         true => {}
         false => {
@@ -142,12 +144,12 @@ fn touch(layout: &mut Layout) {
 pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) {
     let layout = &mut state.layout;
     match command {
-        // Like zed, the new pane holds a copy of the active item only.
+        // Like zed, the new pane holds only the active item; see `Tabs::split_copy`.
         WindowCommand::Split(axis) => {
             let now = layout.tick();
             let tabs = (layout.panes.get(layout.focus))
                 .and_then(Pane::active)
-                .map(|view| Tabs::new(view.clone(), OpenAs::Permanent, now));
+                .map(|view| Tabs::split_copy(view.clone(), now));
             layout.split(axis, Pane { tabs });
         }
         WindowCommand::Focus(side) => match layout.neighbour(side) {
@@ -157,7 +159,8 @@ pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) 
         WindowCommand::FocusNext => layout.focus = layout.next(),
         WindowCommand::Close => match layout.close(layout.focus) {
             Ok(()) => {}
-            Err(LastPane) => apply(state, Command::Quit, out),
+            Err(CloseError::LastPane) => apply(state, Command::Quit, out),
+            Err(CloseError::NotInLayout) => unreachable!("the focus is a leaf of the layout"),
         },
         WindowCommand::Only => layout.only(),
     }
@@ -384,6 +387,30 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                     hits: Vec::new(),
                 }),
                 PickerKind::Commands => Items::Commands,
+                PickerKind::Backlinks => {
+                    let Some(path) = (state.layout.panes.get(state.layout.focus))
+                        .and_then(Pane::active)
+                        .and_then(|view| state.buffers.get(view.buffer()))
+                        .map(|buffer| buffer.path.clone())
+                    else {
+                        return state.notice = Some(Notice::NoBuffer);
+                    };
+                    let note = match (Format::of(&path), RelPath::new(state.root.path(), &path)) {
+                        (Some(Format::Markdown), Ok(note)) => note,
+                        (Some(Format::Markdown | Format::Typst) | None, _) => {
+                            return state.notice = Some(Notice::NotANote { path });
+                        }
+                    };
+                    backlinks::ensure(state, out);
+                    backlinks::sync_buffers(state, out);
+                    let (search, hits) = match state.backlinks.build {
+                        Build::Ready => (Search::Done, backlinks::hits(state, &note)),
+                        Build::Unbuilt | Build::Waiting | Build::Building { .. } => {
+                            (Search::Running, Vec::new())
+                        }
+                    };
+                    Items::Backlinks(Referrers { note, search, hits })
+                }
             };
             state.overlay = Overlay::Picker(Picker::new(items));
         }
@@ -424,8 +451,8 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                     );
                     focus_editor(state);
                 }
-                Items::Grep(grep) => {
-                    let hit = &grep.hits[index];
+                Items::Grep(Grep { hits, .. }) | Items::Backlinks(Referrers { hits, .. }) => {
+                    let hit = &hits[index];
                     let open = state.tab_config.open_from_picker;
                     crate::apply::open(
                         state,
@@ -487,7 +514,7 @@ fn edit_query(state: &mut State, edit: impl FnOnce(&mut String), out: &mut Vec<E
                 current: state.grep.clone(),
             }));
         }
-        Items::Files(_) | Items::Buffers(_) | Items::Commands => {
+        Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
             let narrowing = Narrowing::between(&previous, &picker.query);
             picker::filter(picker, &mut state.matcher, narrowing);
         }
@@ -628,7 +655,7 @@ pub fn toggle_diff(state: &mut State) {
         item.view.text().scroll.anchor,
     );
     let key = match item.view.key() {
-        TabKey::Text(buffer) => TabKey::Diff(buffer),
+        TabKey::Text(buffer) | TabKey::Rendered(buffer) => TabKey::Diff(buffer),
         TabKey::Diff(buffer) => TabKey::Text(buffer),
     };
     let open = match tabs.preview() == Some(tabs.active()) {

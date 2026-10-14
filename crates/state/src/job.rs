@@ -12,16 +12,19 @@ use helix_core::{Range, Rope, Selection};
 use model::command::{Command, Dirs};
 use model::notice::Notice;
 
-use crate::apply::{line_column, map_views};
-use crate::buffer::{BufferId, Content, Disk, Target, TextDoc};
-use crate::diff::{Base, BaseRead, Diff, Edge, Landing, Lines, Outcome, Stamp};
-use crate::files::{self, Files, Rescan, Walked};
+use crate::apply::map_views;
+use crate::buffer::{BufferId, Content, Disk, Jump, TextDoc};
+use crate::diff::{Base, BaseRead, Diff, Lines, Outcome, Stamp};
+use crate::files::{self, Changed, Files, Rescan, Walked};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
 
 use crate::path::RelPath;
 use crate::picker::{self, Hit, Items, Preview, Search};
 use crate::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
-use crate::{Effect, Exit, Overlay, Refresh, Repo, State, changes, request_git, scroll, watch};
+use crate::{
+    Effect, Exit, Overlay, Refresh, Repo, State, backlinks, changes, request_git, typeset, vault,
+    watch,
+};
 
 /// Blocking work run off the UI thread.
 pub enum Job {
@@ -37,6 +40,11 @@ pub enum Job {
         text: Rope,
         revision: usize,
         dirs: Dirs,
+    },
+    /// Writes a typeset export, such as a PDF.
+    Export {
+        path: PathBuf,
+        bytes: Vec<u8>,
     },
 
     // Workspace: file index, tree, git, disk sync, file operations, search.
@@ -76,6 +84,12 @@ pub enum Job {
         root: PathBuf,
         path: RelPath,
         languages: Arc<Loader>,
+    },
+    /// Reads the outgoing links of notes for the backlinks index.
+    Links {
+        root: PathBuf,
+        paths: Vec<RelPath>,
+        stamp: u64,
     },
 
     // Git diffs and index changes.
@@ -141,6 +155,11 @@ pub enum JobResult {
         result: io::Result<usize>,
         mtime: Option<SystemTime>,
     },
+    Exported {
+        path: PathBuf,
+        result: io::Result<usize>,
+    },
+    Typeset(typeset::Done),
 
     Indexed(Walked),
     Listed {
@@ -166,6 +185,10 @@ pub enum JobResult {
     Previewed {
         path: RelPath,
         preview: Preview,
+    },
+    Linked {
+        stamp: u64,
+        reads: Vec<(RelPath, backlinks::Read)>,
     },
 
     Bases {
@@ -266,6 +289,10 @@ pub fn run(job: Job) -> JobResult {
                 mtime,
             }
         }
+        Job::Export { path, bytes } => JobResult::Exported {
+            result: std::fs::write(&path, &bytes).map(|()| bytes.len()),
+            path,
+        },
         Job::Index { root } => {
             let mut walked = files::walk(&root, &RelPath::ROOT, None);
             walked.dirs.push(RelPath::ROOT);
@@ -384,6 +411,10 @@ pub fn run(job: Job) -> JobResult {
             };
             JobResult::Previewed { path, preview }
         }
+        Job::Links { root, paths, stamp } => JobResult::Linked {
+            stamp,
+            reads: backlinks::read(&root, paths),
+        },
         Job::DiffBase {
             buffer,
             git_dir,
@@ -433,32 +464,20 @@ pub fn run(job: Job) -> JobResult {
     }
 }
 
-/// Applies a finished job, then starts diffs its changes made stale.
+/// Applies a finished job.
 pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
-    finish(state, result, out);
-    changes::sync(state, out);
-}
-
-fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
     match result {
         JobResult::Opened { buffer, read } => {
             let Some(entry) = state.buffers.get_mut(buffer) else {
                 return;
             };
-            let jump = match &entry.content {
-                Content::Loading { jump } => *jump,
+            let jump = match &mut entry.content {
+                Content::Loading { jump } => jump.take(),
                 Content::Text { .. } => return,
             };
             let notice = match read {
                 OpenRead::Text { doc, disk, mtime } => {
                     let len = doc.text.len_chars();
-                    let jump = jump.map(|jump| {
-                        let arrival = match jump.to {
-                            Target::Position(to) => Arrival::At(line_column(&doc.text, to)),
-                            Target::Hunk(edge) => Arrival::Hunk(edge),
-                        };
-                        (jump.pane, jump.arrive, arrival)
-                    });
                     entry.content = Content::Text {
                         doc,
                         disk,
@@ -482,21 +501,8 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         }
                     }
                     match jump {
-                        Some((pane, arrive, Arrival::Hunk(edge))) => {
-                            changes::expect_landing(state, buffer, Landing { pane, edge, arrive })
-                        }
-                        Some((pane, arrive, Arrival::At(at))) => {
-                            let target = (state.layout.panes.get_mut(pane)).and_then(|target| {
-                                let index = target.tabs.as_ref()?.find(arrive.key(buffer))?;
-                                Some(target.items_mut()[index].view.text_mut())
-                            });
-                            match target {
-                                Some(view) => {
-                                    view.selection = Selection::point(at);
-                                    scroll::follow_cursor(state, pane);
-                                }
-                                None => {}
-                            }
+                        Some(Jump { pane, arrive, to }) => {
+                            crate::apply::place(state, pane, buffer, arrive, to)
                         }
                         None => {}
                     }
@@ -591,11 +597,13 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         *items = files.clone();
                         picker::filter(picker, &mut state.matcher, picker::Narrowing::All);
                     }
-                    Items::Buffers(_) | Items::Commands | Items::Grep(_) => {}
+                    Items::Buffers(_) | Items::Commands | Items::Grep(_) | Items::Backlinks(_) => {}
                 },
                 Overlay::None | Overlay::Prompt(_) => {}
             }
             state.files = Files::Ready(files);
+            vault::invalidate(&mut state.vault);
+            backlinks::reconcile(state, out);
             crate::workspace::request_preview(state, out);
         }
         JobResult::Listed { dir, result } => {
@@ -642,9 +650,16 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 true => {}
                 false => out.push(Effect::Watch(new_dirs)),
             }
-            match &mut state.files {
+            let changed = match &mut state.files {
                 Files::Ready(files) => files::apply_rescan(Arc::make_mut(files), rescan),
-                Files::Loading => {}
+                Files::Loading => Changed::No,
+            };
+            match changed {
+                Changed::Yes => {
+                    vault::invalidate(&mut state.vault);
+                    backlinks::reconcile(state, out);
+                }
+                Changed::No => {}
             }
         }
         JobResult::Git(result) => {
@@ -828,6 +843,19 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             tree::rebuild(&mut state.tree);
             watch::changed(state, changed, out);
         }
+        JobResult::Linked { stamp, reads } => backlinks::linked(state, stamp, reads, out),
+        JobResult::Typeset(done) => typeset::finish(state, done, out),
+        JobResult::Exported {
+            path,
+            result: Ok(bytes),
+        } => state.notice = Some(Notice::Exported { path, bytes }),
+        JobResult::Exported {
+            path,
+            result: Err(error),
+        } => {
+            tracing::warn!(?path, %error, "export failed");
+            state.notice = Some(Notice::WriteFailed { path, error });
+        }
         JobResult::Bases { buffer, result } => changes::bases_read(state, buffer, result, out),
         JobResult::Diffed {
             buffer,
@@ -855,17 +883,15 @@ fn finish(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         picker.matches.extend(0..grep.hits.len() as u32);
                         picker.cursor = 0;
                     }
-                    Items::Grep(_) | Items::Files(_) | Items::Buffers(_) | Items::Commands => {}
+                    Items::Grep(_)
+                    | Items::Files(_)
+                    | Items::Buffers(_)
+                    | Items::Commands
+                    | Items::Backlinks(_) => {}
                 },
                 Overlay::None | Overlay::Prompt(_) => {}
             }
             crate::workspace::request_preview(state, out);
         }
     }
-}
-
-/// Where a jump puts the cursor once the opened text is in.
-enum Arrival {
-    At(usize),
-    Hunk(Edge),
 }

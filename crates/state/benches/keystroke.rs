@@ -31,6 +31,12 @@ fn keystroke(c: &mut Criterion) {
         Root::open(dir.path()).unwrap(),
         helix_core::config::default_lang_loader(),
         model::config::TabsConfig::default(),
+        state::typeset::Look {
+            text: model::color::Rgb { r: 0, g: 0, b: 0 },
+            inline_pt: 12.0,
+            block_pt: 14.0,
+            palette: model::color::Palette([model::color::Rgb { r: 0, g: 0, b: 0 }; 16]),
+        },
     )
     .unwrap();
     let mut out = Vec::new();
@@ -41,8 +47,10 @@ fn keystroke(c: &mut Criterion) {
             Effect::Job(work) => job::complete(&mut state, job::run(work), &mut out),
             Effect::Quit
             | Effect::Watch(_)
+            | Effect::Typeset(_)
             | Effect::WriteClipboard { .. }
-            | Effect::ReadClipboard { .. } => {}
+            | Effect::ReadClipboard { .. }
+            | Effect::OpenUrl(_) => {}
         }
     }
     apply(&mut state, Command::InsertMode, &mut out);

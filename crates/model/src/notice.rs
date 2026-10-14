@@ -1,6 +1,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::typeset::Diagnostic;
+
 /// Status-line feedback produced by commands and finished jobs.
 #[derive(Debug)]
 pub enum Notice {
@@ -127,6 +129,41 @@ pub enum Notice {
     NoConflictUnderSelection,
     /// A selected conflict has no `|||||||` section to take.
     NoConflictBase,
+
+    // Rendered markdown and typst views.
+    /// Only markdown and typst files have a rendered view.
+    NotRenderable {
+        path: PathBuf,
+    },
+    /// A followed link or path names no file and none can be created for it.
+    LinkNotFound {
+        target: String,
+    },
+    NoHeading,
+    HeadingNotFound {
+        heading: String,
+    },
+    /// `gf` found no link, URL or path under the cursor.
+    NothingToFollow,
+    /// Backlinks are for markdown notes in the vault.
+    NotANote {
+        path: PathBuf,
+    },
+    CreateNotConfirmed,
+    /// Typst reported errors; `first` is the first of `count`.
+    TypstErrors {
+        first: Diagnostic,
+        count: usize,
+    },
+    Exported {
+        path: PathBuf,
+        bytes: usize,
+    },
+    MarkdownExport,
+    /// Only typst files export to PDF.
+    NotTypst {
+        path: PathBuf,
+    },
 }
 
 /// Mirrors `helix_core::surround::Error`.
@@ -232,6 +269,32 @@ impl std::fmt::Display for Notice {
             Notice::NoConflictUnderSelection => f.write_str("no conflict under the selection"),
             Notice::NoConflictBase => {
                 f.write_str("conflict has no base section (needs merge.conflictStyle diff3)")
+            }
+            Notice::NotRenderable { path } => {
+                write!(
+                    f,
+                    "{} has no rendered view (markdown and typst only)",
+                    path.display()
+                )
+            }
+            Notice::LinkNotFound { target } => write!(f, "link target not found: {target}"),
+            Notice::NoHeading => f.write_str("no more headings"),
+            Notice::HeadingNotFound { heading } => write!(f, "no heading {heading:?}"),
+            Notice::NothingToFollow => f.write_str("no link or path under the cursor"),
+            Notice::NotANote { path } => {
+                write!(f, "{} is not a markdown note in the vault", path.display())
+            }
+            Notice::CreateNotConfirmed => f.write_str("note not created"),
+            Notice::TypstErrors { first, count } => match count {
+                1 => write!(f, "typst: {first}"),
+                count => write!(f, "typst: {first} (+{} more)", count - 1),
+            },
+            Notice::Exported { path, bytes } => {
+                write!(f, "exported {} ({bytes} B)", path.display())
+            }
+            Notice::MarkdownExport => f.write_str("export-pdf: not supported for markdown yet"),
+            Notice::NotTypst { path } => {
+                write!(f, "export-pdf: {} is not a typst file", path.display())
             }
         }
     }
