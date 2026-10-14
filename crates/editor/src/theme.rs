@@ -22,7 +22,7 @@ pub struct Theme {
     pub cell: Size<Pixels>,
     pub ui: Font,
     pub ui_size: Pixels,
-    /// Rendered markdown prose per `Modifiers` bold/italic combination, in the UI family.
+    /// Rendered prose per `Modifiers` bold/italic combination.
     pub prose: [Font; 4],
     pub prose_size: Pixels,
     /// Distance from a prose line's baseline to its bottom, at `prose_size` and `PROSE_LINE`.
@@ -79,14 +79,14 @@ fn hsla(c: Rgb) -> Hsla {
 }
 
 impl Theme {
-    /// `prose_extent` is the UI font's ascent and descent at 1px.
+    /// `prose_extent` is the prose font's ascent and descent at 1px.
     pub fn new(
         palette: &Palette,
         config: &Config,
         cell: Size<Pixels>,
         prose_extent: [f32; 2],
     ) -> Theme {
-        let prose_size = prose_size(config);
+        let prose_size = config.font.prose().size_px;
         let [ascent, descent] = prose_extent.map(|extent| extent * prose_size);
         let colors = Colors(palette.0.map(hsla));
         let diff = &config.theme.diff;
@@ -126,12 +126,12 @@ impl Theme {
             ui: font(config.font.ui.family.clone()),
             ui_size: px(config.font.ui.size_px),
             prose: {
-                let ui = font(config.font.ui.family.clone());
+                let prose = font(config.font.prose().family.clone());
                 [
-                    ui.clone(),
-                    ui.clone().bold(),
-                    ui.clone().italic(),
-                    ui.bold().italic(),
+                    prose.clone(),
+                    prose.clone().bold(),
+                    prose.clone().italic(),
+                    prose.bold().italic(),
                 ]
             },
             prose_size: px(prose_size),
@@ -175,11 +175,6 @@ impl Theme {
 
 /// Line height of rendered prose, relative to its size.
 pub const PROSE_LINE: f32 = 1.5;
-
-/// Rendered prose size in pixels; Obsidian reads at 16px beside a 14px interface.
-pub fn prose_size(config: &Config) -> f32 {
-    config.font.ui.size_px * 8.0 / 7.0
-}
 
 // Workspace chrome colours: title bar, tab line, tree, pickers.
 

@@ -2,7 +2,7 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use model::color::Rgb;
-use typeset::{Display, FontSource, Typesetter};
+use typeset::{Display, FontSource, Pt, Typesetter};
 
 const WHITE: Rgb = Rgb {
     r: 0xff,
@@ -18,10 +18,16 @@ fn new(c: &mut Criterion) {
     let mut group = c.benchmark_group("new");
     group.sample_size(10);
     group.bench_function("system_and_embedded", |b| {
-        b.iter(|| black_box(Typesetter::new(FontSource::SystemAndEmbedded).expect("fonts")))
+        b.iter(|| {
+            black_box(
+                Typesetter::new(FontSource::SystemAndEmbedded, "Libertinus Serif").expect("fonts"),
+            )
+        })
     });
     group.bench_function("embedded", |b| {
-        b.iter(|| black_box(Typesetter::new(FontSource::Embedded).expect("fonts")))
+        b.iter(|| {
+            black_box(Typesetter::new(FontSource::Embedded, "Libertinus Serif").expect("fonts"))
+        })
     });
     group.finish();
 }
@@ -36,12 +42,12 @@ fn math_cold(c: &mut Criterion) {
         b.iter_batched(
             || {
                 typst::comemo::evict(0);
-                Typesetter::new(FontSource::SystemAndEmbedded).expect("fonts")
+                Typesetter::new(FontSource::SystemAndEmbedded, "Libertinus Serif").expect("fonts")
             },
             |mut typesetter| {
                 black_box(
                     typesetter
-                        .math(r"\frac{a+b}{c^2}", Display::Inline, WHITE, 16.0)
+                        .math(r"\frac{a+b}{c^2}", Display::Inline, WHITE, Pt(16.0))
                         .expect("math"),
                 )
             },
@@ -56,9 +62,10 @@ fn math_cold(c: &mut Criterion) {
 // (~100-200 us) and writes SVG (~50 us): ~0.3-0.5 ms. Each formula is new, so no layout
 // cache hit.
 fn math_warm(c: &mut Criterion) {
-    let mut typesetter = Typesetter::new(FontSource::SystemAndEmbedded).expect("fonts");
+    let mut typesetter =
+        Typesetter::new(FontSource::SystemAndEmbedded, "Libertinus Serif").expect("fonts");
     typesetter
-        .math("x", Display::Inline, WHITE, 16.0)
+        .math("x", Display::Inline, WHITE, Pt(16.0))
         .expect("warm up");
     let mut counter = 0u64;
     c.bench_function("math/warm", |b| {
@@ -67,7 +74,7 @@ fn math_warm(c: &mut Criterion) {
             let tex = format!(r"\sum_{{i=1}}^{{{counter}}} \frac{{x_i}}{{{counter}}}");
             black_box(
                 typesetter
-                    .math(&tex, Display::Inline, WHITE, 16.0)
+                    .math(&tex, Display::Inline, WHITE, Pt(16.0))
                     .expect("math"),
             )
         })
@@ -78,7 +85,8 @@ fn math_warm(c: &mut Criterion) {
 // other sections and the layout of untouched paragraphs, so relayout is one paragraph plus
 // page assembly (~1-3 ms), and typst-svg writes 5 text pages (~0.5 ms each): ~5 ms.
 fn document_incremental(c: &mut Criterion) {
-    let mut typesetter = Typesetter::new(FontSource::SystemAndEmbedded).expect("fonts");
+    let mut typesetter =
+        Typesetter::new(FontSource::SystemAndEmbedded, "Libertinus Serif").expect("fonts");
     let dir = tempfile::tempdir().expect("tempdir");
     let main = dir.path().join("main.typ");
     let sentence = "The quick brown fox jumps over the lazy dog while typst lays out \
@@ -100,6 +108,7 @@ fn document_incremental(c: &mut Criterion) {
     let marker = source.find("000000").expect("marker");
     let pages = typesetter
         .typst_pages(dir.path(), &main, &source)
+        .result
         .expect("compiles");
     assert_eq!(pages.pages.len(), 5);
     let mut counter = 0u32;
@@ -110,6 +119,7 @@ fn document_incremental(c: &mut Criterion) {
             black_box(
                 typesetter
                     .typst_pages(dir.path(), &main, &source)
+                    .result
                     .expect("compiles"),
             )
         })
@@ -123,6 +133,7 @@ fn document_incremental(c: &mut Criterion) {
             black_box(
                 typesetter
                     .typst_pages(dir.path(), &main, &source)
+                    .result
                     .expect("compiles"),
             )
         })

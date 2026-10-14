@@ -18,6 +18,7 @@ use gpui::{
 use model::color::{Base16, Palette};
 use model::config::{Config, Restore};
 use model::notice::Notice;
+use model::typeset::{PX_PER_PT, Pt};
 use state::job::JobResult;
 use state::typeset::{Look, Request};
 use state::workspace::{self as commands, Close};
@@ -59,26 +60,14 @@ fn main() -> anyhow::Result<()> {
         )),
     };
     let title = root.path().display().to_string();
-    let look = Look {
-        text: palette[Base16::Base05],
-        // New Computer Modern reads smaller than the prose font at the same size.
-        inline_pt: theme::prose_size(&config) * PT_PER_PX * 1.2,
-        block_pt: theme::prose_size(&config) * PT_PER_PX * 1.4,
-        palette,
-    };
-    let state = State::new(
-        root,
-        helix_core::config::default_lang_loader(),
-        config.tabs,
-        look,
-    )?;
+    let prose = config.font.prose().family.clone();
     let (typeset_tx, typeset_rx) = std::sync::mpsc::channel::<Request>();
     let (typeset_done_tx, typeset_done_rx) = async_channel::unbounded::<JobResult>();
     // One thread owns the typesetter, so its fonts load once and its caches stay warm.
     std::thread::Builder::new()
         .name("typeset".to_owned())
         .spawn(move || {
-            let mut typesetter = match Typesetter::new(FontSource::SystemAndEmbedded) {
+            let mut typesetter = match Typesetter::new(FontSource::SystemAndEmbedded, &prose) {
                 Ok(typesetter) => typesetter,
                 Err(error) => {
                     tracing::error!(%error, "cannot start the typesetter");
@@ -104,7 +93,7 @@ fn main() -> anyhow::Result<()> {
 
     gpui_platform::application().run(move |cx: &mut App| {
         let installed = cx.text_system().all_font_names();
-        let missing: Vec<&str> = [&config.font.mono, &config.font.ui]
+        let missing: Vec<&str> = [&config.font.mono, &config.font.ui, config.font.prose()]
             .into_iter()
             .map(|spec| spec.family.as_str())
             .filter(|family| !installed.iter().any(|name| name == family))
@@ -130,12 +119,29 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         };
-        let ui = text_system.resolve_font(&font(config.font.ui.family.clone()));
+        let prose = text_system.resolve_font(&font(config.font.prose().family.clone()));
         let prose_extent = [
-            text_system.ascent(ui, px(1.)) / px(1.),
-            text_system.descent(ui, px(1.)).abs() / px(1.),
+            text_system.ascent(prose, px(1.)) / px(1.),
+            text_system.descent(prose, px(1.)).abs() / px(1.),
         ];
         let theme = Theme::new(&palette, &config, cell, prose_extent);
+        let look = Look {
+            text: palette[Base16::Base05],
+            prose_size: Pt(theme.prose_size / px(1.) / PX_PER_PT),
+            palette,
+        };
+        let state = match State::new(
+            root,
+            helix_core::config::default_lang_loader(),
+            config.tabs,
+            look,
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::error!(%error, "cannot build the editor state");
+                std::process::exit(1);
+            }
+        };
         let opened = cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -172,6 +178,7 @@ fn main() -> anyhow::Result<()> {
                         rendered: Default::default(),
                         typeset: typeset_tx,
                         rasters: Default::default(),
+                        window_height: window.viewport_size().height,
                     }
                 });
                 workspace.update(cx, |workspace, cx| {
@@ -262,9 +269,6 @@ fn main() -> anyhow::Result<()> {
     });
     Ok(())
 }
-
-/// Typographic points per CSS pixel; figures are drawn at the inverse.
-const PT_PER_PX: f32 = 0.75;
 
 fn read_config(path: &Path) -> anyhow::Result<Config> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {path:?}"))?;

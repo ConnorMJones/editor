@@ -2,10 +2,10 @@
 //! follow, and their commands.
 
 use helix_core::{Selection, SmallVec, Transaction};
-use model::command::{Direction, RenderedCommand, ScrollBy};
+use model::command::{Direction, RenderedCommand, ScrollBy, ZoomBy};
 use model::config::OpenAs;
 use model::notice::Notice;
-use model::typeset::{Origin, SourceFile};
+use model::typeset::{LineColumn, Origin, PagePoint, SourceFile};
 use model::window::{Axis, Px};
 use slotmap::SecondaryMap;
 
@@ -15,7 +15,7 @@ use crate::changes::Arrive;
 use crate::layout::{Pane, PaneId, TabKey, Tabs, TextView, View};
 use crate::markdown::{self, Base, BlockKind, Callout, CalloutFold, Format, Markdown};
 use crate::path::RelPath;
-use crate::typeset::{self, Outcome, Typst};
+use crate::typeset::{self, Compiled, Locate, Outcome, Typst};
 use crate::vault;
 use crate::{Effect, State, scroll, workspace};
 
@@ -44,6 +44,7 @@ pub struct RenderedView {
     /// Callouts, by `Callout::index`, whose fold the reader flipped from the default.
     pub toggled: Vec<u32>,
     pub fit: Fit,
+    pub zoom: Zoom,
 }
 
 /// How a typst preview scales its pages.
@@ -58,8 +59,10 @@ pub enum Fit {
 /// Where a rendered view stands, or is asked to move for the host to measure.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scroll {
-    /// Source line to bring to the top once the buffer is parsed.
+    /// Source line to bring to the top once the buffer is parsed or located.
     Line(usize),
+    /// A point on a typst page; the host turns it into a place at its drawn scale.
+    Point(PagePoint),
     At(BlockScroll),
     /// Keys moved the view from `from` by `by`.
     Moved {
@@ -74,13 +77,38 @@ pub enum Scroll {
 pub struct BlockScroll {
     pub item: usize,
     pub offset: Px,
+    /// How far the view is panned right; zero unless typst pages are wider than the pane.
+    pub left: Px,
 }
 
-/// A distance in the host's measured lines and viewport heights.
+/// A distance in the host's measured lines and viewport heights; `columns` move sideways.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Motion {
     pub lines: i32,
     pub half_pages: i32,
+    pub columns: i32,
+}
+
+/// Typst page scale in steps of 1.25× from the fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Zoom(i8);
+
+impl Zoom {
+    pub const FIT: Zoom = Zoom(0);
+    const OUT: i8 = -6;
+    const IN: i8 = 8;
+
+    pub fn step(self, by: ZoomBy) -> Zoom {
+        match by {
+            ZoomBy::In => Zoom((self.0 + 1).min(Zoom::IN)),
+            ZoomBy::Out => Zoom((self.0 - 1).max(Zoom::OUT)),
+            ZoomBy::Reset => Zoom::FIT,
+        }
+    }
+
+    pub fn factor(self) -> f32 {
+        1.25f32.powi(self.0.into())
+    }
 }
 
 impl Scroll {
@@ -88,13 +116,14 @@ impl Scroll {
         Scroll::At(BlockScroll {
             item,
             offset: Px(0.0),
+            left: Px(0.0),
         })
     }
 
     /// The place moves start from, once the line is resolved.
     pub fn anchor(self) -> Option<BlockScroll> {
         match self {
-            Scroll::Line(_) => None,
+            Scroll::Line(_) | Scroll::Point(_) => None,
             Scroll::At(at) | Scroll::Moved { from: at, .. } => Some(at),
         }
     }
@@ -126,6 +155,7 @@ impl RenderedView {
             link,
             toggled: Vec::new(),
             fit: Fit::Width,
+            zoom: Zoom::FIT,
         }
     }
 
@@ -290,9 +320,9 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
                 Some(Some(View::Text(text))) if text.buffer() == entry.buffer => {
                     let source = doc.map(|doc| {
                         let rope = doc.text.slice(..);
-                        let cursor = rope.char_to_line(text.selection.primary().cursor(rope));
+                        let at = text.selection.primary().cursor(rope);
                         let top = rope.char_to_line(text.scroll.anchor.min(rope.len_chars()));
-                        (cursor, top)
+                        (rope.char_to_line(at), top, rope.char_to_byte(at))
                     });
                     (view.link, source)
                 }
@@ -306,19 +336,60 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             continue;
         };
         view.link = link;
+        // Typst lines are found on the pages by the typesetter, once there are pages.
+        match (
+            doc,
+            buffers.get(entry.buffer),
+            previews.get_mut(entry.buffer),
+        ) {
+            (Some(doc), Some(Buffer { path, .. }), Some(Preview::Typst(typst))) => {
+                let wanted = match (&typst.pages, view.scroll, &mut view.link, source) {
+                    (None, _, _, _) => None,
+                    (Some(_), Scroll::Line(line), _, _) => {
+                        Some(doc.text.line_to_byte(line.min(doc.text.len_lines() - 1)))
+                    }
+                    (
+                        Some(_),
+                        _,
+                        Link::Follows {
+                            seen: Some(seen), ..
+                        },
+                        Some((cursor, _, _)),
+                    ) if seen.cursor == cursor => None,
+                    (Some(_), scroll, Link::Follows { seen, .. }, Some((cursor, top, byte))) => {
+                        *seen = Some(Seen {
+                            cursor,
+                            top,
+                            item: scroll.anchor().map_or(0, |at| at.item),
+                        });
+                        Some(byte)
+                    }
+                    (Some(_), _, Link::Follows { .. } | Link::Standalone, _) => None,
+                };
+                match (wanted, typst.locate) {
+                    (None, _) => {}
+                    (Some(cursor), Locate::Idle) => {
+                        typst.locate = Locate::Running;
+                        out.push(Effect::Typeset(typeset::Request::Locate {
+                            buffer: entry.buffer,
+                            main: path.clone(),
+                            cursor,
+                        }));
+                    }
+                    (Some(cursor), Locate::Running | Locate::Queued(_)) => {
+                        typst.locate = Locate::Queued(cursor)
+                    }
+                }
+                continue;
+            }
+            (_, _, Some(Preview::Typst(_))) => continue,
+            (_, _, Some(Preview::Markdown(_)) | None) => {}
+        }
         let markdown = match (doc, previews.get(entry.buffer)) {
             (Some(doc), Some(Preview::Markdown(parsed))) if parsed.version == doc.version => {
                 &parsed.markdown
             }
-            (_, Some(Preview::Typst(_))) => {
-                // Until typst maps source lines to pages, a wanted line shows the first page.
-                match view.scroll {
-                    Scroll::Line(_) => view.scroll = Scroll::item(0),
-                    Scroll::At(_) | Scroll::Moved { .. } => {}
-                }
-                continue;
-            }
-            (_, Some(Preview::Markdown(_)) | None) => continue,
+            (_, Some(Preview::Markdown(_) | Preview::Typst(_)) | None) => continue,
         };
         let last = markdown.roots.len().saturating_sub(1);
         let remap = reparsed.contains(&entry.buffer);
@@ -330,6 +401,8 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
                 at.item = markdown.item_at_line(line).min(last)
             }
             (Scroll::At(at) | Scroll::Moved { from: at, .. }, _, _) => at.item = at.item.min(last),
+            // Page points belong to typst previews; a markdown view reads one as its item.
+            (Scroll::Point(at), _, _) => view.scroll = Scroll::item(at.page.min(last)),
         }
         match (remap, &mut view.link, entry.seen) {
             (
@@ -341,7 +414,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             ) => seen.item = markdown.item_at_line(line),
             (true | false, Link::Follows { .. } | Link::Standalone, _) => {}
         }
-        let (Link::Follows { seen, .. }, Some((cursor, top)), Some(at)) =
+        let (Link::Follows { seen, .. }, Some((cursor, top, _)), Some(at)) =
             (&mut view.link, source, view.scroll.anchor())
         else {
             continue;
@@ -601,27 +674,54 @@ pub fn command(state: &mut State, command: RenderedCommand) {
             }
             return;
         }
+        (RenderedCommand::Zoom(by), _) => {
+            match layout.rendered_mut(focus) {
+                Some(view) => view.zoom = view.zoom.step(by),
+                None => {}
+            }
+            return;
+        }
         // Moves wait for the line to resolve into a place.
         (_, None) => return,
-        (RenderedCommand::Scroll(direction, by), Some(from)) => {
-            let sign = match direction {
+        (RenderedCommand::Scroll(..) | RenderedCommand::Pan(_), Some(from)) => {
+            let sign = |direction| match direction {
                 Direction::Forward => 1,
                 Direction::Backward => -1,
             };
-            let (lines, half_pages) = match by {
-                ScrollBy::Lines => (sign, 0),
-                ScrollBy::Page => (0, 2 * sign),
-                ScrollBy::HalfPageCursor => (0, sign),
+            let step = match command {
+                RenderedCommand::Scroll(direction, ScrollBy::Lines) => Motion {
+                    lines: sign(direction),
+                    ..Motion::default()
+                },
+                RenderedCommand::Scroll(direction, ScrollBy::Page) => Motion {
+                    half_pages: 2 * sign(direction),
+                    ..Motion::default()
+                },
+                RenderedCommand::Scroll(direction, ScrollBy::HalfPageCursor) => Motion {
+                    half_pages: sign(direction),
+                    ..Motion::default()
+                },
+                RenderedCommand::Pan(direction) => Motion {
+                    columns: sign(direction),
+                    ..Motion::default()
+                },
+                RenderedCommand::Top
+                | RenderedCommand::Bottom
+                | RenderedCommand::Heading(_)
+                | RenderedCommand::Leave
+                | RenderedCommand::Fit
+                | RenderedCommand::Zoom(_) => return,
             };
             let moved = match view.scroll {
                 Scroll::Moved { by, .. } => by,
-                Scroll::At(_) | Scroll::Line(_) => Motion::default(),
+                Scroll::At(_) | Scroll::Line(_) | Scroll::Point(_) => Motion::default(),
             };
             Scroll::Moved {
                 from,
                 by: Motion {
-                    lines: moved.lines + lines,
-                    half_pages: moved.half_pages + half_pages,
+                    lines: moved.lines + step.lines,
+                    half_pages: moved.half_pages + step.half_pages,
+                    columns: moved.columns + step.columns,
                 },
             }
         }
@@ -796,21 +896,26 @@ pub fn toggle_fold(state: &mut State, pane: PaneId, index: u32) {
     }
 }
 
-/// A click on the error strip of `pane`'s typst preview: the file of the first error opens as
-/// text with the cursor on it, in the pane the preview follows, else in the preview's pane.
-pub fn goto_error(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
+/// A click on the diagnostic strip of `pane`'s typst preview: the first error, else the first
+/// warning, opens at its place.
+pub fn goto_diagnostic(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     let Some(view) = state.layout.rendered(pane) else {
         return;
     };
-    let (buffer, link) = (view.text.buffer(), view.link);
-    let Some(Preview::Typst(Typst {
-        outcome: Outcome::Failed(errors),
-        ..
-    })) = state.previews.get(buffer)
-    else {
+    let Some(Preview::Typst(typst)) = state.previews.get(view.text.buffer()) else {
         return;
     };
-    let (path, start) = match &errors[0].origin {
+    let first = match (&typst.outcome, &typst.pages) {
+        (Outcome::Failed(errors), _) => &errors[0],
+        (Outcome::Pending | Outcome::Compiled, Some(Compiled { warnings, .. })) => {
+            match warnings.as_slice() {
+                [first, ..] => first,
+                [] => return,
+            }
+        }
+        (Outcome::Pending | Outcome::Compiled, None) => return,
+    };
+    let (path, at) = match &first.origin {
         Origin::Span {
             file: SourceFile::Project(path),
             start,
@@ -822,9 +927,23 @@ pub fn goto_error(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
         }
         | Origin::Detached => return,
     };
-    let target = match link {
-        Link::Follows { pane: source, .. } if state.layout.panes.contains_key(source) => source,
-        Link::Follows { .. } | Link::Standalone => pane,
+    goto_source(state, pane, path, at, out);
+}
+
+/// Opens `path` as text with the cursor at `at`, in the pane `pane`'s preview follows, else in
+/// `pane`.
+pub fn goto_source(
+    state: &mut State,
+    pane: PaneId,
+    path: std::path::PathBuf,
+    at: LineColumn,
+    out: &mut Vec<Effect>,
+) {
+    let target = match state.layout.rendered(pane).map(|view| view.link) {
+        Some(Link::Follows { pane: source, .. }) if state.layout.panes.contains_key(source) => {
+            source
+        }
+        Some(Link::Follows { .. } | Link::Standalone) | None => pane,
     };
     workspace::focus_pane(state, target);
     crate::apply::open(
@@ -832,10 +951,25 @@ pub fn goto_error(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
         path,
         Arrive::Text,
         Some(Target::Position(Position {
-            line: start.line,
-            column: start.column,
+            line: at.line,
+            column: at.column,
         })),
         OpenAs::Permanent,
         out,
     );
+}
+
+/// A click at `at` on a page of `pane`'s typst preview; the typesetter says where it leads.
+pub fn click_page(state: &mut State, pane: PaneId, at: PagePoint, out: &mut Vec<Effect>) {
+    let Some(view) = state.layout.rendered(pane) else {
+        return;
+    };
+    let Some(buffer) = state.buffers.get(view.text.buffer()) else {
+        return;
+    };
+    out.push(Effect::Typeset(typeset::Request::Click {
+        pane,
+        main: buffer.path.clone(),
+        at,
+    }));
 }

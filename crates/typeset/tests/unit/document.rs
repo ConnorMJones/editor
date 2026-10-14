@@ -1,4 +1,4 @@
-use typeset::{DocumentError, LineColumn, Origin, SourceFile};
+use typeset::{DocumentError, LineColumn, Origin, Pt, SourceFile};
 
 use crate::{assert_valid, typesetter};
 
@@ -16,6 +16,7 @@ fn multi_page_document_gives_each_page() {
     let main = dir.path().join("main.typ");
     let pages = typesetter
         .typst_pages(dir.path(), &main, THREE_PAGES)
+        .result
         .expect("compiles");
     assert_eq!(pages.pages.len(), 3);
     for page in &pages.pages {
@@ -32,10 +33,12 @@ fn edit_reexports_only_the_changed_page() {
     let main = dir.path().join("main.typ");
     let before = typesetter
         .typst_pages(dir.path(), &main, THREE_PAGES)
+        .result
         .expect("compiles");
     let edited = THREE_PAGES.replace("Third", "Thirds");
     let after = typesetter
         .typst_pages(dir.path(), &main, &edited)
+        .result
         .expect("compiles");
     assert!(std::sync::Arc::ptr_eq(
         &before.pages[0].bytes,
@@ -63,6 +66,7 @@ fn imports_resolve_relative_to_root_and_track_disk_changes() {
         #for i in range(pages) [#greet(i) #pagebreak(weak: true)]\n";
     let pages = typesetter
         .typst_pages(dir.path(), &main, source)
+        .result
         .expect("import resolves");
     assert_eq!(pages.pages.len(), 2);
 
@@ -73,6 +77,7 @@ fn imports_resolve_relative_to_root_and_track_disk_changes() {
     .expect("rewrite");
     let pages = typesetter
         .typst_pages(dir.path(), &main, source)
+        .result
         .expect("import resolves");
     assert_eq!(pages.pages.len(), 4, "edited import is re-read");
 }
@@ -84,7 +89,7 @@ fn syntax_error_reports_its_line() {
     let main = dir.path().join("main.typ");
     let source = "= Title\n\nSome text.\n#let x = (1, 2\nMore text.\n";
     let Err(DocumentError::Compile(diagnostics)) =
-        typesetter.typst_pages(dir.path(), &main, source)
+        typesetter.typst_pages(dir.path(), &main, source).result
     else {
         panic!("expected a compile error");
     };
@@ -107,8 +112,9 @@ fn error_in_an_imported_file_points_at_that_file() {
     )
     .expect("write");
     let main = dir.path().join("main.typ");
-    let Err(DocumentError::Compile(diagnostics)) =
-        typesetter.typst_pages(dir.path(), &main, "#import \"other.typ\": a\n#a\n")
+    let Err(DocumentError::Compile(diagnostics)) = typesetter
+        .typst_pages(dir.path(), &main, "#import \"other.typ\": a\n#a\n")
+        .result
     else {
         panic!("expected a compile error");
     };
@@ -131,11 +137,13 @@ fn error_in_an_imported_file_points_at_that_file() {
 fn main_outside_root_is_rejected() {
     let mut typesetter = typesetter();
     let dir = tempfile::tempdir().expect("tempdir");
-    let result = typesetter.typst_pages(
-        &dir.path().join("sub"),
-        &dir.path().join("main.typ"),
-        "hello",
-    );
+    let result = typesetter
+        .typst_pages(
+            &dir.path().join("sub"),
+            &dir.path().join("main.typ"),
+            "hello",
+        )
+        .result;
     assert!(
         matches!(result, Err(DocumentError::OutsideRoot { .. })),
         "{result:?}"
@@ -146,11 +154,13 @@ fn main_outside_root_is_rejected() {
 fn missing_package_is_a_diagnostic_not_a_download() {
     let mut typesetter = typesetter();
     let dir = tempfile::tempdir().expect("tempdir");
-    let result = typesetter.typst_pages(
-        dir.path(),
-        &dir.path().join("main.typ"),
-        "#import \"@preview/cetz:0.3.0\": canvas\n",
-    );
+    let result = typesetter
+        .typst_pages(
+            dir.path(),
+            &dir.path().join("main.typ"),
+            "#import \"@preview/cetz:0.3.0\": canvas\n",
+        )
+        .result;
     assert!(
         matches!(result, Err(DocumentError::Compile(_))),
         "{result:?}"
@@ -174,17 +184,19 @@ fn math_and_documents_share_one_world() {
     let main = dir.path().join("main.typ");
     let pages = typesetter
         .typst_pages(dir.path(), &main, THREE_PAGES)
+        .result
         .expect("document");
     typesetter
         .math(
             r"\frac{1}{2}",
             typeset::Display::Inline,
             model::color::Rgb { r: 0, g: 0, b: 0 },
-            12.0,
+            Pt(12.0),
         )
         .expect("math between documents");
     let again = typesetter
         .typst_pages(dir.path(), &main, THREE_PAGES)
+        .result
         .expect("document again");
     assert_eq!(pages.pages.len(), again.pages.len());
     assert_eq!(pages.pages[0].bytes, again.pages[0].bytes);

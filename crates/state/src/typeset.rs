@@ -9,15 +9,18 @@ use std::sync::Arc;
 use helix_core::Rope;
 use model::color::{Palette, Rgb};
 use model::notice::Notice;
-use model::typeset::{Diagnostic, DocumentError, Origin, Pages, Svg};
+use model::typeset::{
+    Compilation, Diagnostic, DocumentError, Jump, Origin, PagePoint, Pt, SourceFile, Svg,
+};
 use slotmap::SlotMap;
 
 use crate::buffer::{Buffer, BufferId, Content};
 use crate::job::Job;
-use crate::markdown::{Block, BlockKind, Figure, Format, SpanKind};
+use crate::layout::{PaneId, View};
 #[cfg(feature = "typeset")]
-use crate::markdown::{Display, FigureKind};
-use crate::rendered::{Parsed, Preview, Previews};
+use crate::markdown::FigureKind;
+use crate::markdown::{Block, BlockKind, Figure, Format, SpanKind};
+use crate::rendered::{self, Parsed, Preview, Previews, Scroll};
 use crate::{Effect, State};
 
 /// Unreferenced figures kept for undo and reopened views; older ones are evicted.
@@ -27,8 +30,8 @@ pub const SPARE: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
     pub text: Rgb,
-    pub inline_pt: f32,
-    pub block_pt: f32,
+    /// Size of the prose figures sit in; the typesetter matches math to its x-height.
+    pub prose_size: Pt,
     pub palette: Palette,
 }
 
@@ -44,6 +47,18 @@ pub enum Request {
         root: PathBuf,
         main: PathBuf,
         text: Rope,
+    },
+    /// Where byte `cursor` of `main` landed on its pages.
+    Locate {
+        buffer: BufferId,
+        main: PathBuf,
+        cursor: usize,
+    },
+    /// What a click at `at` on a page of `main` leads to, for the preview in `pane`.
+    Click {
+        pane: PaneId,
+        main: PathBuf,
+        at: PagePoint,
     },
     Pdf {
         root: PathBuf,
@@ -62,11 +77,19 @@ pub enum Done {
     Pages {
         buffer: BufferId,
         version: u64,
-        result: Result<Pages, DocumentError>,
+        compiled: Compilation,
     },
     Pdf {
         out: PathBuf,
         result: Result<Vec<u8>, DocumentError>,
+    },
+    Located {
+        buffer: BufferId,
+        at: Option<PagePoint>,
+    },
+    Clicked {
+        pane: PaneId,
+        jump: Option<Jump>,
     },
 }
 
@@ -115,6 +138,17 @@ pub struct Typst {
     pub requested: Option<u64>,
     pub pages: Option<Compiled>,
     pub outcome: Outcome,
+    /// Project files other than the main one the last compile read; saving one recompiles.
+    pub deps: Vec<PathBuf>,
+    pub locate: Locate,
+}
+
+/// Source-to-page lookups run one at a time; the newest cursor waits behind the running one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locate {
+    Idle,
+    Running,
+    Queued(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +181,8 @@ impl Typst {
             requested: None,
             pages: None,
             outcome: Outcome::Pending,
+            deps: Vec::new(),
+            locate: Locate::Idle,
         }
     }
 }
@@ -346,7 +382,7 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
         Done::Pages {
             buffer,
             version,
-            result,
+            compiled: Compilation { result, deps },
         } => {
             let State {
                 buffers,
@@ -354,14 +390,19 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                 notice,
                 ..
             } = state;
-            let (Some(doc), Some(Preview::Typst(typst))) = (
-                crate::buffer::doc(buffers, buffer),
-                previews.get_mut(buffer),
-            ) else {
+            let (
+                Some(Buffer {
+                    path,
+                    content: Content::Text { doc, .. },
+                }),
+                Some(Preview::Typst(typst)),
+            ) = (buffers.get(buffer), previews.get_mut(buffer))
+            else {
                 return;
             };
             let current = doc.version;
             typst.compile = Compile::Idle;
+            typst.deps = deps.into_iter().filter(|dep| dep != path).collect();
             match (version == current, result) {
                 (false, _) => {}
                 (true, Ok(pages)) => {
@@ -393,6 +434,60 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                 }
             }
         }
+        Done::Located { buffer, at } => {
+            let State {
+                layout,
+                buffers,
+                previews,
+                ..
+            } = state;
+            let (Some(Buffer { path, .. }), Some(Preview::Typst(typst))) =
+                (buffers.get(buffer), previews.get_mut(buffer))
+            else {
+                return;
+            };
+            typst.locate = match typst.locate {
+                Locate::Queued(cursor) => {
+                    out.push(Effect::Typeset(Request::Locate {
+                        buffer,
+                        main: path.clone(),
+                        cursor,
+                    }));
+                    Locate::Running
+                }
+                Locate::Running | Locate::Idle => Locate::Idle,
+            };
+            // Views waiting on a source line, or following their source, go to where it landed.
+            for pane in layout.panes.values_mut() {
+                let Some(View::Rendered(view)) = pane.active_mut() else {
+                    continue;
+                };
+                match (view.text.buffer() == buffer, view.scroll, view.link, at) {
+                    (true, Scroll::Line(_), _, None) => view.scroll = Scroll::item(0),
+                    (true, Scroll::Line(_), _, Some(at))
+                    | (true, _, rendered::Link::Follows { .. }, Some(at)) => {
+                        view.scroll = Scroll::Point(at)
+                    }
+                    (true, _, _, _) | (false, _, _, _) => {}
+                }
+            }
+        }
+        Done::Clicked { pane, jump } => match jump {
+            Some(Jump::Source {
+                file: SourceFile::Project(path),
+                at,
+            }) => rendered::goto_source(state, pane, path, at, out),
+            Some(Jump::Url(url)) => out.push(Effect::OpenUrl(url)),
+            Some(Jump::Page(at)) => match state.layout.rendered_mut(pane) {
+                Some(view) => view.scroll = Scroll::Point(at),
+                None => {}
+            },
+            Some(Jump::Source {
+                file: SourceFile::Embedded(_),
+                ..
+            })
+            | None => {}
+        },
         Done::Pdf { out: path, result } => match result {
             Ok(bytes) => out.push(Effect::Job(Job::Export { path, bytes })),
             Err(error) => {
@@ -436,15 +531,9 @@ pub fn run(typesetter: &mut ::typeset::Typesetter, request: Request, text: &mut 
             source,
         } => {
             let result = match figure.kind {
-                FigureKind::Math(display) => typesetter.math(
-                    &source,
-                    display,
-                    look.text,
-                    match display {
-                        Display::Inline => look.inline_pt,
-                        Display::Block => look.block_pt,
-                    },
-                ),
+                FigureKind::Math(display) => {
+                    typesetter.math(&source, display, look.text, look.prose_size)
+                }
                 FigureKind::Mermaid => typesetter.mermaid(&source, &look.palette),
             };
             Done::Figure {
@@ -464,9 +553,21 @@ pub fn run(typesetter: &mut ::typeset::Typesetter, request: Request, text: &mut 
             Done::Pages {
                 buffer,
                 version,
-                result: typesetter.typst_pages(&root, &main, text),
+                compiled: typesetter.typst_pages(&root, &main, text),
             }
         }
+        Request::Locate {
+            buffer,
+            main,
+            cursor,
+        } => Done::Located {
+            buffer,
+            at: typesetter.locate(&main, cursor),
+        },
+        Request::Click { pane, main, at } => Done::Clicked {
+            pane,
+            jump: typesetter.click(&main, at),
+        },
         Request::Pdf {
             root,
             main,
@@ -478,6 +579,18 @@ pub fn run(typesetter: &mut ::typeset::Typesetter, request: Request, text: &mut 
                 out,
                 result: typesetter.typst_pdf(&root, &main, text),
             }
+        }
+    }
+}
+
+/// Typst previews that read one of `paths` compile again.
+pub fn invalidate(previews: &mut Previews, paths: &[PathBuf]) {
+    for preview in previews.values_mut() {
+        match preview {
+            Preview::Typst(typst) if typst.deps.iter().any(|dep| paths.contains(dep)) => {
+                typst.requested = None
+            }
+            Preview::Typst(_) | Preview::Markdown(_) => {}
         }
     }
 }

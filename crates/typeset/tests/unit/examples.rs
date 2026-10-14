@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use model::color::{Palette, Rgb};
-use typeset::Display;
+use typeset::{Display, Pt};
 
 use crate::{assert_valid, typesetter};
 
@@ -110,6 +110,7 @@ fn typst_example_compiles_to_several_pages() {
     let source = std::fs::read_to_string(&main).expect("read main.typ");
     let pages = typesetter
         .typst_pages(&root, &main, &source)
+        .result
         .unwrap_or_else(|error| panic!("{error}: {error:?}"));
     assert!(pages.pages.len() > 1, "{} pages", pages.pages.len());
     assert!(pages.warnings.is_empty(), "{:?}", pages.warnings);
@@ -125,7 +126,7 @@ fn markdown_math_renders() {
     for (path, text) in notes() {
         for (tex, display) in formulas(&split(&text).0) {
             let svg = typesetter
-                .math(&tex, display, WHITE, 16.0)
+                .math(&tex, display, WHITE, Pt(16.0))
                 .unwrap_or_else(|error| panic!("{}: {tex}: {error}", path.display()));
             assert_valid(&svg);
             count += 1;

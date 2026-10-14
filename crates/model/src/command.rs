@@ -173,6 +173,17 @@ pub enum RenderedCommand {
     Leave,
     /// Switches a typst preview between fitting the page width and the whole page.
     Fit,
+    /// Scales typst pages relative to their fit.
+    Zoom(ZoomBy),
+    /// Moves a typst preview sideways, `Backward` being left.
+    Pan(Direction),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoomBy {
+    In,
+    Out,
+    Reset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -231,6 +231,7 @@ pub fn snapshot(state: &State) -> Session {
                                 scroll,
                                 top: match rendered.scroll {
                                     Scroll::Line(line) => Top::Line(line),
+                                    Scroll::Point(at) => Top::Item(at.page),
                                     Scroll::At(at) | Scroll::Moved { from: at, .. } => {
                                         Top::Item(at.item)
                                     }

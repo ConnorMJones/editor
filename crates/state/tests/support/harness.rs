@@ -38,8 +38,7 @@ pub const LOOK: Look = Look {
         g: 0xd0,
         b: 0xd0,
     },
-    inline_pt: 12.0,
-    block_pt: 14.0,
+    prose_size: model::typeset::Pt(12.0),
     palette: Palette(
         [Rgb {
             r: 0x80,
@@ -58,7 +57,7 @@ fn run_typeset(request: Request) -> state::typeset::Done {
     let mut guard = TYPESETTER
         .get_or_init(|| {
             Mutex::new((
-                typeset::Typesetter::new(typeset::FontSource::Embedded)
+                typeset::Typesetter::new(typeset::FontSource::Embedded, "Libertinus Serif")
                     .expect("embedded math font"),
                 String::new(),
             ))

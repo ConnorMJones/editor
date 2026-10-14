@@ -53,6 +53,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false, features = ["si
 
 # Typesetting; only the typeset crate depends on these.
 typst = "0.15.1"
+typst-ide = { version = "0.15.1", default-features = false }
 typst-layout = "0.15.1"
 typst-svg = "0.15.1"
 typst-pdf = "0.15.1"

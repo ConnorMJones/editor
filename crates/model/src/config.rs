@@ -38,6 +38,8 @@ impl Default for ThemeConfig {
 pub struct FontConfig {
     pub mono: FontSpec,
     pub ui: FontSpec,
+    /// Rendered markdown and typst prose.
+    pub prose: ProseFont,
 }
 
 impl Default for FontConfig {
@@ -51,6 +53,33 @@ impl Default for FontConfig {
                 family: "DejaVu Sans".to_owned(),
                 size_px: 14.0,
             },
+            prose: ProseFont::Ui,
+        }
+    }
+}
+
+/// The prose font: the interface font unless `[font.prose]` names its own.
+#[derive(Debug, Deserialize)]
+#[serde(from = "Option<FontSpec>")]
+pub enum ProseFont {
+    Ui,
+    Own(FontSpec),
+}
+
+impl From<Option<FontSpec>> for ProseFont {
+    fn from(spec: Option<FontSpec>) -> ProseFont {
+        match spec {
+            Some(spec) => ProseFont::Own(spec),
+            None => ProseFont::Ui,
+        }
+    }
+}
+
+impl FontConfig {
+    pub fn prose(&self) -> &FontSpec {
+        match &self.prose {
+            ProseFont::Ui => &self.ui,
+            ProseFont::Own(spec) => spec,
         }
     }
 }

@@ -200,3 +200,9 @@ impl World for TypesetWorld {
         Datetime::from_ymd(i32::try_from(year).ok()?, month as u8, day as u8)
     }
 }
+
+impl typst_ide::IdeWorld for TypesetWorld {
+    fn upcast(&self) -> &dyn World {
+        self
+    }
+}

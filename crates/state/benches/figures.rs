@@ -16,8 +16,7 @@ const LOOK: Look = Look {
         g: 0xd0,
         b: 0xd0,
     },
-    inline_pt: 12.0,
-    block_pt: 14.4,
+    prose_size: model::typeset::Pt(12.0),
     palette: Palette(
         [Rgb {
             r: 0x80,
@@ -66,7 +65,9 @@ fn turnaround(typesetter: &mut Typesetter, text: &mut String, seed: usize) -> us
         .into_iter()
         .map(|request| match typeset::run(typesetter, request, text) {
             Done::Figure { result, .. } => result.expect("formula typesets").bytes.len(),
-            Done::Pages { .. } | Done::Pdf { .. } => unreachable!("only figures were asked"),
+            Done::Pages { .. } | Done::Pdf { .. } | Done::Located { .. } | Done::Clicked { .. } => {
+                unreachable!("only figures were asked")
+            }
         })
         .sum()
 }
@@ -77,7 +78,8 @@ fn turnaround(typesetter: &mut Typesetter, text: &mut String, seed: usize) -> us
 // take ~25-35 ms cold and ~15-25 ms warm. Parsing the 100-line note is ~0.1 ms.
 fn figures(c: &mut Criterion) {
     let started = Instant::now();
-    let mut typesetter = Typesetter::new(FontSource::SystemAndEmbedded).expect("fonts");
+    let mut typesetter =
+        Typesetter::new(FontSource::SystemAndEmbedded, "Libertinus Serif").expect("fonts");
     let fonts = started.elapsed();
     let mut text = String::new();
     let started = Instant::now();

@@ -67,14 +67,18 @@ dimmed. Clicking the strip puts the text cursor on the error.
 | `]]` / `[[` | rendered | Next / previous top-level heading. |
 | `esc` | rendered | Back to the text pane it follows; a standalone view toggles back to text. |
 | `f` | rendered | Typst preview: fit pages to the pane width, or each page whole. |
+| `+` / `-` / `=` | rendered | Typst preview: zoom pages in / out from the fit, or back to it. |
+| `h` / `l`, left / right | rendered | Typst preview: pan sideways across pages wider than the pane. |
 | `:export-pdf` | typst file | Compile the focused typst file to `<file>.pdf` beside it (also in the `space ?` palette). Markdown export is not supported yet. |
-| mouse | rendered | Wheel scrolls. Click a block to put the text cursor on its first line (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
+| mouse | rendered | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
 | `gf` | normal, select | Follow the link under the cursor: a wikilink, a markdown link or a URL in a markdown file; elsewhere the URL or file path under the cursor (or the selected text), relative to the file's folder, then the root, as in helix. |
 | `space l` | normal, select, rendered | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
 | `y` / `n` / `esc` | confirm | Create the note an unresolved link names, or not. |
 
 A following view scrolls to the block under the text cursor, or under the text's top line
-when it scrolls; scrolling the rendered view scrolls the text (not its cursor).
+when it scrolls; scrolling the rendered view scrolls the text (not its cursor). A typst
+preview scrolls to where the text cursor landed on the pages, and its strip shows the
+first error or warning; clicking the strip opens it.
 
 Links resolve the way Obsidian does, with the project root as the vault. `[[name]]` names
 `name.md`, or a file named exactly `name` (`[[photo.png]]`), anywhere in the vault, ignoring
@@ -808,6 +812,13 @@ vault; `![[note]]` shows a box naming the resolved note that opens it when click
 | `[ [` | `Rendered(Heading(Backward))` |
 | `esc` | `Rendered(Leave)` |
 | `f` | `Rendered(Fit)` |
+| `+` | `Rendered(Zoom(In))` |
+| `-` | `Rendered(Zoom(Out))` |
+| `=` | `Rendered(Zoom(Reset))` |
+| `h` | `Rendered(Pan(Backward))` |
+| `left` | `Rendered(Pan(Backward))` |
+| `l` | `Rendered(Pan(Forward))` |
+| `right` | `Rendered(Pan(Forward))` |
 | `:` | `CommandMode` |
 | `C-k C-s` | `WriteAll` |
 | `space v` | `RenderedSplit` |

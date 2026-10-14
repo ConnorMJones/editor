@@ -1,21 +1,21 @@
 //! Rendered markdown and typst views: GPUI lists of blocks or pages, with typeset SVGs
 //! rasterised at their drawn device size.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Canvas, ClickEvent, Context, Corners, DevicePixels, Div, InteractiveText,
-    IntoElement, ListAlignment, ListOffset, ListState, ObjectFit, Pixels, RenderImage,
-    SharedString, Size, StrikethroughStyle, StyledText, SvgSize, TextAlign, TextRun,
-    UnderlineStyle, WeakEntity, Window, canvas, div, img, list, prelude::*, px, white,
+    AnyElement, App, Bounds, Canvas, ClickEvent, Context, Corners, DevicePixels, Div,
+    InteractiveText, IntoElement, ListAlignment, ListOffset, ListState, MouseButton, ObjectFit,
+    Pixels, RenderImage, SharedString, Size, StrikethroughStyle, StyledText, SvgSize, TextAlign,
+    TextRun, UnderlineStyle, WeakEntity, Window, canvas, div, img, list, prelude::*, px, white,
 };
 use helix_core::SmallVec;
 use model::color::Base16;
 use model::theme::Modifiers;
-use model::typeset::{Origin, PX_PER_PT, SourceFile, Svg};
+use model::typeset::{Diagnostic, Origin, PX_PER_PT, PagePoint, Pt, SourceFile, Svg};
 use model::window::Px;
 use state::buffer::{self, BufferId};
 use state::layout::PaneId;
@@ -23,8 +23,10 @@ use state::markdown::{
     self, BlockKind, CalloutFold, CalloutKind, Column, Display, EmbedKind, Emphasis, Figure,
     FigureKind, ImageFile, Inline, LinkTarget, ListKind, Markdown, RowKind, Span, SpanKind, Task,
 };
-use state::rendered::{self as reading, BlockScroll, Fit, Parsed, Preview, RenderedView, Scroll};
-use state::typeset::{Figures, Outcome, Render, Typst};
+use state::rendered::{
+    self as reading, BlockScroll, Fit, Parsed, Preview, RenderedView, Scroll, Zoom,
+};
+use state::typeset::{Compiled, Figures, Outcome, Render, Typst};
 use state::vault::{self, Origin as LinkOrigin, Resolution};
 
 use crate::theme::{PROSE_LINE, Theme};
@@ -40,6 +42,8 @@ pub struct RenderedPane {
     pub hashes: Vec<u64>,
     /// What else the items were measured with.
     pub measured: Measured,
+    /// How far the pages are drawn panned left, as last applied.
+    pub left: Pixels,
     /// Scroll last exchanged between the list and the state.
     pub applied: Applied,
 }
@@ -52,7 +56,9 @@ pub struct Measured {
     pub figures: u64,
     pub toggled: Vec<u32>,
     pub fit: Fit,
-    /// Viewport height whole pages are fitted to.
+    pub zoom: Zoom,
+    /// Viewport size the list was last laid out in; pages are sized from it.
+    pub width: Pixels,
     pub height: Pixels,
 }
 
@@ -91,9 +97,8 @@ pub enum Rasterized {
     Failed,
 }
 
-const OVERDRAW: Pixels = px(600.);
-/// Width of the reading column, centred in wider panes.
-const COLUMN: Pixels = px(760.);
+/// Width of the reading column in ems of the prose, about 75 characters; narrower panes wrap sooner.
+const MEASURE: f32 = 45.0;
 /// Heading sizes relative to prose, `#` to `######`.
 const SCALES: [f32; 6] = [1.6, 1.4, 1.25, 1.12, 1.05, 1.0];
 /// Space between typst pages.
@@ -105,6 +110,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         state,
         rendered,
         theme,
+        window_height,
         ..
     } = workspace;
     rendered.retain(|pane, cache| {
@@ -117,7 +123,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         let Some(view) = state.layout.rendered(pane) else {
             continue;
         };
-        let (buffer, scroll) = (view.text.buffer(), view.scroll);
+        let (buffer, scroll, fit, zoom) = (view.text.buffer(), view.scroll, view.fit, view.zoom);
         let (version, hashes) = match state.previews.get(buffer) {
             Some(Preview::Markdown(parsed)) => (parsed.version, &parsed.markdown.hashes),
             Some(Preview::Typst(Typst {
@@ -129,7 +135,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         let cache = match rendered.get_mut(pane) {
             Some(cache) => cache,
             None => {
-                let list = ListState::new(hashes.len(), ListAlignment::Top, OVERDRAW);
+                let list = ListState::new(hashes.len(), ListAlignment::Top, *window_height);
                 let workspace = cx.weak_entity();
                 // The list scrolls itself on the wheel; the state hears of it once the list lets go.
                 list.set_scroll_handler(move |_, window, cx| {
@@ -143,6 +149,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                             let at = BlockScroll {
                                 item: top.item_ix,
                                 offset: Px(top.offset_in_item.into()),
+                                left: Px(cache.left.into()),
                             };
                             cache.applied = Applied::At(at);
                             reading::scrolled(&mut this.state, pane, at);
@@ -162,8 +169,11 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                             figures: state.figures.generation,
                             toggled: view.toggled.clone(),
                             fit: view.fit,
+                            zoom: view.zoom,
+                            width: px(0.),
                             height: px(0.),
                         },
+                        left: px(0.),
                         applied: Applied::Stale,
                     },
                 );
@@ -193,11 +203,13 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
             measured.generation,
             measured.figures,
             measured.fit,
+            measured.zoom,
             &measured.toggled,
         ) == (
             state.vault.generation,
             state.figures.generation,
             view.fit,
+            view.zoom,
             &view.toggled,
         ) {
             true => {}
@@ -205,35 +217,70 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                 measured.generation = state.vault.generation;
                 measured.figures = state.figures.generation;
                 measured.fit = view.fit;
+                measured.zoom = view.zoom;
                 measured.toggled.clone_from(&view.toggled);
                 cache.list.remeasure();
             }
         }
-        let viewport = cache.list.viewport_bounds().size.height;
+        let viewport = cache.list.viewport_bounds().size;
         let line = theme.prose_size * PROSE_LINE;
-        let (from, by) = match (scroll, cache.applied) {
+        let pages = match state.previews.get(buffer) {
+            Some(Preview::Typst(Typst {
+                pages: Some(compiled),
+                ..
+            })) => &compiled.pages[..],
+            Some(Preview::Typst(Typst { pages: None, .. }) | Preview::Markdown(_)) | None => &[],
+        };
+        let (from, down, across) = match (scroll, cache.applied) {
             (Scroll::Line(_), _) => continue,
             (Scroll::At(at), Applied::At(applied)) if at == applied => continue,
-            (Scroll::At(at), Applied::At(_) | Applied::Stale) => (at, px(0.)),
+            (Scroll::At(at), Applied::At(_) | Applied::Stale) => (at, px(0.), px(0.)),
             (Scroll::Moved { from, by }, _) => (
                 from,
-                line * by.lines as f32 + viewport * (by.half_pages as f32 / 2.),
+                line * by.lines as f32 + viewport.height * (by.half_pages as f32 / 2.),
+                line * by.columns as f32,
             ),
+            (Scroll::Point(at), _) => {
+                let Some(page) = pages.get(at.page) else {
+                    continue;
+                };
+                let scale = page_width(&cache.measured, fit, zoom, page) / px(page.width_pt);
+                let gap = match at.page {
+                    0 => PAGE_GAP,
+                    _ => px(0.),
+                };
+                // The point lands a third of the way down, centred across.
+                (
+                    BlockScroll {
+                        item: at.page,
+                        offset: Px(0.0),
+                        left: Px(0.0),
+                    },
+                    gap + px(at.y.0 * scale) - viewport.height / 3.,
+                    PAGE_GAP + px(at.x.0 * scale) - viewport.width / 2.,
+                )
+            }
         };
         cache.list.scroll_to(ListOffset {
             item_ix: from.item,
             offset_in_item: px(0.),
         });
-        cache.list.scroll_by(px(from.offset.0) + by);
+        cache.list.scroll_by(px(from.offset.0) + down);
+        let widest = (pages.iter())
+            .map(|page| page_width(&cache.measured, fit, zoom, page))
+            .fold(px(0.), |widest, width| widest.max(width));
+        let room = (widest + PAGE_GAP * 2. - viewport.width).max(px(0.));
+        cache.left = (px(from.left.0) + across).max(px(0.)).min(room);
         let top = cache.list.logical_scroll_top();
         let landed = BlockScroll {
             item: top.item_ix,
             offset: Px(top.offset_in_item.into()),
+            left: Px(cache.left.into()),
         };
         cache.applied = Applied::At(landed);
         match scroll {
             Scroll::At(at) if at == landed => {}
-            Scroll::At(_) | Scroll::Moved { .. } | Scroll::Line(_) => {
+            Scroll::At(_) | Scroll::Moved { .. } | Scroll::Line(_) | Scroll::Point(_) => {
                 reading::scrolled(state, pane, landed)
             }
         }
@@ -365,57 +412,65 @@ pub fn body(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) ->
             .border_b_1()
             .border_color(theme.chrome.border)
     };
-    let header = match typst.map(|typst| (&typst.outcome, typst.pages.is_some())) {
+    // Clicking a diagnostic strip opens the first entry's place.
+    let diagnostics = |listed: &[Diagnostic], mark: &str, color: gpui::Hsla| {
+        let first = &listed[0];
+        let place = match &first.origin {
+            Origin::Span {
+                file: SourceFile::Project(path),
+                start,
+                ..
+            } => format!(
+                "{}:{}:{}: ",
+                path.strip_prefix(state.root.path())
+                    .unwrap_or(path)
+                    .display(),
+                start.line + 1,
+                start.column + 1
+            ),
+            Origin::Span {
+                file: SourceFile::Embedded(name),
+                start,
+                ..
+            } => format!("{name}:{}:{}: ", start.line + 1, start.column + 1),
+            Origin::Detached => String::new(),
+        };
+        let more = match listed.len() {
+            1 => String::new(),
+            count => format!("  (+{} more)", count - 1),
+        };
+        let workspace = cx.weak_entity();
+        strip(color)
+            .id("typst-diagnostics")
+            .cursor_pointer()
+            .on_click(move |_: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                update(&workspace, window, cx, |this| {
+                    reading::goto_diagnostic(&mut this.state, pane, &mut this.effects)
+                });
+            })
+            .child(SharedString::from(format!(
+                "{mark} {place}{}{more}",
+                first.message
+            )))
+            .into_any_element()
+    };
+    let header = match typst.map(|typst| (&typst.outcome, &typst.pages)) {
         Some((Outcome::Failed(errors), _)) => {
-            let first = &errors[0];
-            let place = match &first.origin {
-                Origin::Span {
-                    file: SourceFile::Project(path),
-                    start,
-                    ..
-                } => format!(
-                    "{}:{}:{}: ",
-                    path.strip_prefix(state.root.path())
-                        .unwrap_or(path)
-                        .display(),
-                    start.line + 1,
-                    start.column + 1
-                ),
-                Origin::Span {
-                    file: SourceFile::Embedded(name),
-                    start,
-                    ..
-                } => format!("{name}:{}:{}: ", start.line + 1, start.column + 1),
-                Origin::Detached => String::new(),
-            };
-            let more = match errors.len() {
-                1 => String::new(),
-                count => format!("  (+{} more)", count - 1),
-            };
-            let workspace = cx.weak_entity();
-            Some(
-                strip(theme.colors[Base16::Base08])
-                    .id("typst-errors")
-                    .cursor_pointer()
-                    .on_click(move |_: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        update(&workspace, window, cx, |this| {
-                            reading::goto_error(&mut this.state, pane, &mut this.effects)
-                        });
-                    })
-                    .child(SharedString::from(format!(
-                        "✘ {place}{}{more}",
-                        first.message
-                    )))
-                    .into_any_element(),
-            )
+            Some(diagnostics(errors, "✘", theme.colors[Base16::Base08]))
         }
-        Some((Outcome::Pending, false)) => Some(
+        Some((Outcome::Pending | Outcome::Compiled, Some(Compiled { warnings, .. }))) => {
+            match warnings.as_slice() {
+                [] => None,
+                warnings => Some(diagnostics(warnings, "⚠", theme.colors[Base16::Base0A])),
+            }
+        }
+        Some((Outcome::Pending, None)) => Some(
             strip(theme.text_muted)
                 .child("compiling…")
                 .into_any_element(),
         ),
-        Some((Outcome::Pending, true) | (Outcome::Compiled, _)) | None => None,
+        Some((Outcome::Compiled, None)) | None => None,
     };
     div()
         .flex_1()
@@ -487,45 +542,64 @@ fn item(
             None => div().into_any_element(),
         },
         Some(Preview::Typst(typst)) => {
-            let Some(page) = (typst.pages.as_ref()).and_then(|compiled| compiled.pages.get(index))
-            else {
+            let (Some(page), Some(cache)) = (
+                (typst.pages.as_ref()).and_then(|compiled| compiled.pages.get(index)),
+                this.rendered.get(pane),
+            ) else {
                 return div().into_any_element();
             };
-            let (width, height) = (page.width_pt * PX_PER_PT, page.height_pt * PX_PER_PT);
+            let width = page_width(&cache.measured, view.fit, view.zoom, page);
+            let scale = width / px(page.width_pt);
+            // Recorded each frame so a click turns into a point on the page.
+            let bounds = Rc::new(Cell::new(Bounds::default()));
+            let (recorded, workspace) = (bounds.clone(), cx.weak_entity());
             let sheet = div()
-                .w_full()
-                .aspect_ratio(width / height)
+                .relative()
+                .flex_none()
+                .mx_auto()
+                .w(width)
+                .h(width * (page.height_pt / page.width_pt))
                 .bg(white())
                 .shadow_md()
-                .child(svg_canvas(&this.rasters, &cx.weak_entity(), page).size_full());
-            let sheet = match (view.fit, this.rendered.get(pane)) {
-                (Fit::Page, Some(cache)) => sheet.max_w(
-                    ((cache.measured.height - PAGE_GAP * 2.) * (width / height)).max(px(1.)),
-                ),
-                (Fit::Page, None) | (Fit::Width, _) => sheet,
-            };
+                .child(svg_canvas(&this.rasters, &cx.weak_entity(), page).size_full())
+                .child(
+                    canvas(move |area, _, _| recorded.set(area), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    cx.stop_propagation();
+                    let origin = bounds.get().origin;
+                    let at = PagePoint {
+                        page: index,
+                        x: Pt((event.position.x - origin.x) / px(1.) / scale),
+                        y: Pt((event.position.y - origin.y) / px(1.) / scale),
+                    };
+                    update(&workspace, window, cx, |this| {
+                        reading::click_page(&mut this.state, pane, at, &mut this.effects)
+                    });
+                });
             let sheet = match typst.outcome {
                 Outcome::Failed(_) => sheet.opacity(0.45),
                 Outcome::Pending | Outcome::Compiled => sheet,
             };
             return div()
                 .w_full()
-                .flex()
-                .justify_center()
+                .overflow_hidden()
                 .px(PAGE_GAP)
                 .pt(match index {
                     0 => PAGE_GAP,
                     _ => px(0.),
                 })
                 .pb(PAGE_GAP)
-                .child(sheet)
+                .child(div().relative().left(-cache.left).flex().child(sheet))
                 .into_any_element();
         }
         None => div().into_any_element(),
     };
     let top = match index {
-        0 => px(24.),
-        _ => px(6.),
+        0 => theme.prose_size * 1.5,
+        _ => theme.prose_size * 0.375,
     };
     div()
         .w_full()
@@ -533,12 +607,17 @@ fn item(
         .justify_center()
         .px_6()
         .pt(top)
-        .pb(px(6.))
+        .pb(theme.prose_size * 0.375)
         .font(theme.prose[0].clone())
         .text_size(theme.prose_size)
         .line_height(theme.prose_size * PROSE_LINE)
         .text_color(theme.text)
-        .child(div().w_full().max_w(COLUMN).child(content))
+        .child(
+            div()
+                .w_full()
+                .max_w(theme.prose_size * MEASURE)
+                .child(content),
+        )
         .into_any_element()
 }
 
@@ -586,7 +665,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                 .child(inline(draw, text, index, ink, Modifiers::BOLD));
             match level {
                 markdown::Level::H1 | markdown::Level::H2 => heading
-                    .pb(px(4.))
+                    .pb(theme.prose_size * 0.25)
                     .border_b_1()
                     .border_color(theme.chrome.border)
                     .into_any_element(),
@@ -639,7 +718,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                         .child(
                             div()
                                 .flex_none()
-                                .min_w(px(18.))
+                                .min_w(theme.prose_size * 1.125)
                                 .flex()
                                 .justify_end()
                                 .child(marker),
@@ -918,15 +997,15 @@ fn checkbox(draw: &Draw, marker: usize, ink: Ink) -> AnyElement {
     let accent = theme.chrome.accent;
     let box_ = div()
         .id(("task", marker))
-        .mt(px(4.))
-        .size(px(16.))
+        .mt(theme.prose_size * 0.25)
+        .size(theme.prose_size)
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(3.))
         .border_1()
         .cursor_pointer()
-        .text_size(px(12.))
+        .text_size(theme.prose_size * 0.75)
         .hover(move |style| style.border_color(accent))
         .on_click(move |_: &ClickEvent, window, cx| {
             cx.stop_propagation();
@@ -1290,4 +1369,15 @@ fn picture(theme: &Theme, file: &ImageFile, src: &str) -> AnyElement {
             placeholder(theme, "image not found", SharedString::from(src.to_owned()))
         }
     }
+}
+
+/// Drawn width of typst page `page` under `fit` and `zoom`, in a viewport measured at `measured`.
+fn page_width(measured: &Measured, fit: Fit, zoom: Zoom, page: &Svg) -> Pixels {
+    let room = (measured.width - PAGE_GAP * 2.).max(px(1.));
+    let fitted = match fit {
+        Fit::Width => room,
+        Fit::Page => room
+            .min((measured.height - PAGE_GAP * 2.).max(px(1.)) * (page.width_pt / page.height_pt)),
+    };
+    fitted * zoom.factor()
 }

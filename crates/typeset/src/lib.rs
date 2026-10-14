@@ -6,22 +6,24 @@
 
 mod world;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use model::color::{Base16, Palette, Rgb};
 pub use model::typeset::{
-    Diagnostic, Diagnostics, Display, DocumentError, LineColumn, Origin, PX_PER_PT, Pages,
-    SourceFile, Svg,
+    Compilation, Diagnostic, Diagnostics, Display, DocumentError, Jump, LineColumn, Origin,
+    PX_PER_PT, PagePoint, Pages, Pt, SourceFile, Svg,
 };
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::foundations::Bytes;
-use typst::introspection::Tag;
-use typst::layout::{Abs, Frame, FrameItem, Size};
+use typst::introspection::{PagedPosition, Tag};
+use typst::layout::{Abs, Frame, FrameItem, Point, Size};
 use typst::math::EquationElem;
-use typst::syntax::{RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::FontFlags;
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
+use typst::text::{FontVariant, FontVariations};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_kit::fonts::{self, FontStore};
@@ -41,8 +43,10 @@ pub enum FontSource {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TypesetError {
-    #[error("no font with a math table was found")]
+    #[error("the math font New Computer Modern Math is missing")]
     NoMathFont,
+    #[error("the prose font {0} is missing or has no x glyph")]
+    NoXHeight(String),
     #[error("unsupported LaTeX: {0}")]
     Latex(String),
     #[error("typst rejected the converted LaTeX: {}", .0.join("; "))]
@@ -71,10 +75,15 @@ pub struct Typesetter {
     /// SVG of each page from the last `typst_pages`, keyed by the page's hash, so an edit
     /// re-exports only the pages it changed.
     pub exported_pages: Vec<(u128, Svg)>,
+    /// Last good document of each main file, for `locate` and `click`.
+    pub documents: HashMap<PathBuf, Kept>,
+    /// Math size per prose size that gives both the same x-height.
+    pub math_scale: f32,
 }
 
 impl Typesetter {
-    pub fn new(fonts: FontSource) -> Result<Typesetter, TypesetError> {
+    /// `prose` names the font family math is set beside; math matches its x-height.
+    pub fn new(fonts: FontSource, prose: &str) -> Result<Typesetter, TypesetError> {
         let mut store = FontStore::new();
         store.extend(fonts::embedded());
         match fonts {
@@ -82,14 +91,12 @@ impl Typesetter {
             FontSource::SystemAndEmbedded => store.extend(fonts::system()),
         }
         let book = store.book();
-        match (0..)
-            .map_while(|index| book.info(index))
-            .any(|info| info.flags.contains(FontFlags::MATH))
-        {
-            true => {}
-            false => return Err(TypesetError::NoMathFont),
-        }
         tracing::debug!(families = book.families().count(), "typeset fonts loaded");
+        let prose_x =
+            x_height(&store, prose).ok_or_else(|| TypesetError::NoXHeight(prose.to_owned()))?;
+        // Equations default to this family.
+        let math_x =
+            x_height(&store, "New Computer Modern Math").ok_or(TypesetError::NoMathFont)?;
 
         let math = embedded_id("/math.typ");
         Ok(Typesetter {
@@ -106,6 +113,8 @@ impl Typesetter {
             mermaid: None,
             math_text: String::new(),
             exported_pages: Vec::new(),
+            documents: HashMap::new(),
+            math_scale: (prose_x / math_x) as f32,
         })
     }
 
@@ -114,13 +123,14 @@ impl Typesetter {
         tex: &str,
         display: Display,
         color: Rgb,
-        size_pt: f32,
+        prose_size: Pt,
     ) -> Result<Svg, TypesetError> {
         let converted = mitex::convert_math(tex, None).map_err(TypesetError::Latex)?;
         let block = match display {
             Display::Inline => "false",
             Display::Block => "true",
         };
+        let size_pt = prose_size.0 * self.math_scale;
         self.math_text.clear();
         write!(
             self.math_text,
@@ -261,32 +271,105 @@ impl Typesetter {
         }
     }
 
-    pub fn typst_pages(
-        &mut self,
-        root: &Path,
-        main: &Path,
-        source: &str,
-    ) -> Result<Pages, DocumentError> {
-        let document = self.compile_document(root, main, source)?;
-        let exported: Vec<(u128, Svg)> = document
-            .output
-            .pages()
-            .iter()
-            .enumerate()
-            .map(|(index, page)| {
-                let hash = typst::utils::hash128(page);
-                match self.exported_pages.get(index) {
-                    Some((cached, svg)) if *cached == hash => (hash, svg.clone()),
-                    _ => (hash, page_svg(page, None)),
-                }
-            })
-            .collect();
-        let pages = exported.iter().map(|(_, svg)| svg.clone()).collect();
-        self.exported_pages = exported;
-        Ok(Pages {
-            pages,
-            warnings: self.diagnostics(&document.warnings),
-        })
+    /// Compiles `main` to pages, keeping the document for `locate` and `click`.
+    pub fn typst_pages(&mut self, root: &Path, main: &Path, source: &str) -> Compilation {
+        let compiled = self.compile_document(root, main, source);
+        let deps = match &compiled {
+            Err(DocumentError::OutsideRoot { .. }) => Vec::new(),
+            Ok(_) | Err(DocumentError::Compile(_)) => {
+                let disk = self
+                    .world
+                    .disk
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                (disk.slots.iter())
+                    .filter(|(_, slot)| slot.generation == disk.generation)
+                    .filter_map(|(id, _)| match id.root() {
+                        VirtualRoot::Project => id.vpath().realize(&self.world.root).ok(),
+                        VirtualRoot::Package(_) => None,
+                    })
+                    .collect()
+            }
+        };
+        let result = compiled.map(|(id, Warned { output, warnings })| {
+            let exported: Vec<(u128, Svg)> = (output.pages().iter().enumerate())
+                .map(|(index, page)| {
+                    let hash = typst::utils::hash128(page);
+                    match self.exported_pages.get(index) {
+                        Some((cached, svg)) if *cached == hash => (hash, svg.clone()),
+                        _ => (hash, page_svg(page, None)),
+                    }
+                })
+                .collect();
+            let pages = exported.iter().map(|(_, svg)| svg.clone()).collect();
+            self.exported_pages = exported;
+            let warnings = self.diagnostics(&warnings);
+            // The main source as compiled; the world's slots move on with the next root.
+            let source = self
+                .world
+                .source(id)
+                .expect("the main source was just compiled");
+            self.documents.insert(
+                main.to_owned(),
+                Kept {
+                    source,
+                    document: output,
+                },
+            );
+            Pages { pages, warnings }
+        });
+        Compilation { result, deps }
+    }
+
+    /// Where byte `cursor` of `main` landed in its last compiled document; off text, the first
+    /// text after it on the same line.
+    pub fn locate(&self, main: &Path, cursor: usize) -> Option<PagePoint> {
+        let kept = self.documents.get(main)?;
+        let source = &kept.source;
+        let lines = source.lines();
+        let end = lines.line_to_range(lines.byte_to_line(cursor)?)?.end;
+        let position = (cursor..=end)
+            .filter(|&byte| source.text().is_char_boundary(byte))
+            .find_map(|byte| {
+                typst_ide::jump_from_cursor(&kept.document, source, byte)
+                    .into_iter()
+                    .next()
+            })?;
+        Some(page_point(&position))
+    }
+
+    /// What the point `at` on a page of `main`'s last compiled document leads to.
+    pub fn click(&self, main: &Path, at: PagePoint) -> Option<Jump> {
+        let kept = self.documents.get(main)?;
+        let position = PagedPosition {
+            page: NonZeroUsize::new(at.page + 1)?,
+            point: Point::new(Abs::pt(at.x.0.into()), Abs::pt(at.y.0.into())),
+        };
+        match typst_ide::jump_from_click(&self.world, &kept.document, &position)? {
+            typst_ide::Jump::File(id, byte) => {
+                let source = self.world.source(id).ok()?;
+                let (line, column) = source.lines().byte_to_line_column(byte)?;
+                Some(Jump::Source {
+                    file: self.source_file(id)?,
+                    at: LineColumn { line, column },
+                })
+            }
+            typst_ide::Jump::Url(url) => Some(Jump::Url(url.as_str().to_owned())),
+            typst_ide::Jump::Position(position) => Some(Jump::Page(page_point(&position))),
+        }
+    }
+
+    /// The file `id` names, if it is a project or embedded file.
+    fn source_file(&self, id: FileId) -> Option<SourceFile> {
+        match id.root() {
+            VirtualRoot::Project => Some(SourceFile::Project(
+                id.vpath().realize(&self.world.root).ok()?,
+            )),
+            VirtualRoot::Package(spec) if spec.namespace == EMBEDDED_NAMESPACE => {
+                Some(SourceFile::Embedded(id.get().vpath().get_with_slash()))
+            }
+            VirtualRoot::Package(_) => None,
+        }
     }
 
     pub fn typst_pdf(
@@ -295,7 +378,7 @@ impl Typesetter {
         main: &Path,
         source: &str,
     ) -> Result<Vec<u8>, DocumentError> {
-        let document = self.compile_document(root, main, source)?;
+        let (_, document) = self.compile_document(root, main, source)?;
         typst_pdf::pdf(&document.output, &typst_pdf::PdfOptions::default()).map_err(|errors| {
             DocumentError::Compile(Diagnostics {
                 errors: self.diagnostics(&errors),
@@ -310,7 +393,7 @@ impl Typesetter {
         root: &Path,
         main: &Path,
         source: &str,
-    ) -> Result<Warned<PagedDocument>, DocumentError> {
+    ) -> Result<(FileId, Warned<PagedDocument>), DocumentError> {
         let id = RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::virtualize(root, main).map_err(|_| DocumentError::OutsideRoot {
@@ -354,10 +437,13 @@ impl Typesetter {
         let Warned { output, warnings } = typst::compile::<PagedDocument>(&self.world);
         typst::comemo::evict(CACHE_AGE);
         match output {
-            Ok(document) => Ok(Warned {
-                output: document,
-                warnings,
-            }),
+            Ok(document) => Ok((
+                id,
+                Warned {
+                    output: document,
+                    warnings,
+                },
+            )),
             Err(errors) => Err(DocumentError::Compile(Diagnostics {
                 errors: self.diagnostics(&errors),
                 warnings: self.diagnostics(&warnings),
@@ -378,15 +464,7 @@ impl Typesetter {
                         let lines = source.lines();
                         let (start_line, start_column) = lines.byte_to_line_column(range.start)?;
                         let (end_line, end_column) = lines.byte_to_line_column(range.end)?;
-                        let file = match id.root() {
-                            VirtualRoot::Project => {
-                                SourceFile::Project(id.vpath().realize(&self.world.root).ok()?)
-                            }
-                            VirtualRoot::Package(spec) if spec.namespace == EMBEDDED_NAMESPACE => {
-                                SourceFile::Embedded(id.get().vpath().get_with_slash())
-                            }
-                            VirtualRoot::Package(_) => return None,
-                        };
+                        let file = self.source_file(id)?;
                         Some(Origin::Span {
                             file,
                             start: LineColumn {
@@ -491,3 +569,32 @@ const MERMAID_ACCENTS: [Base16; 8] = [
     Base16::Base0E,
     Base16::Base0F,
 ];
+
+/// Ink height of the `x` glyph per em in `family`, measured the same way for every font.
+fn x_height(store: &FontStore, family: &str) -> Option<f64> {
+    let index = store
+        .book()
+        .select(&family.to_lowercase(), FontVariant::default())?;
+    let font = store.font(index)?.instantiate(
+        FontVariant::default(),
+        Abs::pt(1.0),
+        &FontVariations::default(),
+    );
+    let ttf = font.ttf();
+    let bounds = ttf.glyph_bounding_box(ttf.glyph_index('x')?)?;
+    Some(f64::from(bounds.y_max) / font.units_per_em())
+}
+
+/// A compiled document and the main source it came from.
+pub struct Kept {
+    pub source: Source,
+    pub document: PagedDocument,
+}
+
+fn page_point(position: &PagedPosition) -> PagePoint {
+    PagePoint {
+        page: position.page.get() - 1,
+        x: Pt(position.point.x.to_pt() as f32),
+        y: Pt(position.point.y.to_pt() as f32),
+    }
+}

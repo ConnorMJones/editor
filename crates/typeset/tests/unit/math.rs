@@ -1,5 +1,5 @@
 use model::color::Rgb;
-use typeset::{Display, TypesetError, Typesetter};
+use typeset::{Display, Pt, TypesetError, Typesetter};
 
 use crate::{assert_valid, typesetter};
 
@@ -34,7 +34,7 @@ fn formulas_render_to_valid_svg() {
     ];
     for (tex, display) in formulas {
         let svg = typesetter
-            .math(tex, display, WHITE, 16.0)
+            .math(tex, display, WHITE, Pt(16.0))
             .unwrap_or_else(|error| panic!("{tex}: {error}"));
         assert_valid(&svg);
         match display {
@@ -55,10 +55,10 @@ fn formulas_render_to_valid_svg() {
 fn fraction_baseline_sits_between_numerator_and_denominator() {
     let mut typesetter = typesetter();
     let plain = typesetter
-        .math("x", Display::Inline, WHITE, 16.0)
+        .math("x", Display::Inline, WHITE, Pt(16.0))
         .expect("plain x");
     let fraction = typesetter
-        .math(r"\frac{1}{2}", Display::Inline, WHITE, 16.0)
+        .math(r"\frac{1}{2}", Display::Inline, WHITE, Pt(16.0))
         .expect("fraction");
     let baseline = fraction.baseline_pt.expect("inline baseline");
     assert!(fraction.height_pt > plain.height_pt);
@@ -69,10 +69,10 @@ fn fraction_baseline_sits_between_numerator_and_denominator() {
 fn size_and_colour_reach_the_output() {
     let mut typesetter = typesetter();
     let small = typesetter
-        .math("x+y", Display::Inline, WHITE, 10.0)
+        .math("x+y", Display::Inline, WHITE, Pt(10.0))
         .expect("small");
     let large = typesetter
-        .math("x+y", Display::Inline, WHITE, 20.0)
+        .math("x+y", Display::Inline, WHITE, Pt(20.0))
         .expect("large");
     assert!((large.width_pt / small.width_pt - 2.0).abs() < 0.05);
     let red = typesetter
@@ -84,7 +84,7 @@ fn size_and_colour_reach_the_output() {
                 g: 0x73,
                 b: 0x46,
             },
-            16.0,
+            Pt(16.0),
         )
         .expect("red");
     let text = String::from_utf8_lossy(&red.bytes);
@@ -102,7 +102,7 @@ fn invalid_latex_is_an_error() {
         r"\frac",
         r"\sqrt",
     ] {
-        let result = typesetter.math(tex, Display::Inline, WHITE, 16.0);
+        let result = typesetter.math(tex, Display::Inline, WHITE, Pt(16.0));
         assert!(
             matches!(result, Err(TypesetError::Latex(_) | TypesetError::Math(_))),
             "{tex}: {result:?}"
@@ -118,7 +118,7 @@ fn quotes_and_backslashes_survive_escaping() {
             r#"\text{say "hi"} \backslash"#,
             Display::Inline,
             WHITE,
-            16.0,
+            Pt(16.0),
         )
         .expect("escaped");
     assert_valid(&svg);
@@ -127,9 +127,10 @@ fn quotes_and_backslashes_survive_escaping() {
 #[test]
 fn system_fonts_load() {
     let mut typesetter =
-        Typesetter::new(typeset::FontSource::SystemAndEmbedded).expect("system fonts");
+        Typesetter::new(typeset::FontSource::SystemAndEmbedded, "Libertinus Serif")
+            .expect("system fonts");
     let svg = typesetter
-        .math(r"e^{i\pi} + 1 = 0", Display::Block, WHITE, 16.0)
+        .math(r"e^{i\pi} + 1 = 0", Display::Block, WHITE, Pt(16.0))
         .expect("math");
     assert_valid(&svg);
 }

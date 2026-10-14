@@ -6,7 +6,8 @@ mod mermaid;
 use typeset::{FontSource, Svg, Typesetter};
 
 pub fn typesetter() -> Typesetter {
-    Typesetter::new(FontSource::Embedded).expect("embedded fonts include a math font")
+    Typesetter::new(FontSource::Embedded, "Libertinus Serif")
+        .expect("embedded fonts include a math font")
 }
 
 /// Parses the SVG with usvg and checks it has a drawable, non-empty size.

@@ -15,6 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 typst.workspace = true
+typst-ide.workspace = true
 typst-kit.workspace = true
 typst-layout.workspace = true
 typst-pdf.workspace = true

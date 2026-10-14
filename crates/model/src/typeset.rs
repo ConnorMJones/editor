@@ -6,6 +6,10 @@ use std::sync::Arc;
 /// CSS pixels per typographic point; host logical pixels are CSS pixels.
 pub const PX_PER_PT: f32 = 96.0 / 72.0;
 
+/// Typographic points.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Pt(pub f32);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Display {
     Inline,
@@ -36,6 +40,30 @@ impl std::fmt::Debug for Svg {
 pub struct Pages {
     pub pages: Vec<Svg>,
     pub warnings: Vec<Diagnostic>,
+}
+
+/// A compile of a typst document and the project files it read, whether or not it succeeded.
+#[derive(Clone, Debug)]
+pub struct Compilation {
+    pub result: Result<Pages, DocumentError>,
+    pub deps: Vec<PathBuf>,
+}
+
+/// A point on a typst page, from its top left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PagePoint {
+    /// Zero-based.
+    pub page: usize,
+    pub x: Pt,
+    pub y: Pt,
+}
+
+/// Where a click on a typst page leads.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Jump {
+    Source { file: SourceFile, at: LineColumn },
+    Url(String),
+    Page(PagePoint),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

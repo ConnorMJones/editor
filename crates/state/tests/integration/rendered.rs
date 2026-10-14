@@ -193,6 +193,7 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
             BlockScroll {
                 item: 8,
                 offset: Px(3.0),
+                left: Px(0.0),
             },
         )
     });
@@ -203,7 +204,8 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
         rendered_in(&h, preview).scroll,
         Scroll::At(BlockScroll {
             item: 8,
-            offset: Px(3.0)
+            offset: Px(3.0),
+            left: Px(0.0),
         })
     );
     // Within the same item the source is left alone.
@@ -215,6 +217,7 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
             BlockScroll {
                 item: 0,
                 offset: Px(0.0),
+                left: Px(0.0),
             },
         )
     });
@@ -225,6 +228,7 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
             BlockScroll {
                 item: 0,
                 offset: Px(20.0),
+                left: Px(0.0),
             },
         )
     });
@@ -257,6 +261,7 @@ fn rendered_keys_scroll_by_motions_for_the_host_to_measure() {
     let from = BlockScroll {
         item: 0,
         offset: Px(0.0),
+        left: Px(0.0),
     };
     h.keys("jj");
     assert_eq!(
@@ -265,7 +270,8 @@ fn rendered_keys_scroll_by_motions_for_the_host_to_measure() {
             from,
             by: Motion {
                 lines: 2,
-                half_pages: 0
+                half_pages: 0,
+                columns: 0
             }
         }
     );
@@ -276,7 +282,8 @@ fn rendered_keys_scroll_by_motions_for_the_host_to_measure() {
             from,
             by: Motion {
                 lines: 1,
-                half_pages: 1
+                half_pages: 1,
+                columns: 0
             }
         }
     );
@@ -389,6 +396,7 @@ fn sessions_keep_rendered_tabs_and_their_link() {
             BlockScroll {
                 item: 4,
                 offset: Px(0.0),
+                left: Px(0.0),
             },
         )
     });

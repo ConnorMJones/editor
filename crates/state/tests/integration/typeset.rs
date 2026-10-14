@@ -214,7 +214,7 @@ fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     // Clicking the error strip puts the source cursor on it.
     h.keys("gg");
     let pane = preview(&h);
-    h.run(|state, out| rendered::goto_error(state, pane, out));
+    h.run(|state, out| rendered::goto_diagnostic(state, pane, out));
     let text = h.doc().text.slice(..);
     assert_eq!(h.view().selection.primary().cursor_line(text), line);
 
@@ -241,4 +241,39 @@ fn export_pdf_writes_beside_the_typst_file() {
 
     h.keys(":o note.md<ret>:export-pdf<ret>");
     assert!(matches!(h.state.notice, Some(Notice::MarkdownExport)));
+}
+
+#[test]
+fn saving_an_imported_file_recompiles_the_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("lib.typ"), "#let word = [one]\n").unwrap();
+    fs::write(
+        dir.path().join("main.typ"),
+        "#import \"lib.typ\": word\n#word\n",
+    )
+    .unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o main.typ<ret><space>v");
+    let lib = dir.path().canonicalize().unwrap().join("lib.typ");
+    assert_eq!(typst(&h).1.deps, [lib.clone()]);
+    h.typesetting = Typesetting::Hold;
+    fs::write(&lib, "#let word = [two]\n").unwrap();
+    h.changed(vec![lib]);
+    assert_eq!(h.held.len(), 1, "the preview compiles again");
+}
+
+#[test]
+fn a_following_preview_goes_to_the_page_under_the_cursor() {
+    let (_dir, mut h) = open("main.typ", DOC);
+    h.keys("<space>v");
+    let pane = preview(&h);
+    // Line 4 is "= Two", on the second page; the cursor sits before its text.
+    h.keys("4gg");
+    match h.state.layout.panes[pane].active() {
+        Some(View::Rendered(view)) => match view.scroll {
+            rendered::Scroll::Point(at) => assert_eq!(at.page, 1),
+            other => panic!("not located: {other:?}"),
+        },
+        Some(View::Text(_) | View::Diff(_)) | None => panic!("not rendered"),
+    }
 }

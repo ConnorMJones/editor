@@ -45,6 +45,7 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
     let mut refresh_git = false;
     let mut rescan: Vec<RelPath> = Vec::new();
     let mut relist: Vec<RelPath> = Vec::new();
+    crate::typeset::invalidate(&mut state.previews, &paths);
     for path in paths {
         for (id, buffer) in state.buffers.iter() {
             // A loading buffer's pending read already sees the change.

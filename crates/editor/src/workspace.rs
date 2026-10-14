@@ -75,6 +75,8 @@ pub struct Workspace {
     pub typeset: mpsc::Sender<Request>,
     /// Rasters of the typeset SVGs drawn last frame.
     pub rasters: Rc<RefCell<Rasters>>,
+    /// Height of the window's content as last drawn; rendered lists lay out this far past their viewport.
+    pub window_height: Pixels,
 }
 
 /// Where the session is saved on exit, per `session.restore`.
@@ -1730,6 +1732,7 @@ impl EntityInputHandler for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_height = window.viewport_size().height;
         let mut rasters = self.rasters.borrow_mut();
         let frame = rasters.frame;
         rasters
@@ -1744,16 +1747,15 @@ impl Render for Workspace {
             });
         rasters.frame += 1;
         drop(rasters);
-        // Whole typst pages fit the viewport their list was last laid out in.
+        // Typst pages are sized from the viewport their list was last laid out in.
         for cache in self.rendered.values_mut() {
-            let height = cache.list.viewport_bounds().size.height;
-            match (cache.measured.fit, cache.measured.height == height) {
+            let size = cache.list.viewport_bounds().size;
+            match (cache.measured.fit, cache.measured.height == size.height) {
                 (Fit::Width, _) | (Fit::Page, true) => {}
-                (Fit::Page, false) => {
-                    cache.measured.height = height;
-                    cache.list.remeasure();
-                }
+                (Fit::Page, false) => cache.list.remeasure(),
             }
+            cache.measured.width = size.width;
+            cache.measured.height = size.height;
         }
         let State {
             tree,
