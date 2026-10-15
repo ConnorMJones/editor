@@ -6,9 +6,11 @@ use helix_core::{Range, Rope, Selection};
 use model::color::Base16;
 use model::mode::Mode;
 use model::theme::{self, Modifiers, Style};
-use state::buffer::TextDoc;
-use state::display::{self, CursorShape, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind};
-use state::layout::{Scroll, Viewport};
+use state::text::buffer::TextDoc;
+use state::view::display::{
+    self, CursorShape, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
+};
+use state::view::layout::{Scroll, Viewport};
 
 fn loader() -> Loader {
     let loader = helix_core::config::default_lang_loader();

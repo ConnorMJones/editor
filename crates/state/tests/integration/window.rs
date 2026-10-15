@@ -3,9 +3,9 @@ use std::fs;
 use model::command::{Command, PickerCommand};
 use model::notice::Notice;
 use model::window::{Axis, PickerKind};
-use state::layout::{Flex, Node};
-use state::session::{self, Session, SessionError};
-use state::workspace::{self, Close};
+use state::project::session::{self, Session, SessionError};
+use state::view::layout::{Flex, Node};
+use state::view::panes::{self, Close};
 use state::{Focus, Overlay, Sidebar, SidebarWidth};
 
 use crate::harness::Harness;
@@ -20,10 +20,10 @@ fn close_is_refused_with_unsaved_edits() {
     fs::write(dir.path().join("a.txt"), "a\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>ix<esc><space>e");
-    h.run(|state, out| workspace::picker(state, PickerCommand::Open(PickerKind::Files), out));
+    h.run(|state, out| panes::picker(state, PickerCommand::Open(PickerKind::Files), out));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Sidebar));
 
-    assert_eq!(workspace::request_close(&mut h.state), Close::Refused);
+    assert_eq!(panes::request_close(&mut h.state), Close::Refused);
     assert!(matches!(
         h.state.notice,
         Some(Notice::UnsavedBuffers { count: 1 })
@@ -44,7 +44,7 @@ fn close_is_allowed_once_saved() {
     fs::write(dir.path().join("a.txt"), "a\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>ix<esc>:w<ret>");
-    assert_eq!(workspace::request_close(&mut h.state), Close::Allowed);
+    assert_eq!(panes::request_close(&mut h.state), Close::Allowed);
     assert!(h.state.notice.is_some(), "the write notice is left alone");
     h.keys(":q<ret>");
     assert!(h.quit);

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use helix_core::Rope;
 use helix_core::syntax::HighlighterError;
-use state::buffer::TextDoc;
+use state::text::buffer::TextDoc;
 
 /// Top-level node kinds and the root's byte length.
 fn shape(doc: &TextDoc) -> (Vec<String>, u32) {

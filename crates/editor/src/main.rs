@@ -20,9 +20,9 @@ use model::config::{Config, Restore};
 use model::notice::Notice;
 use model::typeset::{PX_PER_PT, Pt};
 use state::job::JobResult;
-use state::typeset::{Look, Request};
-use state::workspace::{self as commands, Close};
-use state::{Root, State, session, watch};
+use state::render::typeset::{Look, Request};
+use state::view::panes::{self as commands, Close};
+use state::{Root, State, project::session, project::watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
             };
             let mut text = String::new();
             while let Ok(request) = typeset_rx.recv() {
-                let done = state::typeset::run(&mut typesetter, request, &mut text);
+                let done = state::render::typeset::run(&mut typesetter, request, &mut text);
                 match typeset_done_tx.send_blocking(JobResult::Typeset(done)) {
                     Ok(()) => {}
                     Err(_) => break,

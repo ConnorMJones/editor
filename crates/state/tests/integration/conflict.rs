@@ -8,9 +8,9 @@ use model::git::Group;
 use model::notice::Notice;
 use state::Repo;
 use state::apply::apply;
-use state::conflict::{self, Conflict};
-use state::layout::Viewport;
-use state::scroll::{self, Press, Unit};
+use state::git::conflict::{self, Conflict};
+use state::view::layout::Viewport;
+use state::view::scroll::{self, Press, Unit};
 
 use crate::harness::Harness;
 

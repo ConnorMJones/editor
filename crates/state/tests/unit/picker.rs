@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use state::path::RelPath;
-use state::picker::{self, Items, Narrowing, Picker};
+use state::input::picker::{self, Items, Narrowing, Picker};
+use state::project::path::RelPath;
 
 fn files(paths: &[&str]) -> Picker {
     Picker::new(Items::Files(Arc::new(

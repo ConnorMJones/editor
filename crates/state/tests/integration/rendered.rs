@@ -3,14 +3,14 @@ use std::fs;
 use model::command::RenderedCommand;
 use model::notice::Notice;
 use model::window::Px;
-use state::buffer::Content;
-use state::keymap::Context;
-use state::layout::{PaneId, View};
-use state::markdown::{LinkTarget, WikiLink};
-use state::path::RelPath;
-use state::rendered::{self, BlockScroll, Link, Motion, Preview, RenderedView, Scroll};
-use state::session;
-use state::vault::{self, Origin};
+use state::input::keymap::Context;
+use state::project::links::{self, Origin};
+use state::project::path::RelPath;
+use state::project::session;
+use state::render::markdown::{LinkTarget, WikiLink};
+use state::render::rendered::{self, BlockScroll, Link, Motion, Preview, RenderedView, Scroll};
+use state::text::buffer::Content;
+use state::view::layout::{PaneId, View};
 use state::{Confirm, input};
 
 use crate::harness::Harness;
@@ -175,7 +175,7 @@ fn source_cursor_and_scroll_move_the_rendered_view() {
     h.keys("l");
     assert_eq!(rendered_in(&h, preview).scroll, Scroll::item(5));
     // A scroll of the source with the cursor in place follows the top line.
-    h.run(|state, _| state::scroll::scroll_to_line(state, source, 6));
+    h.run(|state, _| state::view::scroll::scroll_to_line(state, source, 6));
     assert_eq!(rendered_in(&h, preview).scroll, Scroll::item(3));
 }
 
@@ -209,7 +209,7 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
         })
     );
     // Within the same item the source is left alone.
-    h.run(|state, _| state::scroll::scroll_to_line(state, source, 0));
+    h.run(|state, _| state::view::scroll::scroll_to_line(state, source, 0));
     h.run(|state, _| {
         rendered::scrolled(
             state,
@@ -243,7 +243,7 @@ fn clicking_a_block_moves_the_source_cursor_and_focus() {
     let preview = h.state.layout.focus;
     let block = {
         let buffer = rendered_in(&h, preview).text.buffer();
-        let doc = state::buffer::doc(&h.state.buffers, buffer).expect("loaded");
+        let doc = state::text::buffer::doc(&h.state.buffers, buffer).expect("loaded");
         rendered::markdown(&h.state.previews, buffer, doc)
             .unwrap()
             .roots[6]
@@ -341,7 +341,7 @@ fn links_follow_urls_headings_and_notes() {
     let buffer = h.view().buffer();
     let origin = Origin::Rendered(h.state.layout.focus);
     h.run(|state, out| {
-        vault::follow(
+        links::follow(
             state,
             buffer,
             &LinkTarget::Url("https://a.org".into()),
@@ -351,7 +351,7 @@ fn links_follow_urls_headings_and_notes() {
     });
     assert_eq!(h.urls, ["https://a.org"]);
     let heading = LinkTarget::Heading("three".into());
-    h.run(|state, out| vault::follow(state, buffer, &heading, origin, out));
+    h.run(|state, out| links::follow(state, buffer, &heading, origin, out));
     let focus = h.state.layout.focus;
     assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(6));
     let wiki = LinkTarget::Wiki(WikiLink {
@@ -359,13 +359,13 @@ fn links_follow_urls_headings_and_notes() {
         heading: None,
         alias: None,
     });
-    h.run(|state, out| vault::follow(state, buffer, &wiki, origin, out));
+    h.run(|state, out| links::follow(state, buffer, &wiki, origin, out));
     assert_eq!(h.focused_tabs(), ["note.md", "◉note.md", "◉other.md"]);
     let missing = LinkTarget::Path {
         path: "nope.md".into(),
         heading: None,
     };
-    h.run(|state, out| vault::follow(state, buffer, &missing, origin, out));
+    h.run(|state, out| links::follow(state, buffer, &missing, origin, out));
     assert_eq!(
         h.state.confirm,
         Some(Confirm::Create(RelPath::parse("nope.md").unwrap()))

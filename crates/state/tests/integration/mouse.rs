@@ -5,11 +5,11 @@ use model::command::{Command, PickerCommand};
 use model::notice::Notice;
 use model::window::PickerKind;
 use state::apply::Force;
+use state::input::picker::{PREVIEW_SLOTS, Preview, Previews};
 use state::job::Job;
-use state::path::RelPath;
-use state::picker::{PREVIEW_SLOTS, Preview, Previews};
-use state::tree::{self, Fold, RowKind};
-use state::workspace::{self, Click};
+use state::project::path::RelPath;
+use state::sidebar::tree::{self, Fold, RowKind};
+use state::view::panes::{self, Click};
 use state::{Effect, Focus, Overlay, Sidebar};
 
 use crate::harness::Harness;
@@ -37,21 +37,21 @@ fn tree_clicks_toggle_directories_and_open_files() {
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 
     let src = row(&h, "src");
-    h.run(|state, out| workspace::click_tree(state, src, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, src, Click::Single, out));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Sidebar));
     assert_eq!(h.state.tree.cursor, src);
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Expanded));
 
     let lib = row(&h, "src/lib.rs");
-    h.run(|state, out| workspace::click_tree(state, lib, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, lib, Click::Single, out));
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "src/lib.rs")));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 
-    h.run(|state, out| workspace::click_tree(state, src, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, src, Click::Single, out));
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Collapsed));
     // Rows past the end are ignored.
     let rows = h.state.tree.rows.len();
-    h.run(|state, out| workspace::click_tree(state, rows, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, rows, Click::Single, out));
     assert_eq!(h.state.tree.cursor, src);
 }
 
@@ -70,7 +70,7 @@ fn picker_click_opens_the_row() {
             .expect("b.txt listed"),
         Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
     };
-    h.run(|state, out| workspace::click_picker(state, target, out));
+    h.run(|state, out| panes::click_picker(state, target, out));
     assert!(matches!(h.state.overlay, Overlay::None));
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "b.txt")));
 }
@@ -85,12 +85,12 @@ fn tab_clicks_show_and_close_through_the_close_guard() {
     let pane = h.state.layout.focus;
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt"]);
 
-    workspace::click_tab(&mut h.state, pane, 0, Click::Single);
+    panes::click_tab(&mut h.state, pane, 0, Click::Single);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 
     h.keys("ix<esc>");
-    workspace::close_tab(&mut h.state, pane, 0, Force::No);
+    panes::close_tab(&mut h.state, pane, 0, Force::No);
     assert!(matches!(
         h.state.notice,
         Some(Notice::UnsavedBuffers { count: 1 })
@@ -98,7 +98,7 @@ fn tab_clicks_show_and_close_through_the_close_guard() {
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt"]);
 
     // Closing a tab that is not active leaves the active one alone.
-    workspace::close_tab(&mut h.state, pane, 1, Force::No);
+    panes::close_tab(&mut h.state, pane, 1, Force::No);
     assert_eq!(h.focused_tabs(), ["a.txt"]);
     assert_eq!(h.state.buffers.len(), 1);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
@@ -111,7 +111,7 @@ fn clicking_a_pane_focuses_it() {
     h.keys("<C-w>v<space>e");
     let first = h.state.layout.leaves()[0];
     assert_ne!(h.state.layout.focus, first);
-    workspace::focus_pane(&mut h.state, first);
+    panes::focus_pane(&mut h.state, first);
     assert_eq!(h.state.layout.focus, first);
     assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
 }
@@ -151,7 +151,7 @@ fn previews_load_in_jobs_and_are_cached() {
             .position(|&index| picker.items.label(index) == label)
             .expect("listed");
         let mut out = Vec::new();
-        workspace::request_preview(&mut h.state, &mut out);
+        panes::request_preview(&mut h.state, &mut out);
         let queued = out
             .iter()
             .filter(|effect| matches!(effect, Effect::Job(Job::Preview { .. })))
@@ -187,8 +187,8 @@ fn previews_load_in_jobs_and_are_cached() {
     }
     assert_eq!(preview(&h, "bin.dat"), "none", "oldest entry evicted");
 
-    h.run(|state, out| workspace::picker(state, PickerCommand::Cancel, out));
-    h.run(|state, out| workspace::picker(state, PickerCommand::Open(PickerKind::Commands), out));
+    h.run(|state, out| panes::picker(state, PickerCommand::Cancel, out));
+    h.run(|state, out| panes::picker(state, PickerCommand::Open(PickerKind::Commands), out));
     assert!(matches!(h.state.overlay, Overlay::Picker(_)));
 }
 

@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use state::files::{self, Changed, Rescan, Walked};
-use state::path::{RelPath, RelPathError};
+use state::project::files::{self, Changed, Rescan, Walked};
+use state::project::path::{RelPath, RelPathError};
 
 fn p(path: &str) -> RelPath {
     RelPath::parse(path).unwrap()

@@ -1,7 +1,7 @@
 use std::fs;
 
-use state::path::RelPath;
-use state::tree::{self, Dir, Entry, EntryKind, Fold, Listing, RowKind, Tree};
+use state::project::path::RelPath;
+use state::sidebar::tree::{self, Dir, Entry, EntryKind, Fold, Listing, RowKind, Tree};
 
 fn entry(name: &str, kind: EntryKind) -> Entry {
     Entry {

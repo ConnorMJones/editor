@@ -1,5 +1,5 @@
 use model::window::{Axis, Side};
-use state::layout::{Child, CloseError, Flex, Layout, MIN_SHARE, Node, Pane, Rect};
+use state::view::layout::{Child, CloseError, Flex, Layout, MIN_SHARE, Node, Pane, Rect};
 
 fn pane() -> Pane {
     Pane::EMPTY

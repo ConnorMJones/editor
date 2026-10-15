@@ -6,9 +6,9 @@ use model::command::{Command, PickerCommand};
 use model::notice::Notice;
 use model::window::PickerKind;
 use state::apply::apply;
-use state::buffer::{Content, Disk, Jump, Position, Target};
-use state::changes::Arrive;
+use state::git::changes::Arrive;
 use state::job::{self, Job};
+use state::text::buffer::{Content, Disk, Jump, Position, Target};
 use state::{Effect, State};
 
 use crate::harness::{Harness, disk_of};

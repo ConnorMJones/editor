@@ -2,10 +2,10 @@ use std::path::Path;
 
 use helix_core::{Rope, Selection};
 use model::theme::Background;
-use state::buffer::TextDoc;
-use state::conflict::{self, Conflict, Conflicts, Label, Side};
-use state::display::{self, Focus, Frame, RowKind, Shade};
-use state::layout::{Scroll, Viewport};
+use state::git::conflict::{self, Conflict, Conflicts, Label, Side};
+use state::text::buffer::TextDoc;
+use state::view::display::{self, Focus, Frame, RowKind, Shade};
+use state::view::layout::{Scroll, Viewport};
 
 fn parse(text: &str) -> Conflicts {
     let mut conflicts = Conflicts::EMPTY;

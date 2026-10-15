@@ -13,15 +13,15 @@ use helix_core::Selection;
 use model::mode::Mode;
 use model::theme::{self as roles, Modifiers, Tone};
 use slotmap::Key as _;
-use state::buffer::Content;
-use state::conflict;
-use state::diff::{self, Bases, Diff, Stage};
-use state::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
-use state::display::{
+use state::git::conflict;
+use state::git::diff::{self, Bases, Diff, Stage};
+use state::git::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
+use state::text::buffer::Content;
+use state::view::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
-use state::layout::{Pane, PaneId, View, Viewport};
-use state::scroll::{self, Gesture, Press, Scrollbar, Unit};
+use state::view::layout::{Pane, PaneId, View, Viewport};
+use state::view::scroll::{self, Gesture, Press, Scrollbar, Unit};
 
 use crate::theme::{Colors, RowColors, Theme};
 use crate::workspace::Workspace;

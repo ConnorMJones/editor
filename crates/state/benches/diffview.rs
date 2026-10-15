@@ -5,12 +5,12 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use git2::Oid;
 use helix_core::{Rope, Selection};
 use model::mode::Mode;
-use state::buffer::TextDoc;
-use state::diff::{Base, Lines, Side, Stamp};
-use state::diffview::{self, Align, LEFT, RIGHT};
-use state::display::{self, Focus, Frame, Indent, text_format};
-use state::layout::{Scroll, Viewport};
-use state::scroll;
+use state::git::diff::{Base, Lines, Side, Stamp};
+use state::git::diffview::{self, Align, LEFT, RIGHT};
+use state::text::buffer::TextDoc;
+use state::view::display::{self, Focus, Frame, Indent, text_format};
+use state::view::layout::{Scroll, Viewport};
+use state::view::scroll;
 
 // Estimate: a frame lays out both sides, each like one text view (~250 us for 60x120 with
 // highlighting), plus filler lookups that are a partition point per frame and a compare per

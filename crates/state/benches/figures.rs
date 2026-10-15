@@ -6,9 +6,9 @@ use ::typeset::{FontSource, Typesetter};
 use criterion::{Criterion, criterion_group, criterion_main};
 use helix_core::Rope;
 use model::color::{Palette, Rgb};
-use state::markdown::{self, Base};
-use state::typeset::{self, Done, Look, Request};
-use state::vault::Index;
+use state::project::links::Index;
+use state::render::markdown::{self, Base};
+use state::render::typeset::{self, Done, Look, Request};
 
 const LOOK: Look = Look {
     text: Rgb {

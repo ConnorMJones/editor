@@ -5,11 +5,11 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Rope, Selection};
 use model::mode::Mode;
-use state::buffer::TextDoc;
-use state::conflict::{self, Conflicts};
-use state::display::{self, Focus, Frame, Indent, text_format};
-use state::layout::{Scroll, Viewport};
-use state::scroll;
+use state::git::conflict::{self, Conflicts};
+use state::text::buffer::TextDoc;
+use state::view::display::{self, Focus, Frame, Indent, text_format};
+use state::view::layout::{Scroll, Viewport};
+use state::view::scroll;
 
 fn display(c: &mut Criterion) {
     let loader = helix_core::config::default_lang_loader();

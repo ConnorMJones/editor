@@ -5,14 +5,14 @@ use model::command::ChangesCommand;
 use model::git::Group;
 use model::notice::Notice;
 use state::Confirm;
-use state::changes::{self, Discard, ListCursor, ListRow};
-use state::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
+use state::git::changes::{self, Discard, ListCursor, ListRow};
+use state::git::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
 use state::input;
-use state::keymap::Context;
-use state::layout::{View, Viewport};
-use state::session::{self, SessionItem, SessionPane, SessionSidebar};
-use state::tree::Fold;
-use state::workspace::{self, Click};
+use state::input::keymap::Context;
+use state::project::session::{self, SessionItem, SessionPane, SessionSidebar};
+use state::sidebar::tree::Fold;
+use state::view::layout::{View, Viewport};
+use state::view::panes::{self, Click};
 use state::{Focus, Repo, Sidebar};
 
 use crate::git::{init, stage_path, staged_text};
@@ -158,7 +158,7 @@ fn deleted_files_show_head_beside_an_inert_side() {
     h.keys("<esc>");
     // The wheel still scrolls HEAD through the lead.
     let focus = h.state.layout.focus;
-    h.run(|state, _| state::scroll::wheel(state, focus, 1));
+    h.run(|state, _| state::view::scroll::wheel(state, focus, 1));
     match &diff(&h).left {
         // The view opened at the top of the filler rows; one row down faces HEAD's `y`.
         Left::Head { scroll, .. } => assert_eq!((scroll.anchor, scroll.rows), (2, 0)),
@@ -280,7 +280,7 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
             (Group::Changes, "b.txt".to_owned()),
         ]
     );
-    h.run(|state, out| workspace::click_changes(state, 3, Click::Double, out));
+    h.run(|state, out| panes::click_changes(state, 3, Click::Double, out));
     assert_eq!(h.focused_tabs(), ["±a.txt*", "±b.txt"]);
 
     h.keys("<esc>");
@@ -376,15 +376,15 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     h.keys("s");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), "a\nB\nc\nd\ne\n");
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), "a\nb\nC\nd\ne\n");
-    h.run(|state, out| workspace::changes_action(state, 0, ChangesCommand::Unstage, out));
+    h.run(|state, out| panes::changes_action(state, 0, ChangesCommand::Unstage, out));
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), FIVE);
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), FIVE);
 
     // An entry's `+` button stages just that file; a header click toggles the group.
-    h.run(|state, out| workspace::changes_action(state, 2, ChangesCommand::Stage, out));
+    h.run(|state, out| panes::changes_action(state, 2, ChangesCommand::Stage, out));
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), "a\nb\nC\nd\ne\n");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), FIVE);
-    h.run(|state, out| workspace::click_changes(state, 0, Click::Single, out));
+    h.run(|state, out| panes::click_changes(state, 0, Click::Single, out));
     assert_eq!(h.state.git.folds[Group::Staged as usize], Fold::Collapsed);
 
     // Discard refuses whole groups.

@@ -3,13 +3,13 @@ use std::path::Path;
 
 use model::git::GitStatus;
 use model::notice::Notice;
-use state::buffer::Disk;
-use state::files::Files;
-use state::layout::Node;
-use state::path::RelPath;
-use state::picker::Items;
-use state::tree::{RowKind, TreeAction, TreeTarget};
-use state::workspace;
+use state::input::picker::Items;
+use state::project::files::Files;
+use state::project::path::RelPath;
+use state::sidebar::tree::{RowKind, TreeAction, TreeTarget};
+use state::text::buffer::Disk;
+use state::view::layout::Node;
+use state::view::panes;
 use state::{Focus, Overlay, Repo, Sidebar, State};
 
 use crate::harness::{Harness, disk_of};
@@ -314,7 +314,7 @@ fn live_watcher_reloads_and_indexes() {
         let text = state
             .buffers
             .values()
-            .any(|b| matches!(&b.content, state::buffer::Content::Text { doc, .. } if doc.text == "changed on disk\n"));
+            .any(|b| matches!(&b.content, state::text::buffer::Content::Text { doc, .. } if doc.text == "changed on disk\n"));
         indexed && text
     });
     assert!(reloaded);
@@ -388,26 +388,24 @@ fn tree_menu_creates_files_and_folders_renames_and_deletes() {
     h.keys("<space>e");
 
     // New Folder on the root never needs a trailing slash.
-    h.run(|state, out| workspace::tree_action(state, TreeTarget::Root, TreeAction::NewFolder, out));
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Root, TreeAction::NewFolder, out));
     h.keys("docs<ret>");
     assert!(dir.path().join("docs").is_dir());
 
     // New File on a folder row creates inside it.
     let src = row(&h, "src");
-    h.run(|state, out| {
-        workspace::tree_action(state, TreeTarget::Row(src), TreeAction::NewFile, out)
-    });
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(src), TreeAction::NewFile, out));
     h.keys("main.rs<ret>");
     assert!(dir.path().join("src/main.rs").is_file());
 
     h.keys("<space>e");
     let a = row(&h, "a.txt");
-    h.run(|state, out| workspace::tree_action(state, TreeTarget::Row(a), TreeAction::Rename, out));
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(a), TreeAction::Rename, out));
     h.keys("<bs><bs><bs><bs><bs>b.txt<ret>");
     assert!(dir.path().join("b.txt").is_file());
 
     let b = row(&h, "b.txt");
-    h.run(|state, out| workspace::tree_action(state, TreeTarget::Row(b), TreeAction::Delete, out));
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(b), TreeAction::Delete, out));
     h.keys("y<ret>");
     assert!(!dir.path().join("b.txt").exists());
 }
@@ -426,7 +424,7 @@ fn dragging_moves_entries_between_folders() {
     // Onto a folder moves into it, and an open buffer follows the file.
     let docs = row(&h, "docs");
     h.run(|state, out| {
-        workspace::move_entry(
+        panes::move_entry(
             state,
             RelPath::parse("a.txt").unwrap(),
             TreeTarget::Row(docs),
@@ -440,12 +438,12 @@ fn dragging_moves_entries_between_folders() {
     let docs = row(&h, "docs");
     h.state.tree.cursor = docs;
     match h.state.tree.rows[docs].kind {
-        RowKind::Dir(state::tree::Fold::Collapsed) => h.keys("l"),
-        RowKind::Dir(state::tree::Fold::Expanded) | RowKind::File => {}
+        RowKind::Dir(state::sidebar::tree::Fold::Collapsed) => h.keys("l"),
+        RowKind::Dir(state::sidebar::tree::Fold::Expanded) | RowKind::File => {}
     }
     let b = row(&h, "docs/b.md");
     h.run(|state, out| {
-        workspace::move_entry(
+        panes::move_entry(
             state,
             RelPath::parse("src/c.rs").unwrap(),
             TreeTarget::Row(b),
@@ -454,7 +452,7 @@ fn dragging_moves_entries_between_folders() {
     });
     assert!(dir.path().join("docs/c.rs").is_file());
     h.run(|state, out| {
-        workspace::move_entry(
+        panes::move_entry(
             state,
             RelPath::parse("docs/b.md").unwrap(),
             TreeTarget::Root,
@@ -469,7 +467,7 @@ fn dragging_moves_entries_between_folders() {
     h.keys("l");
     let inner = row(&h, "src/inner");
     h.run(|state, out| {
-        workspace::move_entry(
+        panes::move_entry(
             state,
             RelPath::parse("src").unwrap(),
             TreeTarget::Row(inner),
@@ -483,7 +481,7 @@ fn dragging_moves_entries_between_folders() {
     fs::write(dir.path().join("src/b.md"), "other").unwrap();
     let src = row(&h, "src");
     h.run(|state, out| {
-        workspace::move_entry(
+        panes::move_entry(
             state,
             RelPath::parse("b.md").unwrap(),
             TreeTarget::Row(src),

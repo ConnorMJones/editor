@@ -13,17 +13,17 @@ use model::command::{Command, Dirs};
 use model::notice::Notice;
 
 use crate::apply::map_views;
-use crate::buffer::{BufferId, Content, Disk, Jump, TextDoc};
-use crate::diff::{Base, BaseRead, Diff, Lines, Outcome, Stamp};
-use crate::files::{self, Changed, Files, Rescan, Walked};
+use crate::git::diff::{Base, BaseRead, Diff, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
+use crate::project::files::{self, Changed, Files, Rescan, Walked};
+use crate::text::buffer::{BufferId, Content, Disk, Jump, TextDoc};
 
-use crate::path::RelPath;
-use crate::picker::{self, Hit, Items, Preview, Search};
-use crate::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
+use crate::input::picker::{self, Hit, Items, Preview, Search};
+use crate::project::path::RelPath;
+use crate::sidebar::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
 use crate::{
-    Effect, Exit, Overlay, Refresh, Repo, State, backlinks, changes, request_git, typeset, vault,
-    watch,
+    Effect, Exit, Overlay, Refresh, Repo, State, git::changes, project::backlinks, project::links,
+    project::watch, render::typeset, request_git,
 };
 
 /// Blocking work run off the UI thread.
@@ -602,9 +602,9 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 Overlay::None | Overlay::Prompt(_) => {}
             }
             state.files = Files::Ready(files);
-            vault::invalidate(&mut state.vault);
+            links::invalidate(&mut state.vault);
             backlinks::reconcile(state, out);
-            crate::workspace::request_preview(state, out);
+            crate::view::panes::request_preview(state, out);
         }
         JobResult::Listed { dir, result } => {
             let entries = match result {
@@ -656,7 +656,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             };
             match changed {
                 Changed::Yes => {
-                    vault::invalidate(&mut state.vault);
+                    links::invalidate(&mut state.vault);
                     backlinks::reconcile(state, out);
                 }
                 Changed::No => {}
@@ -802,7 +802,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     match kind {
                         EntryKind::File => {
                             crate::apply::apply(state, Command::Open(path.to_path(&root)), out);
-                            crate::workspace::focus_editor(state);
+                            crate::view::panes::focus_editor(state);
                         }
                         EntryKind::Dir => {}
                     }
@@ -867,7 +867,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             changes::indexed(state, path, op, result, out)
         }
         JobResult::HeadParsed { buffer, oid, doc } => {
-            crate::diffview::head_parsed(state, buffer, oid, doc)
+            crate::git::diffview::head_parsed(state, buffer, oid, doc)
         }
         JobResult::Grepped {
             generation,
@@ -891,7 +891,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 },
                 Overlay::None | Overlay::Prompt(_) => {}
             }
-            crate::workspace::request_preview(state, out);
+            crate::view::panes::request_preview(state, out);
         }
     }
 }

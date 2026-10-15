@@ -3,10 +3,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use state::files;
-use state::path::RelPath;
-use state::picker::{self, Items, Narrowing, Picker};
-use state::tree;
+use state::input::picker::{self, Items, Narrowing, Picker};
+use state::project::files;
+use state::project::path::RelPath;
+use state::sidebar::tree;
 
 /// Synthetic repo-shaped paths: 100 top dirs x 10 subdirs x 100 files.
 fn paths() -> Arc<Vec<RelPath>> {

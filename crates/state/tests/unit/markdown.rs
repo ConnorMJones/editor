@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use helix_core::Rope;
-use state::markdown::{
+use state::project::links::{Index, Resolution};
+use state::project::path::RelPath;
+use state::render::markdown::{
     self, Base, BlockKind, CalloutFold, CalloutKind, Column, Display, EmbedKind, Emphasis,
     FigureKind, Format, ImageFile, Level, LinkTarget, ListKind, Markdown, RowKind, SpanKind, Task,
     WikiLink,
 };
-use state::path::RelPath;
-use state::vault::{Index, Resolution};
 
 fn parse(text: &str) -> Markdown {
     let vault = Index::new(1, Default::default());

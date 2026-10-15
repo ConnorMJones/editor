@@ -1,6 +1,6 @@
 use std::fs;
 
-use state::session::{self, Session, SessionError};
+use state::project::session::{self, Session, SessionError};
 use state::{Focus, Sidebar};
 
 use crate::harness::Harness;

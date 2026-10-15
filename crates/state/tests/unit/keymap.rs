@@ -1,6 +1,6 @@
 use model::command::Command;
 use model::key::{Key, KeyCode, KeySeq};
-use state::keymap::{Context, Keymap, Resolved};
+use state::input::keymap::{Context, Keymap, Resolved};
 
 #[test]
 fn helix_tables_build() {
@@ -72,7 +72,7 @@ fn select_mode_shares_normal_bindings() {
 #[test]
 fn keymap_reference_is_current() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymap.md");
-    let generated = state::keymap::reference();
+    let generated = state::input::keymap::reference();
     match std::env::var_os("UPDATE_DOCS") {
         Some(_) => std::fs::write(&path, &generated).expect("write docs/keymap.md"),
         None => {

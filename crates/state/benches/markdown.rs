@@ -3,8 +3,8 @@ use std::path::Path;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use helix_core::Rope;
-use state::markdown::{self, Base};
-use state::vault::Index;
+use state::project::links::Index;
+use state::render::markdown::{self, Base};
 
 /// One section of a typical note, about 50 lines.
 const SECTION: &str = "\

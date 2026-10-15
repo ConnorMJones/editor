@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use state::backlinks::{self, OutLink};
-use state::markdown::{LinkTarget, WikiLink};
-use state::path::RelPath;
-use state::vault::{self, Dest, Index, Resolution};
+use state::project::backlinks::{self, OutLink};
+use state::project::links::{self, Dest, Index, Resolution};
+use state::project::path::RelPath;
+use state::render::markdown::{LinkTarget, WikiLink};
 
 fn p(path: &str) -> RelPath {
     RelPath::parse(path).unwrap()
@@ -16,7 +16,7 @@ fn vault(files: &[&str]) -> Index {
 }
 
 fn wiki(index: &Index, dir: &str, target: &str) -> Resolution {
-    vault::resolve(index, dir, Dest::Wiki(target))
+    links::resolve(index, dir, Dest::Wiki(target))
 }
 
 fn file(path: &str) -> Resolution {
@@ -84,7 +84,7 @@ fn missing_notes_go_beside_the_linking_note() {
 #[test]
 fn markdown_paths_resolve_relative_then_root_then_by_name() {
     let index = vault(&["notes/sub/b.md", "notes/a.md", "top.md", "assets/img.png"]);
-    let path = |dir: &str, target: &str| vault::resolve(&index, dir, Dest::Path(target));
+    let path = |dir: &str, target: &str| links::resolve(&index, dir, Dest::Path(target));
     assert_eq!(path("notes", "sub/b.md"), file("notes/sub/b.md"));
     assert_eq!(path("notes/sub", "../a.md"), file("notes/a.md"));
     assert_eq!(path("notes/sub", "../a"), file("notes/a.md"));
@@ -97,7 +97,7 @@ fn markdown_paths_resolve_relative_then_root_then_by_name() {
 
 #[test]
 fn wikilink_parts_split_heading_and_alias() {
-    let link = |line: &str, at: usize| vault::link_at(line, at);
+    let link = |line: &str, at: usize| links::link_at(line, at);
     assert_eq!(
         link("see [[Note#Part|shown]] here", 8),
         Some(LinkTarget::Wiki(WikiLink {
@@ -135,15 +135,15 @@ fn wikilink_parts_split_heading_and_alias() {
 #[test]
 fn headings_are_found_by_scan_outside_fences() {
     let text = "# Top\n```\n## Inner\n```\n## Inner\ntext\n### Last One ##\n";
-    let doc = state::buffer::TextDoc::new(
+    let doc = state::text::buffer::TextDoc::new(
         helix_core::Rope::from(text),
         std::path::Path::new("n.md"),
         &helix_core::config::default_lang_loader(),
     );
-    assert_eq!(vault::heading_line(&doc, None, "inner"), Some(4));
-    assert_eq!(vault::heading_line(&doc, None, "last-one"), Some(6));
-    assert_eq!(vault::heading_line(&doc, None, "Top#Last One"), Some(6));
-    assert_eq!(vault::heading_line(&doc, None, "nowhere"), None);
+    assert_eq!(links::heading_line(&doc, None, "inner"), Some(4));
+    assert_eq!(links::heading_line(&doc, None, "last-one"), Some(6));
+    assert_eq!(links::heading_line(&doc, None, "Top#Last One"), Some(6));
+    assert_eq!(links::heading_line(&doc, None, "nowhere"), None);
 }
 
 #[test]
@@ -166,13 +166,13 @@ fn extraction_finds_links_with_their_lines() {
         ]
     );
     assert_eq!(links[0].text, "See [[Other|o]] and [x](sub/y.md#h).");
-    assert_eq!(links[1].key, vault::link_key("y.md"));
-    assert_eq!(links[0].key, vault::link_key("Other.md"));
+    assert_eq!(links[1].key, links::link_key("y.md"));
+    assert_eq!(links[0].key, links::link_key("Other.md"));
 }
 
 #[test]
 fn unresolved_links_parse_as_missing() {
-    use state::markdown::{self, Base, BlockKind, EmbedKind, Emphasis, ImageFile};
+    use state::render::markdown::{self, Base, BlockKind, EmbedKind, Emphasis, ImageFile};
     let index = vault(&["notes/here.md", "assets/pic.png"]);
     let base = Base {
         dir: std::path::Path::new("/nonexistent/notes"),

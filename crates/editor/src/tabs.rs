@@ -5,8 +5,8 @@ use gpui::{
 };
 use slotmap::Key as _;
 use state::apply::Force;
-use state::layout::{Pane, PaneId, TabKey, Tabs};
-use state::workspace::{self, Click};
+use state::view::layout::{Pane, PaneId, TabKey, Tabs};
+use state::view::panes::{self, Click};
 
 use crate::workspace::Workspace;
 
@@ -129,7 +129,7 @@ impl Workspace {
                 .hover(|style| style.bg(theme.chrome.hover).text_color(theme.text))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    workspace::close_tab(&mut this.state, pane, index, Force::No);
+                    panes::close_tab(&mut this.state, pane, index, Force::No);
                     this.changed(cx);
                 }))
                 .child("×");
@@ -174,7 +174,7 @@ impl Workspace {
                         2 => Click::Double,
                         _ => Click::Single,
                     };
-                    workspace::click_tab(&mut this.state, pane, index, click);
+                    panes::click_tab(&mut this.state, pane, index, click);
                     window.focus(&this.focus, cx);
                     this.changed(cx);
                 }))
@@ -182,7 +182,7 @@ impl Workspace {
                     MouseButton::Middle,
                     cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        workspace::close_tab(&mut this.state, pane, index, Force::No);
+                        panes::close_tab(&mut this.state, pane, index, Force::No);
                         this.changed(cx);
                     }),
                 )

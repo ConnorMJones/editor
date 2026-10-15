@@ -3,15 +3,15 @@ use std::path::Path;
 
 use helix_core::Selection;
 use model::notice::Notice;
-use state::backlinks::Build;
-use state::buffer::Content;
-use state::keymap::Context;
-use state::layout::View;
-use state::markdown::{BlockKind, EmbedKind, ImageFile};
-use state::path::RelPath;
-use state::picker::{Hit, Items, Search};
-use state::rendered::Scroll;
-use state::{Confirm, Overlay, input, rendered};
+use state::input::keymap::Context;
+use state::input::picker::{Hit, Items, Search};
+use state::project::backlinks::Build;
+use state::project::path::RelPath;
+use state::render::markdown::{BlockKind, EmbedKind, ImageFile};
+use state::render::rendered::Scroll;
+use state::text::buffer::Content;
+use state::view::layout::View;
+use state::{Confirm, Overlay, input, render::rendered};
 
 use crate::harness::Harness;
 
@@ -163,16 +163,16 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
     h.keys("<space>V");
     let buffer = h.view().buffer();
     let pane = h.state.layout.focus;
-    let target = state::markdown::LinkTarget::Path {
+    let target = state::render::markdown::LinkTarget::Path {
         path: "sub/c.md".into(),
         heading: Some("Part".into()),
     };
     h.run(|state, out| {
-        state::vault::follow(
+        state::project::links::follow(
             state,
             buffer,
             &target,
-            state::vault::Origin::Rendered(pane),
+            state::project::links::Origin::Rendered(pane),
             out,
         )
     });
@@ -213,7 +213,7 @@ fn embedded_images_resolve_from_other_folders() {
             );
             assert_eq!(
                 note.kind,
-                EmbedKind::Note(state::vault::Resolution::File(
+                EmbedKind::Note(state::project::links::Resolution::File(
                     RelPath::parse("notes/sub/c.md").unwrap()
                 ))
             );
@@ -306,7 +306,7 @@ fn backlinks_follow_external_changes_without_rereading_on_their_own() {
 fn backlinks_asked_for_before_the_file_index_fill_once_it_arrives() {
     let (_dir, mut h) = vault();
     h.keys(":o notes/b.md<ret>");
-    h.state.files = state::files::Files::Loading;
+    h.state.files = state::project::files::Files::Loading;
     h.keys("<space>l");
     assert!(matches!(h.state.backlinks.build, Build::Waiting));
     match &h.state.overlay {

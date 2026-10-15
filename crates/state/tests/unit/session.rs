@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use state::session;
+use state::project::session;
 
 #[test]
 fn session_file_escapes_root() {

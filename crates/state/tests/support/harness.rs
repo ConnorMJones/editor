@@ -9,12 +9,12 @@ use model::color::{Palette, Rgb};
 use model::config::TabsConfig;
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
-use state::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
+use state::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
 
-use state::layout::{PaneId, TextView, View};
-use state::typeset::{Look, Request};
-use state::watch::{self, Watcher};
-use state::{Effect, Root, State, changes, input, job, register};
+use state::project::watch::{self, Watcher};
+use state::render::typeset::{Look, Request};
+use state::view::layout::{PaneId, TextView, View};
+use state::{Effect, Root, State, git::changes, input, job, text::registers};
 
 pub struct Harness {
     pub state: State,
@@ -51,7 +51,7 @@ pub const LOOK: Look = Look {
 /// Typesets on one process-wide typesetter with the embedded fonts, so results do not depend
 /// on the machine.
 #[cfg(feature = "integration")]
-fn run_typeset(request: Request) -> state::typeset::Done {
+fn run_typeset(request: Request) -> state::render::typeset::Done {
     use std::sync::{Mutex, OnceLock};
     static TYPESETTER: OnceLock<Mutex<(typeset::Typesetter, String)>> = OnceLock::new();
     let mut guard = TYPESETTER
@@ -65,7 +65,7 @@ fn run_typeset(request: Request) -> state::typeset::Done {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let (typesetter, text) = &mut *guard;
-    state::typeset::run(typesetter, request, text)
+    state::render::typeset::run(typesetter, request, text)
 }
 
 /// Whether typeset requests run as they arrive or wait in `Harness::held`.
@@ -240,7 +240,7 @@ impl Harness {
                 },
                 Effect::ReadClipboard { clipboard, then } => {
                     let text = self.clipboard[slot(clipboard)].clone();
-                    register::clipboard_contents(&mut self.state, clipboard, then, text);
+                    registers::clipboard_contents(&mut self.state, clipboard, then, text);
                 }
             }
         }

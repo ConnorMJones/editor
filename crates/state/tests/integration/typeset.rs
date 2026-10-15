@@ -2,11 +2,11 @@ use std::fs;
 
 use model::notice::Notice;
 use model::typeset::{Origin, SourceFile};
-use state::buffer::Content;
-use state::layout::{PaneId, View};
-use state::markdown::Figure;
-use state::rendered::{self, Preview};
-use state::typeset::{self, Compile, Outcome, Render, SPARE, Typst};
+use state::render::markdown::Figure;
+use state::render::rendered::{self, Preview};
+use state::render::typeset::{self, Compile, Outcome, Render, SPARE, Typst};
+use state::text::buffer::Content;
+use state::view::layout::{PaneId, View};
 
 use crate::harness::{Harness, Typesetting};
 
@@ -64,7 +64,7 @@ fn render<'a>(h: &'a Harness, source: &str) -> &'a Render {
 
 fn typst(h: &Harness) -> (u64, &Typst) {
     let buffer = h.view().buffer();
-    let doc = state::buffer::doc(&h.state.buffers, buffer).expect("loaded");
+    let doc = state::text::buffer::doc(&h.state.buffers, buffer).expect("loaded");
     match h.state.previews.get(buffer) {
         Some(Preview::Typst(typst)) => (doc.version, typst),
         Some(Preview::Markdown(_)) | None => panic!("no typst preview"),

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use git2::Status;
 use model::git::{Change, GitStatus, Group, Kind};
 use state::git::{Changed, GitSnapshot, aggregate, classify};
-use state::path::RelPath;
+use state::project::path::RelPath;
 
 fn p(path: &str) -> RelPath {
     RelPath::parse(path).unwrap()

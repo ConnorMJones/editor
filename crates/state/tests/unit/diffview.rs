@@ -4,12 +4,12 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::syntax::Loader;
 use helix_core::{Rope, Selection};
 use model::theme::Background;
-use state::buffer::TextDoc;
-use state::diff::{Hunk, Side};
-use state::diffview::{self, Align, LEFT, RIGHT};
-use state::display::{self, Focus, Frame, Indent, RowKind, Shade, text_format};
-use state::layout::{Scroll, Viewport};
-use state::scroll::{self, Padding};
+use state::git::diff::{Hunk, Side};
+use state::git::diffview::{self, Align, LEFT, RIGHT};
+use state::text::buffer::TextDoc;
+use state::view::display::{self, Focus, Frame, Indent, RowKind, Shade, text_format};
+use state::view::layout::{Scroll, Viewport};
+use state::view::scroll::{self, Padding};
 
 const INDENT: Indent = Indent {
     tab_width: 4,

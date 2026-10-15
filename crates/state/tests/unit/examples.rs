@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use helix_core::Rope;
-use state::markdown::{self, Base, BlockKind, EmbedKind, ImageFile, LinkTarget, Markdown};
-use state::path::RelPath;
-use state::vault::{self, Dest, Index, Resolution};
+use state::project::links::{self, Dest, Index, Resolution};
+use state::project::path::RelPath;
+use state::render::markdown::{self, Base, BlockKind, EmbedKind, ImageFile, LinkTarget, Markdown};
 
 fn examples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")
@@ -93,7 +93,7 @@ fn only_the_deliberate_wikilink_is_unresolved() {
             for link in &inline.links {
                 match &link.target {
                     LinkTarget::Wiki(wiki) if !wiki.target.is_empty() => {
-                        match vault::resolve(&index, folder, Dest::Wiki(&wiki.target)) {
+                        match links::resolve(&index, folder, Dest::Wiki(&wiki.target)) {
                             Resolution::File(_) => {}
                             Resolution::Missing(_) | Resolution::Invalid => {
                                 missing.push(wiki.target.clone())

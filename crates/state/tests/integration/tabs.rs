@@ -2,10 +2,10 @@ use std::fs;
 
 use model::notice::Notice;
 use state::apply::Force;
-use state::layout::InvalidTabs;
-use state::picker::Items;
-use state::session::{self, Session, SessionError};
-use state::workspace::{self, Click};
+use state::input::picker::Items;
+use state::project::session::{self, Session, SessionError};
+use state::view::layout::InvalidTabs;
+use state::view::panes::{self, Click};
 use state::{Overlay, State};
 
 use crate::harness::Harness;
@@ -32,16 +32,14 @@ fn tree_click(h: &mut Harness, path: &str, click: Click) {
             .state
             .tree
             .dirs
-            .get(&state::path::RelPath::parse(dir).unwrap())
+            .get(&state::project::path::RelPath::parse(dir).unwrap())
         {
-            Some(listing) if listing.fold == state::tree::Fold::Expanded => {}
-            Some(_) | None => {
-                h.run(|state, out| workspace::click_tree(state, row, Click::Single, out))
-            }
+            Some(listing) if listing.fold == state::sidebar::tree::Fold::Expanded => {}
+            Some(_) | None => h.run(|state, out| panes::click_tree(state, row, Click::Single, out)),
         }
     }
     let row = row(&h.state, path);
-    h.run(|state, out| workspace::click_tree(state, row, click, out));
+    h.run(|state, out| panes::click_tree(state, row, click, out));
 }
 
 fn row(state: &State, path: &str) -> usize {
@@ -149,9 +147,9 @@ fn saving_and_double_clicks_keep_the_preview() {
     tree_click(&mut h, "b.txt", Click::Single);
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
     let pane = h.state.layout.focus;
-    workspace::click_tab(&mut h.state, pane, 1, Click::Single);
+    panes::click_tab(&mut h.state, pane, 1, Click::Single);
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
-    workspace::click_tab(&mut h.state, pane, 1, Click::Double);
+    panes::click_tab(&mut h.state, pane, 1, Click::Double);
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt"]);
 
     tree_click(&mut h, "c.txt", Click::Single);
@@ -223,7 +221,7 @@ fn closing_a_modified_buffers_last_view_is_refused_unless_forced() {
     assert_eq!(h.focused_tabs(), ["a.txt"]);
 
     let pane = h.state.layout.focus;
-    h.run(|state, _| workspace::close_tab(state, pane, 0, Force::No));
+    h.run(|state, _| panes::close_tab(state, pane, 0, Force::No));
     assert_eq!(h.focused_tabs(), ["a.txt"]);
     h.keys(":bc!<ret>");
     assert!(h.state.buffers.is_empty());

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use model::command::Command;
 use model::notice::Notice;
-use state::prompt::parse;
+use state::input::prompt::parse;
 
 #[test]
 fn parses_write_family() {
@@ -79,7 +79,7 @@ fn parses_typed_editing_commands() {
 
 #[test]
 fn every_completed_command_parses() {
-    for (names, _) in state::prompt::COMMANDS {
+    for (names, _) in state::input::prompt::COMMANDS {
         for name in names {
             assert!(
                 !matches!(parse(name), Err(Notice::UnknownCommand { .. })),
@@ -91,7 +91,7 @@ fn every_completed_command_parses() {
 
 mod editing {
     use model::register::Register;
-    use state::prompt::{Candidate, Chosen, History};
+    use state::input::prompt::{Candidate, Chosen, History};
     use state::{Overlay, Prompt};
 
     use crate::harness::Harness;

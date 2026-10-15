@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use git2::Oid;
 use helix_core::Rope;
-use state::diff::{Base, Lines, Outcome, Stamp};
+use state::git::diff::{Base, Lines, Outcome, Stamp};
 
 // Estimate: re-interning 10k buffer lines at ~150 ns each (rope line iteration, hashing and
 // comparing slices) dominates at ~1.5 ms; the diff itself strips the common prefix and suffix

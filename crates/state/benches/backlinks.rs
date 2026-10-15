@@ -2,9 +2,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use state::backlinks::{self, OutLink};
-use state::path::RelPath;
-use state::vault::{self, Index};
+use state::project::backlinks::{self, OutLink};
+use state::project::links::{self, Index};
+use state::project::path::RelPath;
 
 const NOTES: usize = 2000;
 const FOLDERS: usize = 20;
@@ -92,16 +92,16 @@ fn backlinks(c: &mut Criterion) {
             for (path, links) in &all {
                 let dir = path.parent().unwrap_or("");
                 for link in links {
-                    match vault::resolve(&index, dir, link.dest.as_str()) {
-                        vault::Resolution::File(_) => found += 1,
-                        vault::Resolution::Missing(_) | vault::Resolution::Invalid => {}
+                    match links::resolve(&index, dir, link.dest.as_str()) {
+                        links::Resolution::File(_) => found += 1,
+                        links::Resolution::Missing(_) | links::Resolution::Invalid => {}
                     }
                 }
             }
             found
         })
     });
-    let wanted = vault::link_key("note 7.md");
+    let wanted = links::link_key("note 7.md");
     c.bench_function("backlinks: filter 2000 notes for one target", |b| {
         b.iter(|| {
             all.iter()

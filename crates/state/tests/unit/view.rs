@@ -1,5 +1,5 @@
-use state::layout::Viewport;
-use state::{Sticky, scroll};
+use state::view::layout::Viewport;
+use state::{Sticky, view::scroll};
 
 use crate::harness::Harness;
 

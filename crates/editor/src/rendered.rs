@@ -17,17 +17,17 @@ use model::color::Base16;
 use model::theme::Modifiers;
 use model::typeset::{Diagnostic, Origin, PX_PER_PT, PagePoint, Pt, SourceFile, Svg};
 use model::window::Px;
-use state::buffer::{self, BufferId};
-use state::layout::PaneId;
-use state::markdown::{
+use state::project::links::{self, Origin as LinkOrigin, Resolution};
+use state::render::markdown::{
     self, BlockKind, CalloutFold, CalloutKind, Column, Display, EmbedKind, Emphasis, Figure,
     FigureKind, ImageFile, Inline, LinkTarget, ListKind, Markdown, RowKind, Span, SpanKind, Task,
 };
-use state::rendered::{
+use state::render::rendered::{
     self as reading, BlockScroll, Fit, Parsed, Preview, RenderedView, Scroll, Zoom,
 };
-use state::typeset::{Compiled, Figures, Outcome, Render, Typst};
-use state::vault::{self, Origin as LinkOrigin, Resolution};
+use state::render::typeset::{Compiled, Figures, Outcome, Render, Typst};
+use state::text::buffer::{self, BufferId};
+use state::view::layout::PaneId;
 
 use crate::theme::{PROSE_LINE, Theme};
 use crate::workspace::Workspace;
@@ -933,7 +933,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                     .on_click(move |_: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         update(&workspace, window, cx, |this| {
-                            vault::follow(
+                            links::follow(
                                 &mut this.state,
                                 buffer,
                                 &target,
@@ -1043,7 +1043,7 @@ fn follow_link(
             .and_then(|text| text.links.get(link))
             .map(|link| link.target.clone());
         match target {
-            Some(target) => vault::follow(
+            Some(target) => links::follow(
                 &mut this.state,
                 buffer,
                 &target,

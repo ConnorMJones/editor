@@ -9,10 +9,10 @@ use helix_core::Selection;
 use helix_core::text_annotations::TextAnnotations;
 use model::theme as roles;
 use state::Overlay;
-use state::buffer::{Content, TextDoc};
-use state::display::{self, CursorShape, Focus, Frame};
-use state::layout::{Pane, Scroll, Viewport};
-use state::picker::{self, Preview, PreviewSource};
+use state::input::picker::{self, Preview, PreviewSource};
+use state::text::buffer::{Content, TextDoc};
+use state::view::display::{self, CursorShape, Focus, Frame};
+use state::view::layout::{Pane, Scroll, Viewport};
 
 use crate::workspace::Workspace;
 
@@ -129,7 +129,7 @@ impl Element for PreviewElement {
                             (
                                 Some((
                                     _,
-                                    state::buffer::Buffer {
+                                    state::text::buffer::Buffer {
                                         content: Content::Text { doc, .. },
                                         ..
                                     },

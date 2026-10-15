@@ -2,7 +2,7 @@ use gpui::{Div, Pixels, SharedString, div, prelude::*};
 use model::command::PromptMotion;
 use model::theme as roles;
 use state::Overlay;
-use state::prompt::{self, Candidate, Chosen};
+use state::input::prompt::{self, Candidate, Chosen};
 
 use crate::theme::Theme;
 

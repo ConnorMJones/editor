@@ -5,13 +5,13 @@ use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Rope, Selection};
 use model::mode::Mode;
 use model::theme::Background;
-use state::buffer::TextDoc;
-use state::diff::{
+use state::git::diff::{
     Base, Hunk, Lines, Outcome, Removal, Side, Stage, Stamp, hunk_at, intersecting, next_hunk,
     prev_hunk, splice, stage,
 };
-use state::display::{self, Fillers, Focus, Frame, RowKind, Shade};
-use state::layout::{Scroll, Viewport};
+use state::text::buffer::TextDoc;
+use state::view::display::{self, Fillers, Focus, Frame, RowKind, Shade};
+use state::view::layout::{Scroll, Viewport};
 
 fn blob(byte: u8, text: &str) -> Base {
     Base::Blob {

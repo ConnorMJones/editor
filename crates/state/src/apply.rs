@@ -19,20 +19,21 @@ use model::notice::Notice;
 use model::register::Register;
 use slotmap::SlotMap;
 
-use crate::buffer::{
+use crate::git::changes::Arrive;
+use crate::git::diff::Landing;
+use crate::git::diffview::{self, Right};
+use crate::input::prompt::{Candidate, Chosen};
+use crate::job::{FsOp, Job, ReloadPolicy};
+use crate::sidebar::tree::EntryKind;
+use crate::text::buffer::{
     Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, Target, TextDoc, Uncommitted,
 };
-use crate::changes::Arrive;
-use crate::diff::Landing;
-use crate::diffview::{self, Right};
-use crate::job::{FsOp, Job, ReloadPolicy};
-use crate::layout::{Layout, Pane, PaneId, TabKey, Tabs, TextView, View};
-use crate::prompt::{Candidate, Chosen};
-use crate::register::{self, ClipboardUse, Values};
-use crate::tree::EntryKind;
+use crate::text::registers::{self, ClipboardUse, Values};
+use crate::view::layout::{Layout, Pane, PaneId, TabKey, Tabs, TextView, View};
 use crate::{
     Confirm, Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky,
-    changes, conflict, edit, input, motion, prompt, rendered, scroll, select, vault, workspace,
+    git::changes, git::conflict, input, input::prompt, project::links, render::rendered,
+    text::edit, text::motion, text::select, view::panes, view::scroll,
 };
 
 pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
@@ -690,7 +691,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         },
 
         Command::Open(path) => open(state, path, Arrive::Text, None, OpenAs::Permanent, out),
-        Command::GotoFile => vault::goto_file(state, out),
+        Command::GotoFile => links::goto_file(state, out),
         Command::Write => match focused_buffer(state) {
             Some(id) => out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job)),
             None => state.notice = Some(Notice::NoBuffer),
@@ -745,9 +746,9 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
                 state.exit = Exit::AfterWrite { buffers };
             }
         },
-        Command::Quit => match workspace::request_close(state) {
-            workspace::Close::Allowed => out.push(Effect::Quit),
-            workspace::Close::Refused => {}
+        Command::Quit => match panes::request_close(state) {
+            panes::Close::Allowed => out.push(Effect::Quit),
+            panes::Close::Refused => {}
         },
         Command::ForceQuit => out.push(Effect::Quit),
         Command::CloseBuffer => close_active(state, Force::No),
@@ -780,10 +781,10 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::AlignView(align) => motion::align_view(state, align),
         Command::StickyView => state.input.sticky = Sticky::View,
 
-        Command::Window(command) => workspace::window(state, command, out),
-        Command::CycleBuffer(cycle) => workspace::cycle_tab(state, cycle),
-        Command::Tree(command) => workspace::tree(state, command, out),
-        Command::Picker(command) => workspace::picker(state, command, out),
+        Command::Window(command) => panes::window(state, command, out),
+        Command::CycleBuffer(cycle) => panes::cycle_tab(state, cycle),
+        Command::Tree(command) => panes::tree(state, command, out),
+        Command::Picker(command) => panes::picker(state, command, out),
 
         Command::GotoHunk(target) => changes::goto_hunk(state, target, out),
         Command::Hunk(op) => changes::hunk_op(state, op, out),
@@ -808,7 +809,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             })),
         },
 
-        Command::ToggleDiff => workspace::toggle_diff(state),
+        Command::ToggleDiff => panes::toggle_diff(state),
         Command::Changes(command) => changes::list(state, command, out),
         Command::GotoConflict(direction) => conflict::goto(state, direction),
         Command::Resolve(take) => conflict::resolve(state, take),
@@ -816,7 +817,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::RenderedSplit => rendered::split(state),
         Command::ToggleRendered => rendered::toggle(state),
         Command::Rendered(command) => rendered::command(state, command),
-        Command::ExportPdf => crate::typeset::export_pdf(state, out),
+        Command::ExportPdf => crate::render::typeset::export_pdf(state, out),
     }
 }
 
@@ -854,7 +855,7 @@ pub(crate) fn selected_lines(text: &Rope, selection: &Selection) -> Vec<usize> {
 
 fn paste_from(state: &mut State, register: Register, at: Paste, out: &mut Vec<Effect>) {
     let count = count_of(state);
-    match register::read(state, register) {
+    match registers::read(state, register) {
         Values::Ready(values) => {
             edit::paste(state, &values, at, count);
             exit_select_mode(state);
@@ -868,7 +869,7 @@ fn paste_from(state: &mut State, register: Register, at: Paste, out: &mut Vec<Ef
 
 fn replace_from(state: &mut State, register: Register, out: &mut Vec<Effect>) {
     let count = count_of(state);
-    match register::read(state, register) {
+    match registers::read(state, register) {
         Values::Ready(values) => {
             edit::replace_with(state, &values, count);
             exit_select_mode(state);
@@ -893,7 +894,7 @@ fn close_active(state: &mut State, force: Force) {
         .and_then(|pane| pane.tabs.as_ref())
         .map(Tabs::active)
     {
-        Some(index) => workspace::close_tab(state, focus, index, force),
+        Some(index) => panes::close_tab(state, focus, index, force),
         None => state.notice = Some(Notice::NoBuffer),
     }
 }
@@ -1231,7 +1232,7 @@ pub(crate) fn open(
         return;
     };
     let focus = state.layout.focus;
-    workspace::show(state, focus, arrive.key(id), open);
+    panes::show(state, focus, arrive.key(id), open);
     let Some(to) = to else {
         return;
     };
@@ -1256,7 +1257,7 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, arrive: A
         notice,
         ..
     } = state;
-    let (at, line) = match (to, crate::buffer::doc(buffers, buffer)) {
+    let (at, line) = match (to, crate::text::buffer::doc(buffers, buffer)) {
         (Target::Hunk(edge), _) => {
             return changes::expect_landing(state, buffer, Landing { pane, edge, arrive });
         }
@@ -1266,7 +1267,7 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, arrive: A
         }
         (Target::Heading(heading), Some(doc)) => {
             let parsed = rendered::markdown(previews, buffer, doc);
-            match vault::heading_line(doc, parsed, &heading) {
+            match links::heading_line(doc, parsed, &heading) {
                 Some(line) => (doc.text.line_to_char(line), line),
                 None => return *notice = Some(Notice::HeadingNotFound { heading }),
             }

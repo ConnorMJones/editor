@@ -1,7 +1,7 @@
 use std::fs;
 
 use model::notice::Notice;
-use state::buffer::Disk;
+use state::text::buffer::Disk;
 
 use crate::harness::{Harness, disk_of};
 

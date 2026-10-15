@@ -1,33 +1,12 @@
 pub mod apply;
-pub mod backlinks;
-pub mod buffer;
-pub mod changes;
-pub mod conflict;
-pub mod diff;
-pub mod diffview;
-pub mod display;
-pub mod edit;
-pub mod files;
 pub mod git;
 pub mod input;
 pub mod job;
-pub mod keymap;
-pub mod layout;
-pub mod markdown;
-pub mod motion;
-pub mod path;
-pub mod picker;
-pub mod prompt;
-pub mod register;
-pub mod rendered;
-pub mod scroll;
-pub mod select;
-pub mod session;
-pub mod tree;
-pub mod typeset;
-pub mod vault;
-pub mod watch;
-pub mod workspace;
+pub mod project;
+pub mod render;
+pub mod sidebar;
+pub mod text;
+pub mod view;
 
 use std::io;
 use std::num::NonZeroUsize;
@@ -46,16 +25,21 @@ use model::notice::Notice;
 use model::register::{Clipboard, Register};
 use slotmap::SlotMap;
 
-use crate::buffer::{Buffer, BufferId};
-use crate::files::Files;
+use crate::git::changes;
+use crate::input::prompt;
+use crate::project::{backlinks, links};
+use crate::render::{rendered, typeset};
+
 use crate::git::GitSnapshot;
+use crate::input::keymap::{Keymap, KeymapError};
+use crate::input::picker::Picker;
 use crate::job::Job;
-use crate::keymap::{Keymap, KeymapError};
-use crate::layout::Layout;
-use crate::path::RelPath;
-use crate::picker::Picker;
-use crate::register::{ClipboardUse, Registers};
-use crate::tree::{Dir, Fold, Listing, Tree};
+use crate::project::files::Files;
+use crate::project::path::RelPath;
+use crate::sidebar::tree::{Dir, Fold, Listing, Tree};
+use crate::text::buffer::{Buffer, BufferId};
+use crate::text::registers::{ClipboardUse, Registers};
+use crate::view::layout::Layout;
 
 /// Canonical path of an existing directory the editor was opened on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +97,7 @@ pub struct State {
     pub figures: typeset::Figures,
     /// What the rendered tabs of each buffer show, while any is open.
     pub previews: rendered::Previews,
-    pub vault: vault::Vault,
+    pub vault: links::Vault,
     pub backlinks: backlinks::Backlinks,
     /// An action waiting for `Command::Confirm`; the status line asks.
     pub confirm: Option<Confirm>,
@@ -171,7 +155,7 @@ impl State {
             grep: Arc::new(AtomicU64::new(0)),
             figures: typeset::Figures::new(look),
             previews: rendered::Previews::new(),
-            vault: vault::Vault::new(),
+            vault: links::Vault::new(),
             backlinks: backlinks::Backlinks::default(),
             confirm: None,
         })
@@ -394,7 +378,7 @@ pub enum Effect {
         clipboard: Clipboard,
         text: String,
     },
-    /// The host answers with `register::clipboard_contents`.
+    /// The host answers with `registers::clipboard_contents`.
     ReadClipboard {
         clipboard: Clipboard,
         then: ClipboardUse,

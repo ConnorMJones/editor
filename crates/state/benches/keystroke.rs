@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use model::command::Command;
 use model::key::Key;
-use state::keymap::{Context, Keymap, Resolved};
+use state::input::keymap::{Context, Keymap, Resolved};
 use state::{Effect, Root, State, apply::apply, input, job};
 
 fn keystroke(c: &mut Criterion) {
@@ -31,7 +31,7 @@ fn keystroke(c: &mut Criterion) {
         Root::open(dir.path()).unwrap(),
         helix_core::config::default_lang_loader(),
         model::config::TabsConfig::default(),
-        state::typeset::Look {
+        state::render::typeset::Look {
             text: model::color::Rgb { r: 0, g: 0, b: 0 },
             prose_size: model::typeset::Pt(12.0),
             palette: model::color::Palette([model::color::Rgb { r: 0, g: 0, b: 0 }; 16]),

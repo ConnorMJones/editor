@@ -2,9 +2,9 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Range, Rope, RopeSlice, Selection};
 use model::mode::Mode;
-use state::display::{Indent, text_format};
-use state::layout::{Scroll, Viewport};
-use state::scroll::{self, SCROLLOFF};
+use state::view::display::{Indent, text_format};
+use state::view::layout::{Scroll, Viewport};
+use state::view::scroll::{self, SCROLLOFF};
 
 fn top(anchor: usize, viewport: Viewport) -> Scroll {
     Scroll {
@@ -158,8 +158,8 @@ fn click_maps_cells_to_chars() {
 
 mod mouse {
     use helix_core::{Range, Rope};
-    use state::layout::Viewport;
-    use state::scroll::{self, Gesture, Press, Unit};
+    use state::view::layout::Viewport;
+    use state::view::scroll::{self, Gesture, Press, Unit};
 
     use crate::harness::Harness;
 
@@ -268,7 +268,7 @@ mod mouse {
 }
 
 mod scrollbar {
-    use state::scroll::{Scrollbar, Thumb, line_at_thumb, scrollbar};
+    use state::view::scroll::{Scrollbar, Thumb, line_at_thumb, scrollbar};
 
     #[test]
     fn hidden_when_everything_fits() {

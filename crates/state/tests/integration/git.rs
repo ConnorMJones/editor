@@ -6,9 +6,9 @@ use model::command::{Answer, Command, FileOp};
 use model::notice::Notice;
 use state::Confirm;
 use state::apply::apply;
-use state::buffer::Content;
-use state::changes::Discard;
-use state::diff::{Bases, Diff, Hunk, Stage, Tracked, stage};
+use state::git::changes::Discard;
+use state::git::diff::{Bases, Diff, Hunk, Stage, Tracked, stage};
+use state::text::buffer::Content;
 
 use crate::harness::Harness;
 

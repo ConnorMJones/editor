@@ -19,25 +19,25 @@ use model::git::{Change, GitStatus, Group, Kind};
 use model::register::Clipboard;
 use model::window::Axis;
 use slotmap::SecondaryMap;
-use state::buffer::{Content, Disk};
-use state::changes::{self, Discard, ListRow};
-use state::conflict;
-use state::diff::{self, Bases, Removal, Side};
-use state::diffview::{Left, RIGHT};
-use state::display::{self, Gutter, Indent};
+use state::git::changes::{self, Discard, ListRow};
+use state::git::conflict;
+use state::git::diff::{self, Bases, Removal, Side};
+use state::git::diffview::{Left, RIGHT};
+use state::input::keymap::{self, Context as KeyContext};
+use state::input::picker::{Grep, Items, PALETTE, Referrers, Search};
 use state::job::{self, JobResult};
-use state::keymap::{self, Context as KeyContext};
-use state::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
-use state::path::RelPath;
-use state::picker::{Grep, Items, PALETTE, Referrers, Search};
-use state::rendered::{Fit, Link};
-use state::scroll;
-use state::tree::{self, Fold, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget};
-use state::typeset::Request;
-use state::watch::{self, Watcher};
+use state::project::path::RelPath;
+use state::project::watch::{self, Watcher};
+use state::render::rendered::{Fit, Link};
+use state::render::typeset::Request;
+use state::sidebar::tree::{self, Fold, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget};
+use state::text::buffer::{Content, Disk};
+use state::view::display::{self, Gutter, Indent};
+use state::view::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
+use state::view::scroll;
 use state::{
-    Confirm, Effect, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply, input, register,
-    session, workspace,
+    Confirm, Effect, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply, input,
+    project::session, text::registers, view::panes,
 };
 
 use crate::preview::PreviewElement;
@@ -331,7 +331,7 @@ impl Workspace {
     /// Syncs the state once per change, brings the lists along and runs what they queued.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         loop {
-            state::changes::sync(&mut self.state, &mut self.effects);
+            state::git::changes::sync(&mut self.state, &mut self.effects);
             crate::rendered::sync(self, cx);
             let effects = std::mem::take(&mut self.effects);
             match effects.as_slice() {
@@ -371,7 +371,7 @@ impl Workspace {
                             Clipboard::Primary => cx.read_from_primary(),
                         };
                         let text = item.and_then(|item| item.text());
-                        register::clipboard_contents(&mut self.state, clipboard, then, text);
+                        registers::clipboard_contents(&mut self.state, clipboard, then, text);
                     }
                 }
             }
@@ -882,7 +882,7 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
-                            workspace::focus_pane(&mut this.state, pane);
+                            panes::focus_pane(&mut this.state, pane);
                             window.focus(&this.focus, cx);
                             this.changed(cx);
                         }),
@@ -1040,10 +1040,10 @@ impl Workspace {
                                                 .text_color(theme.text_muted)
                                                 .on_click(cx.listener(
                                                     move |this, _: &ClickEvent, window, cx| {
-                                                        workspace::click_changes(
+                                                        panes::click_changes(
                                                             &mut this.state,
                                                             row,
-                                                            workspace::Click::Single,
+                                                            panes::Click::Single,
                                                             &mut this.effects,
                                                         );
                                                         window.focus(&this.focus, cx);
@@ -1160,10 +1160,10 @@ impl Workspace {
                                                 .on_click(cx.listener(
                                                     move |this, event: &ClickEvent, window, cx| {
                                                         let click = match event.click_count() {
-                                                            2 => workspace::Click::Double,
-                                                            _ => workspace::Click::Single,
+                                                            2 => panes::Click::Double,
+                                                            _ => panes::Click::Single,
                                                         };
-                                                        workspace::click_changes(
+                                                        panes::click_changes(
                                                             &mut this.state,
                                                             row,
                                                             click,
@@ -1227,7 +1227,7 @@ impl Workspace {
                             )
                             .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(drop_bg))
                             .on_drop(cx.listener(|this, dragged: &DraggedEntry, window, cx| {
-                                workspace::move_entry(
+                                panes::move_entry(
                                     &mut this.state,
                                     dragged.path.clone(),
                                     TreeTarget::Root,
@@ -1322,7 +1322,7 @@ impl Workspace {
                                             })
                                             .on_drop(cx.listener(
                                                 move |this, dragged: &DraggedEntry, window, cx| {
-                                                    workspace::move_entry(
+                                                    panes::move_entry(
                                                         &mut this.state,
                                                         dragged.path.clone(),
                                                         TreeTarget::Row(index),
@@ -1335,10 +1335,10 @@ impl Workspace {
                                             .on_click(cx.listener(
                                                 move |this, event: &ClickEvent, window, cx| {
                                                     let click = match event.click_count() {
-                                                        2 => workspace::Click::Double,
-                                                        _ => workspace::Click::Single,
+                                                        2 => panes::Click::Double,
+                                                        _ => panes::Click::Single,
                                                     };
-                                                    workspace::click_tree(
+                                                    panes::click_tree(
                                                         &mut this.state,
                                                         index,
                                                         click,
@@ -1403,7 +1403,7 @@ impl Workspace {
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.tree_menu = None;
-                    workspace::tree_action(&mut this.state, target, action, &mut this.effects);
+                    panes::tree_action(&mut this.state, target, action, &mut this.effects);
                     window.focus(&this.focus, cx);
                     this.changed(cx);
                 }))
@@ -1513,7 +1513,7 @@ impl Workspace {
                             .bg(bg)
                             .hover(|style| style.bg(theme.chrome.hover))
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                workspace::click_picker(&mut this.state, row, &mut this.effects);
+                                panes::click_picker(&mut this.state, row, &mut this.effects);
                                 window.focus(&this.focus, cx);
                                 this.changed(cx);
                             }))
@@ -1567,11 +1567,7 @@ impl Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
-                        workspace::picker(
-                            &mut this.state,
-                            PickerCommand::Cancel,
-                            &mut this.effects,
-                        );
+                        panes::picker(&mut this.state, PickerCommand::Cancel, &mut this.effects);
                         this.changed(cx);
                     }),
                 )
@@ -1939,7 +1935,7 @@ fn row_button(
         .hover(move |style| style.bg(hover).text_color(text))
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             cx.stop_propagation();
-            workspace::changes_action(&mut this.state, row, command, &mut this.effects);
+            panes::changes_action(&mut this.state, row, command, &mut this.effects);
             window.focus(&this.focus, cx);
             this.changed(cx);
         }))
