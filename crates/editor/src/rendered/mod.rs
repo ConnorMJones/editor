@@ -10,10 +10,12 @@ use model::typeset::{PagePoint, Svg};
 use model::units::Px;
 use state::State;
 use state::render::document::{DocumentAt, DocumentScroll};
+use state::render::markdown::Markdown;
 use state::render::pages::{Fit, PagesAt, PagesScroll, Zoom};
-use state::render::typeset::Typst;
+use state::render::typeset::{Typst, each_figure};
 use state::text::buffer::BufferId;
-use state::view::layout::{Pane, PaneId, View};
+use state::view::layout::{Pane, PaneId};
+use state::view::tab::{Showing, Tab};
 
 use crate::fonts::PROSE_LINE;
 use crate::workspace::Workspace;
@@ -100,9 +102,9 @@ enum Asked {
     Move,
 }
 
-/// What a list's items are, for how far it can pan.
+/// What a list's items are: which figures size them, and how far it can pan.
 enum Items<'a> {
-    Blocks,
+    Blocks(&'a Markdown),
     Pages {
         pages: &'a [Svg],
         fit: Fit,
@@ -119,8 +121,14 @@ pub enum Applied {
 
 /// Tells the state where `pane`'s list stands, in its view's own terms.
 fn report(state: &mut State, pane: PaneId, at: ListAt) {
-    match state.layout.panes().get(pane).and_then(Pane::active) {
-        Some(View::Document(_)) => state::render::document::scrolled(
+    match state
+        .layout
+        .panes()
+        .get(pane)
+        .and_then(Pane::active)
+        .map(Tab::showing)
+    {
+        Some(Showing::Document(..)) => state::render::document::scrolled(
             state,
             pane,
             DocumentAt {
@@ -128,7 +136,7 @@ fn report(state: &mut State, pane: PaneId, at: ListAt) {
                 offset: Px(at.offset.into()),
             },
         ),
-        Some(View::Pages(_)) => state::render::pages::scrolled(
+        Some(Showing::Pages(..)) => state::render::pages::scrolled(
             state,
             pane,
             PagesAt {
@@ -137,7 +145,7 @@ fn report(state: &mut State, pane: PaneId, at: ListAt) {
                 left: Px(at.left.into()),
             },
         ),
-        Some(View::Text(_) | View::Diff(_)) | None => {}
+        Some(Showing::Source(_) | Showing::Diff(..)) | None => {}
     }
 }
 
@@ -150,14 +158,24 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         window_height,
         ..
     } = workspace;
-    rendered.retain(
-        |pane, cache| match state.layout.panes().get(pane).and_then(Pane::active) {
-            Some(view @ (View::Document(_) | View::Pages(_))) => view.buffer() == cache.buffer,
-            Some(View::Text(_) | View::Diff(_)) | None => false,
-        },
-    );
+    rendered.retain(|pane, cache| {
+        match (state.layout.panes().get(pane))
+            .and_then(Pane::active)
+            .map(Tab::showing)
+        {
+            Some(Showing::Document(text, ..) | Showing::Pages(text, ..)) => {
+                text.buffer() == cache.buffer
+            }
+            Some(Showing::Source(_) | Showing::Diff(..)) | None => false,
+        }
+    });
     let shown: SmallVec<[PaneId; 4]> = (state.layout.panes().iter())
-        .filter(|(_, target)| matches!(target.active(), Some(View::Document(_) | View::Pages(_))))
+        .filter(|(_, target)| {
+            matches!(
+                target.active().map(Tab::showing),
+                Some(Showing::Document(..) | Showing::Pages(..))
+            )
+        })
         .map(|(pane, _)| pane)
         .collect();
     let line = fonts.prose_size * PROSE_LINE;
@@ -168,9 +186,9 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     };
     for pane in shown {
         let (buffer, version, hashes, shape, want, items) =
-            match state.layout.panes()[pane].active() {
-                Some(View::Document(view)) => {
-                    let buffer = view.source.text.buffer();
+            match state.layout.panes()[pane].active().map(Tab::showing) {
+                Some(Showing::Document(text, view, _)) => {
+                    let buffer = text.buffer();
                     let Some(parsed) = state.documents.get(buffer) else {
                         continue;
                     };
@@ -194,11 +212,11 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                         &parsed.markdown.hashes,
                         shape,
                         want,
-                        Items::Blocks,
+                        Items::Blocks(&parsed.markdown),
                     )
                 }
-                Some(View::Pages(view)) => {
-                    let buffer = view.source.text.buffer();
+                Some(Showing::Pages(text, view, _)) => {
+                    let buffer = text.buffer();
                     let Some(Typst {
                         pages: Some(compiled),
                         ..
@@ -243,7 +261,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                         items,
                     )
                 }
-                Some(View::Text(_) | View::Diff(_)) | None => continue,
+                Some(Showing::Source(_) | Showing::Diff(..)) | None => continue,
             };
         let cache = match rendered.get_mut(pane) {
             Some(cache) => cache,
@@ -309,13 +327,27 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
             }
         }
         let measured = &mut cache.measured;
-        match (measured.figures, &measured.shape) == (state.figures.generation, &shape) {
-            true => {}
-            false => {
-                measured.figures = state.figures.generation;
+        let since = std::mem::replace(&mut measured.figures, state.figures.generation);
+        let arrived = (since != state.figures.generation).then_some(since);
+        match (measured.shape == shape, arrived, &items) {
+            (false, ..) => {
                 measured.shape = shape;
                 cache.list.remeasure();
             }
+            // Only the items holding a figure filled since the last measure change height.
+            (true, Some(since), Items::Blocks(markdown)) => {
+                let filled = |figure| (state.figures.entries.get(&figure)).map_or(0, |e| e.filled);
+                for (item, &root) in markdown.roots.iter().enumerate() {
+                    let mut newest = 0;
+                    let blocks = &markdown.blocks[root..markdown.blocks[root].end];
+                    each_figure(blocks, |figure, _| newest = newest.max(filled(figure)));
+                    match newest > since {
+                        true => cache.list.remeasure_items(item..item + 1),
+                        false => {}
+                    }
+                }
+            }
+            (true, None, _) | (true, Some(_), Items::Pages { .. }) => {}
         }
         let viewport = cache.list.viewport_bounds().size;
         let (from, down, across, asked) = match (want, cache.applied) {
@@ -365,7 +397,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         });
         cache.list.scroll_by(from.offset + down);
         let widest = match items {
-            Items::Blocks => px(0.),
+            Items::Blocks(_) => px(0.),
             Items::Pages { pages, fit, zoom } => (pages.iter())
                 .map(|page| page_width(&cache.measured, fit, zoom, page))
                 .fold(px(0.), |widest, width| widest.max(width)),
@@ -392,7 +424,7 @@ pub fn body(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) ->
         return div().flex_1().into_any_element();
     };
     let header = match workspace.state.layout.pages(pane) {
-        Some(view) => (workspace.state.compiles.get(view.source.text.buffer()))
+        Some((text, _)) => (workspace.state.compiles.get(text.buffer()))
             .and_then(|typst| pages::header(workspace, pane, typst, cx)),
         None => None,
     };
@@ -419,10 +451,17 @@ fn item(
     index: usize,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    match this.state.layout.panes().get(pane).and_then(Pane::active) {
-        Some(View::Document(view)) => document::item(this, pane, view, index, cx),
-        Some(View::Pages(view)) => pages::item(this, pane, view, index, cx),
-        Some(View::Text(_) | View::Diff(_)) | None => div().into_any_element(),
+    match (this.state.layout.panes().get(pane))
+        .and_then(Pane::active)
+        .map(Tab::showing)
+    {
+        Some(Showing::Document(text, view, _)) => {
+            document::item(this, pane, text.buffer(), view, index, cx)
+        }
+        Some(Showing::Pages(text, view, _)) => {
+            pages::item(this, pane, text.buffer(), view, index, cx)
+        }
+        Some(Showing::Source(_) | Showing::Diff(..)) | None => div().into_any_element(),
     }
 }
 

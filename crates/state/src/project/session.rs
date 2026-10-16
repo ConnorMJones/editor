@@ -7,18 +7,19 @@ use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
 use crate::apply;
-use crate::git::diffview::DiffView;
 use crate::job::Job;
 use crate::project::path::{Folder, RelPath};
-use crate::render::document::{DocumentScroll, DocumentView};
-use crate::render::pages::{PagesScroll, PagesView};
-use crate::render::source::{Link, Source};
+use crate::render::Opening;
+use crate::render::document::DocumentScroll;
+use crate::render::pages::PagesScroll;
 use crate::sidebar::tree::{self, Dir, Fold, Listing};
 use crate::text::buffer::Content;
 use crate::view::layout::{
-    Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs, TextView, View,
+    Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs,
 };
+use crate::view::tab::{Beside, NoMode, Showing, Tab};
 use crate::{Effect, Files, Focus, Sidebar, SidebarWidth, State};
+use model::command::Shown;
 use model::git::Group;
 
 /// Workspace layout saved on exit and restored with `session.restore = "last"`.
@@ -65,72 +66,30 @@ pub enum SessionPane {
     },
 }
 
+/// A tab: its file, the mode it shows, and the selection and scroll its text keeps.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-pub enum SessionItem {
-    Text {
-        path: PathBuf,
-        /// `[anchor, head]` char offsets.
-        ranges: Vec<[usize; 2]>,
-        primary: usize,
-        scroll: usize,
-    },
-    /// A diff against HEAD; the selection and scroll are its buffer side's.
-    Diff {
-        path: PathBuf,
-        ranges: Vec<[usize; 2]>,
-        primary: usize,
-        scroll: usize,
-    },
-    /// A document view; the selection and scroll are the source position it toggles back to.
-    Document {
-        path: PathBuf,
-        ranges: Vec<[usize; 2]>,
-        primary: usize,
-        scroll: usize,
-        top: Top,
-        /// Reading-order index of the pane it follows; standalone when absent.
-        #[serde(default)]
-        follows: Option<usize>,
-    },
-    /// A pages view, saved as a document view is; `top` counts pages.
-    Pages {
-        path: PathBuf,
-        ranges: Vec<[usize; 2]>,
-        primary: usize,
-        scroll: usize,
-        top: Top,
-        #[serde(default)]
-        follows: Option<usize>,
-    },
+#[serde(deny_unknown_fields)]
+pub struct SessionItem {
+    pub path: PathBuf,
+    pub mode: SessionMode,
+    /// `[anchor, head]` char offsets.
+    pub ranges: Vec<[usize; 2]>,
+    pub primary: usize,
+    pub scroll: usize,
 }
 
-/// Where a rendered view stood: a block, or a source line not yet resolved into one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Top {
-    Item(usize),
-    Line(usize),
-}
-
-/// Which kind of tab a saved item restores.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Saved {
-    Text,
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum SessionMode {
+    Source,
     Diff,
-    Document { top: Top, follows: Option<usize> },
-    Pages { top: Top, follows: Option<usize> },
-}
-
-impl SessionItem {
-    fn key(&self) -> (std::mem::Discriminant<SessionItem>, &Path) {
-        match self {
-            SessionItem::Text { path, .. }
-            | SessionItem::Diff { path, .. }
-            | SessionItem::Document { path, .. }
-            | SessionItem::Pages { path, .. } => (std::mem::discriminant(self), path),
-        }
-    }
+    Render {
+        top: Opening,
+    },
+    /// The source beside its rendering.
+    Split {
+        top: Opening,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,12 +115,8 @@ pub enum SessionError {
     EmptySplit,
     #[error("pane {0} is not placed in the layout")]
     UnusedPane(usize),
-    #[error("pane {pane}, tab {tab}: follows pane {follows}, which is not a pane with tabs")]
-    InvalidFollows {
-        pane: usize,
-        tab: usize,
-        follows: usize,
-    },
+    #[error("pane {pane}, tab {tab}: the file has no rendering")]
+    NoRendering { pane: usize, tab: usize },
     #[error("focus names pane {0}, which does not exist")]
     MissingFocus(usize),
     #[error("pane {pane}: {reason}")]
@@ -207,7 +162,7 @@ pub fn snapshot(state: &State) -> Session {
                     .items()
                     .iter()
                     .map(|item| {
-                        let view = item.view.text();
+                        let view = item.tab.text();
                         let path = state.buffers[view.buffer()].path.clone();
                         let ranges = view
                             .selection
@@ -215,47 +170,36 @@ pub fn snapshot(state: &State) -> Session {
                             .iter()
                             .map(|range| [range.anchor, range.head])
                             .collect();
-                        let (primary, scroll) =
-                            (view.selection.primary_index(), view.scroll.anchor);
-                        match &item.view {
-                            View::Text(_) => SessionItem::Text {
-                                path,
-                                ranges,
-                                primary,
-                                scroll,
-                            },
-                            View::Diff(_) => SessionItem::Diff {
-                                path,
-                                ranges,
-                                primary,
-                                scroll,
-                            },
-                            View::Document(view) => SessionItem::Document {
-                                path,
-                                ranges,
-                                primary,
-                                scroll,
-                                top: match view.scroll {
-                                    DocumentScroll::Line(line) => Top::Line(line),
+                        let mode = match item.tab.showing() {
+                            Showing::Source(_) => SessionMode::Source,
+                            Showing::Diff(..) => SessionMode::Diff,
+                            Showing::Document(_, view, beside) => saved(
+                                match view.scroll {
+                                    DocumentScroll::Line(line) => Opening::Line(line),
                                     DocumentScroll::At(at)
-                                    | DocumentScroll::Moved { from: at, .. } => Top::Item(at.item),
-                                },
-                                follows: followed(&view.source.link, &index),
-                            },
-                            View::Pages(view) => SessionItem::Pages {
-                                path,
-                                ranges,
-                                primary,
-                                scroll,
-                                top: match view.scroll {
-                                    PagesScroll::Line(line) => Top::Line(line),
-                                    PagesScroll::Point(at) => Top::Item(at.page),
-                                    PagesScroll::At(at) | PagesScroll::Moved { from: at, .. } => {
-                                        Top::Item(at.page)
+                                    | DocumentScroll::Moved { from: at, .. } => {
+                                        Opening::Item(at.item)
                                     }
                                 },
-                                follows: followed(&view.source.link, &index),
-                            },
+                                beside,
+                            ),
+                            Showing::Pages(_, view, beside) => saved(
+                                match view.scroll {
+                                    PagesScroll::Line(line) => Opening::Line(line),
+                                    PagesScroll::Point(at) => Opening::Item(at.page),
+                                    PagesScroll::At(at) | PagesScroll::Moved { from: at, .. } => {
+                                        Opening::Item(at.page)
+                                    }
+                                },
+                                beside,
+                            ),
+                        };
+                        SessionItem {
+                            path,
+                            mode,
+                            ranges,
+                            primary: view.selection.primary_index(),
+                            scroll: view.scroll.anchor,
                         }
                     })
                     .collect(),
@@ -333,33 +277,10 @@ pub fn restore(
         else {
             continue;
         };
-        let follows = tabs.iter().enumerate().find_map(|(tab, item)| match item {
-            SessionItem::Document {
-                follows: Some(follows),
-                ..
-            }
-            | SessionItem::Pages {
-                follows: Some(follows),
-                ..
-            } => match session.panes.get(*follows) {
-                Some(SessionPane::Tabs { .. }) => None,
-                Some(SessionPane::Empty) | None => Some((tab, *follows)),
-            },
-            SessionItem::Document { follows: None, .. }
-            | SessionItem::Pages { follows: None, .. }
-            | SessionItem::Text { .. }
-            | SessionItem::Diff { .. } => None,
-        });
-        match follows {
-            Some((tab, follows)) => {
-                return Err(SessionError::InvalidFollows { pane, tab, follows });
-            }
-            None => {}
-        }
         let duplicate = tabs.iter().enumerate().position(|(index, item)| {
             tabs[..index]
                 .iter()
-                .any(|earlier| earlier.key() == item.key())
+                .any(|earlier| earlier.path == item.path)
         });
         let reason = match (tabs.len(), duplicate, preview) {
             (0, _, _) => InvalidTabs::Empty,
@@ -384,47 +305,22 @@ pub fn restore(
         let mut kept: Vec<usize> = Vec::with_capacity(tabs.len());
         let mut items: Vec<Item> = Vec::with_capacity(tabs.len());
         for (saved_index, item) in tabs.into_iter().enumerate() {
-            let (saved, path, ranges, primary, scroll) = match item {
-                SessionItem::Text {
-                    path,
-                    ranges,
-                    primary,
-                    scroll,
-                } => (Saved::Text, path, ranges, primary, scroll),
-                SessionItem::Diff {
-                    path,
-                    ranges,
-                    primary,
-                    scroll,
-                } => (Saved::Diff, path, ranges, primary, scroll),
-                SessionItem::Document {
-                    path,
-                    ranges,
-                    primary,
-                    scroll,
-                    top,
-                    follows,
-                } => (
-                    Saved::Document { top, follows },
-                    path,
-                    ranges,
-                    primary,
-                    scroll,
-                ),
-                SessionItem::Pages {
-                    path,
-                    ranges,
-                    primary,
-                    scroll,
-                    top,
-                    follows,
-                } => (Saved::Pages { top, follows }, path, ranges, primary, scroll),
-            };
+            let SessionItem {
+                path,
+                mode,
+                ranges,
+                primary,
+                scroll,
+            } = item;
             // A diff also shows a file deleted from the worktree.
-            let buffer = match (saved, path.is_file(), path.exists()) {
-                (_, true, _) | (Saved::Diff, false, false) => apply::load(state, path, out),
-                (Saved::Text | Saved::Document { .. } | Saved::Pages { .. }, false, _)
-                | (Saved::Diff, false, true) => None,
+            let buffer = match (mode, path.is_file(), path.exists()) {
+                (_, true, _) | (SessionMode::Diff, false, false) => apply::load(state, path, out),
+                (
+                    SessionMode::Source | SessionMode::Render { .. } | SessionMode::Split { .. },
+                    false,
+                    _,
+                )
+                | (SessionMode::Diff, false, true) => None,
             };
             let Some(buffer) = buffer else {
                 continue;
@@ -438,7 +334,8 @@ pub fn restore(
                 .iter()
                 .map(|&[anchor, head]| Range::new(anchor.min(len), head.min(len)))
                 .collect();
-            let mut view = TextView::new(buffer);
+            let mut tab = Tab::open(buffer, &state.buffers[buffer].path);
+            let view = tab.text_mut();
             view.selection = match ranges.is_empty() {
                 true => Selection::point(0),
                 false => {
@@ -447,35 +344,24 @@ pub fn restore(
                 }
             };
             view.scroll.anchor = scroll.min(len);
-            let view = match saved {
-                Saved::Text => View::Text(view),
-                Saved::Diff => View::Diff(DiffView {
-                    text: view,
-                    ..DiffView::new(buffer)
-                }),
-                Saved::Document { top, follows } => View::Document(DocumentView::new(
-                    Source {
-                        text: view,
-                        link: link(follows, &ids),
-                    },
-                    match top {
-                        Top::Item(item) => DocumentScroll::item(item),
-                        Top::Line(line) => DocumentScroll::Line(line),
-                    },
-                )),
-                Saved::Pages { top, follows } => View::Pages(PagesView::new(
-                    Source {
-                        text: view,
-                        link: link(follows, &ids),
-                    },
-                    match top {
-                        Top::Item(page) => PagesScroll::page(page),
-                        Top::Line(line) => PagesScroll::Line(line),
-                    },
-                )),
+            // Only a rendering uses where it opens.
+            let (shown, at) = match mode {
+                SessionMode::Source => (Shown::Source, Opening::Line(0)),
+                SessionMode::Diff => (Shown::Diff, Opening::Line(0)),
+                SessionMode::Render { top } => (Shown::Render, top),
+                SessionMode::Split { top } => (Shown::Split, top),
             };
+            match tab.enter(shown, at) {
+                Ok(()) => {}
+                Err(NoMode) => {
+                    return Err(SessionError::NoRendering {
+                        pane,
+                        tab: saved_index,
+                    });
+                }
+            }
             items.push(Item {
-                view,
+                tab,
                 used: state.layout.tick(),
             });
             kept.push(saved_index);
@@ -565,22 +451,10 @@ fn parse_node(node: SessionNode, slots: &mut [Option<PaneId>]) -> Result<Child, 
     }
 }
 
-/// The link to the pane in reading-order slot `follows`, which restore checked exists.
-fn link<S>(follows: Option<usize>, ids: &[PaneId]) -> Link<S> {
-    // A followed pane left without files closes after restore, unlinking this.
-    match follows {
-        Some(slot) => Link::Follows {
-            pane: ids[slot],
-            seen: None,
-        },
-        None => Link::Standalone,
-    }
-}
-
-/// The reading-order slot of the pane `link` follows.
-fn followed<S>(link: &Link<S>, index: &HashMap<PaneId, usize>) -> Option<usize> {
-    match link {
-        Link::Follows { pane, .. } => index.get(pane).copied(),
-        Link::Standalone => None,
+/// How a rendering at `top` is saved: alone in its tab, or beside the source.
+fn saved<S>(top: Opening, beside: Beside<S>) -> SessionMode {
+    match beside {
+        Beside::Alone => SessionMode::Render { top },
+        Beside::Source(..) => SessionMode::Split { top },
     }
 }

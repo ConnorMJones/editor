@@ -138,8 +138,12 @@ pub enum Command {
     /// Answers the pending confirmation, such as a discard.
     Confirm(Answer),
 
-    /// Switches the focused pane between a file's text and its diff against HEAD.
-    ToggleDiff,
+    /// Switches the focused tab between this mode and its source.
+    ToggleMode(Shown),
+    /// Moves the focused tab to the next or previous mode its kind of file has.
+    CycleMode(Direction),
+    /// Resizes the source side of the focused split.
+    ResizeSplit(Resize),
     Changes(ChangesCommand),
 
     /// Select mode extends to the conflict.
@@ -147,10 +151,6 @@ pub enum Command {
     /// Resolves every conflict touched by a selection, as one edit.
     Resolve(Take),
 
-    /// Toggles a rendered split to the right that follows the focused file.
-    RenderedSplit,
-    /// Switches the focused tab between a file's text and its rendered view.
-    ToggleRendered,
     Read(ReadCommand),
     Document(DocumentCommand),
     Pages(PagesCommand),
@@ -162,7 +162,7 @@ pub enum Command {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadCommand {
     Move(ReadMove),
-    /// Back to the source pane it follows, or to the text of a standalone view.
+    /// Back to the tab's source.
     Leave,
 }
 
@@ -313,12 +313,18 @@ pub enum ObjectScope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Object {
+    Plain(PlainObject),
+    /// Fails without a syntax tree.
+    Syntax(SyntaxObject),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlainObject {
     Word,
     LongWord,
     Paragraph,
     ClosestPair,
     Pair(char),
-    Syntax(SyntaxObject),
 }
 
 /// Tree-sitter textobject query captures.
@@ -538,4 +544,23 @@ pub enum PickerKind {
     Commands,
     /// Notes linking to the focused note.
     Backlinks,
+}
+
+/// What a tab shows of its file; each kind of file offers some of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    Source,
+    /// Side by side with the file at HEAD.
+    Diff,
+    Render,
+    /// The source beside its rendering, which follows the source cursor.
+    Split,
+}
+
+/// How a split's source side changes width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resize {
+    Narrow,
+    Widen,
+    Even,
 }

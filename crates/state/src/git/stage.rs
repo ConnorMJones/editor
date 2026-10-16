@@ -15,7 +15,8 @@ use crate::project::path::RelPath;
 use crate::project::watch;
 use crate::sidebar::tree::EntryKind;
 use crate::text::buffer::Content;
-use crate::view::layout::{Pane, View};
+use crate::view::layout::Pane;
+use crate::view::tab::Tab;
 use crate::{Confirm, Effect, Overlay, Repo, State, request_git};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,7 +50,7 @@ pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
     let focus = state.layout.focus();
     let Some(view) = (state.layout.panes().get(focus))
         .and_then(Pane::active)
-        .map(View::text)
+        .map(Tab::text)
     else {
         state.notice = Some(Notice::NoBuffer);
         return;

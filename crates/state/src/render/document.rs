@@ -1,8 +1,7 @@
-//! Document views: markdown laid out as a flow of blocks.
+//! Markdown rendered as a flow of blocks.
 
 use helix_core::{Selection, SmallVec, Transaction};
 use model::command::{Direction, DocumentCommand, ReadMove};
-use model::config::OpenAs;
 use model::notice::Notice;
 use model::units::Px;
 use slotmap::SecondaryMap;
@@ -12,11 +11,11 @@ use crate::project::Project;
 use crate::project::files::FileIndex;
 use crate::project::path::RelPath;
 use crate::render::markdown::{self, Base, BlockKind, Callout, CalloutFold, Markdown};
-use crate::render::source::{Link, Source};
-use crate::render::{step, typeset};
+use crate::render::{Opening, Rendering, step, typeset};
 use crate::text::buffer::{Buffer, BufferId, Content, TextDoc};
-use crate::view::layout::{Pane, PaneId, TabKey, View};
-use crate::view::panes::{self, Place};
+use crate::view::layout::{Pane, PaneId};
+use crate::view::panes;
+use crate::view::tab::{Beside, BesideMut, Showing, Tab};
 use crate::{Effect, State};
 
 /// The current parse of every buffer a document view shows.
@@ -30,20 +29,12 @@ pub struct Parsed {
     pub markdown: Markdown,
 }
 
+/// Where a rendered markdown tab stands, and how the reader folded it.
 #[derive(Clone)]
-pub struct DocumentView {
-    pub source: Source<DocumentSeen>,
+pub struct DocumentState {
     pub scroll: DocumentScroll,
     /// Callouts, by `Callout::index`, whose fold the reader flipped from the default.
     pub toggled: Vec<u32>,
-}
-
-/// The source position both sides last agreed on; a change on one side moves the other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DocumentSeen {
-    pub cursor: usize,
-    pub top: usize,
-    pub item: usize,
 }
 
 /// Where a document view stands, or is asked to move for the host to measure.
@@ -73,15 +64,29 @@ pub struct DocumentMotion {
     pub half_pages: i32,
 }
 
-impl DocumentView {
-    pub(crate) fn new(source: Source<DocumentSeen>, scroll: DocumentScroll) -> DocumentView {
-        DocumentView {
-            source,
-            scroll,
+/// The source position both sides of a split last agreed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentSeen {
+    pub cursor: usize,
+    pub top: usize,
+    pub item: usize,
+}
+
+impl Rendering for DocumentState {
+    type Seen = DocumentSeen;
+
+    fn open(at: Opening) -> DocumentState {
+        DocumentState {
+            scroll: match at {
+                Opening::Line(line) => DocumentScroll::Line(line),
+                Opening::Item(item) => DocumentScroll::item(item),
+            },
             toggled: Vec::new(),
         }
     }
+}
 
+impl DocumentState {
     /// The callout's fold as shown, after the reader's toggles.
     pub fn fold(&self, callout: &Callout) -> CalloutFold {
         match (
@@ -132,16 +137,17 @@ enum Parses {
     Changed,
 }
 
-/// A document pane as `sync` found it, with the source lines its items stood for before a
+/// A document pane as `sync` found it, with the source line its top item stood for before a
 /// reparse.
 struct Shown {
     pane: PaneId,
     buffer: BufferId,
     line: Option<usize>,
+    /// The line the item a split last agreed on stood for.
     seen: Option<usize>,
 }
 
-/// Keeps parses for open document tabs, parses the shown ones and moves their scroll and links.
+/// Keeps parses for tabs showing documents, parses the shown ones and keeps their scroll on them.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     let State {
         layout,
@@ -158,9 +164,9 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     } = state;
     let before = documents.len();
     documents.retain(|buffer, _| {
-        (layout.panes().values().flat_map(Pane::items)).any(|item| match &item.view {
-            View::Document(view) => view.source.text.buffer() == buffer,
-            View::Text(_) | View::Diff(_) | View::Pages(_) => false,
+        (layout.panes().values().flat_map(Pane::items)).any(|item| match item.tab.showing() {
+            Showing::Document(text, ..) => text.buffer() == buffer,
+            Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..) => false,
         })
     });
     let mut parses = match documents.len() == before {
@@ -169,10 +175,10 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     };
     let mut shown: SmallVec<[Shown; 4]> = SmallVec::new();
     for (pane, target) in layout.panes().iter() {
-        let Some(View::Document(view)) = target.active() else {
+        let Some(Showing::Document(text, view, beside)) = target.active().map(Tab::showing) else {
             continue;
         };
-        let buffer = view.source.text.buffer();
+        let buffer = text.buffer();
         // The last parse, current or not, maps items back to the lines they stood for.
         let parsed = documents.get(buffer).map(|parsed| &parsed.markdown);
         let line_of = |item: usize| parsed.and_then(|markdown| markdown.item_line(item));
@@ -180,11 +186,9 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             pane,
             buffer,
             line: view.scroll.anchor().and_then(|at| line_of(at.item)),
-            seen: match view.source.link {
-                Link::Follows {
-                    seen: Some(seen), ..
-                } => line_of(seen.item),
-                Link::Follows { seen: None, .. } | Link::Standalone => None,
+            seen: match beside {
+                Beside::Source(Some(seen), _) => line_of(seen.item),
+                Beside::Source(None, _) | Beside::Alone => None,
             },
         });
     }
@@ -236,28 +240,11 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
     for entry in &shown {
         let doc = buffers[entry.buffer].doc();
-        let Some(view) = layout.document(entry.pane) else {
+        let Some((text, view, beside)) = layout.document_mut(entry.pane) else {
             continue;
         };
-        let source = match view.source.link {
-            Link::Follows { pane, .. } => match layout.panes()[pane].active() {
-                Some(View::Text(text)) if text.buffer() == entry.buffer => doc.map(|doc| {
-                    let rope = doc.text.slice(..);
-                    let at = text.selection.primary().cursor(rope);
-                    let top = rope.char_to_line(text.scroll.anchor.min(rope.len_chars()));
-                    (rope.char_to_line(at), top)
-                }),
-                Some(View::Text(_) | View::Diff(_) | View::Document(_) | View::Pages(_)) | None => {
-                    None
-                }
-            },
-            Link::Standalone => None,
-        };
-        let Some(view) = layout.document_mut(entry.pane) else {
-            continue;
-        };
-        let markdown = match (doc, documents.get(entry.buffer)) {
-            (Some(doc), Some(parsed)) if parsed.version == doc.version => &parsed.markdown,
+        let (doc, markdown) = match (doc, documents.get(entry.buffer)) {
+            (Some(doc), Some(parsed)) if parsed.version == doc.version => (doc, &parsed.markdown),
             (_, Some(_) | None) => continue,
         };
         let last = markdown.roots.len().saturating_sub(1);
@@ -273,21 +260,17 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
                 at.item = at.item.min(last)
             }
         }
-        match (remap, &mut view.source.link, entry.seen) {
-            (
-                true,
-                Link::Follows {
-                    seen: Some(seen), ..
-                },
-                Some(line),
-            ) => seen.item = markdown.item_at_line(line),
-            (true | false, Link::Follows { .. } | Link::Standalone, _) => {}
-        }
-        let (Link::Follows { seen, .. }, Some((cursor, top)), Some(at)) =
-            (&mut view.source.link, source, view.scroll.anchor())
-        else {
+        // Beside the source, the rendering follows its cursor, or its top when only that moved.
+        let (BesideMut::Source(seen, _), Some(at)) = (beside, view.scroll.anchor()) else {
             continue;
         };
+        match (remap, seen.as_mut(), entry.seen) {
+            (true, Some(seen), Some(line)) => seen.item = markdown.item_at_line(line),
+            (true | false, Some(_) | None, _) => {}
+        }
+        let rope = doc.text.slice(..);
+        let cursor = rope.char_to_line(text.selection.primary().cursor(rope));
+        let top = rope.char_to_line(text.scroll.anchor.min(rope.len_chars()));
         let target = match *seen {
             None => None,
             Some(seen) if seen.cursor != cursor => Some(cursor),
@@ -305,8 +288,9 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
 }
 
-/// The host measured `pane`'s document view at `to`; a move to another item scrolls the
-/// source it follows, leaving the source cursor where it is.
+/// The host measured `pane`'s document at `to`; reported after the frame, so the tab may have
+/// left the mode since. Beside the source, a move to another item scrolls the source to it,
+/// leaving its cursor.
 pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
     let State {
         layout,
@@ -314,18 +298,15 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
         documents,
         ..
     } = state;
-    let Some(view) = layout.document_mut(pane) else {
+    let Some((text, view, beside)) = layout.document_mut(pane) else {
         return;
     };
     view.scroll = DocumentScroll::At(to);
-    let buffer = view.source.text.buffer();
-    let (source, seen) = match view.source.link {
-        Link::Follows {
-            pane: source,
-            seen: Some(seen),
-        } if seen.item != to.item => (source, seen),
-        Link::Follows { .. } | Link::Standalone => return,
+    let seen = match beside {
+        BesideMut::Source(Some(seen), _) if seen.item != to.item => seen,
+        BesideMut::Source(..) | BesideMut::Alone => return,
     };
+    let buffer = text.buffer();
     let Some(doc) = buffers[buffer].doc() else {
         return;
     };
@@ -334,21 +315,12 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
     else {
         return;
     };
-    match layout.pane(source).active_mut() {
-        Some(View::Text(text)) if text.buffer() == buffer => {
-            text.scroll.anchor = doc.text.line_to_char(line.min(doc.text.len_lines() - 1));
-            text.scroll.rows = 0;
-        }
-        Some(View::Text(_) | View::Diff(_) | View::Document(_) | View::Pages(_)) | None => {}
-    }
-    let view = (layout.document_mut(pane)).expect("scrolling the source leaves this view");
-    view.source.link = Link::Follows {
-        pane: source,
-        seen: Some(DocumentSeen {
-            top: line,
-            item: to.item,
-            ..seen
-        }),
+    text.scroll.anchor = doc.text.line_to_char(line.min(doc.text.len_lines() - 1));
+    text.scroll.rows = 0;
+    *seen = DocumentSeen {
+        top: line,
+        item: to.item,
+        ..*seen
     };
 }
 
@@ -358,7 +330,7 @@ pub fn moved(state: &mut State, motion: ReadMove) {
     let State {
         layout, documents, ..
     } = state;
-    let Some(view) = layout.document_mut(focus) else {
+    let Some((text, view, _)) = layout.document_mut(focus) else {
         return;
     };
     let Some(from) = view.scroll.anchor() else {
@@ -381,8 +353,8 @@ pub fn moved(state: &mut State, motion: ReadMove) {
         }
         ReadMove::Top => DocumentScroll::item(0),
         ReadMove::Bottom => {
-            let items = (documents.get(view.source.text.buffer()))
-                .map_or(0, |parsed| parsed.markdown.roots.len());
+            let items =
+                (documents.get(text.buffer())).map_or(0, |parsed| parsed.markdown.roots.len());
             DocumentScroll::item(items.saturating_sub(1))
         }
     };
@@ -397,14 +369,13 @@ pub fn command(state: &mut State, command: DocumentCommand) {
         notice,
         ..
     } = state;
-    let Some(view) = layout.document_mut(focus) else {
+    let Some((text, view, _)) = layout.document_mut(focus) else {
         return;
     };
     let DocumentCommand::Heading(direction) = command;
-    let (Some(at), Some(Parsed { markdown, .. })) = (
-        view.scroll.anchor(),
-        documents.get(view.source.text.buffer()),
-    ) else {
+    let (Some(at), Some(Parsed { markdown, .. })) =
+        (view.scroll.anchor(), documents.get(text.buffer()))
+    else {
         return;
     };
     let heading = |item: &usize| {
@@ -436,50 +407,38 @@ pub struct BlockClick {
     pub version: u64,
 }
 
-/// A click on a drawn block: the source it follows gets its cursor on the block's first line
-/// and the focus.
+/// A click on a drawn block puts the tab's text cursor on the block's first line; beside the
+/// source the rendering stays where it is.
 pub fn click(state: &mut State, pane: PaneId, click: BlockClick) {
-    let Some(view) = state.layout.document_mut(pane) else {
+    let State {
+        layout, buffers, ..
+    } = state;
+    let Some((text, _, _)) = layout.document_mut(pane) else {
         return;
     };
-    let buffer = view.source.text.buffer();
-    let Some(doc) = state.buffers[buffer]
+    let buffer = text.buffer();
+    let Some(doc) = buffers[buffer]
         .doc()
         .filter(|doc| doc.version == click.version)
     else {
         return;
     };
-    let rope = doc.text.clone();
-    let at = rope.line_to_char(click.line);
-    match view.source.link {
-        Link::Standalone => {
-            view.source.text.selection = Selection::point(at);
-            panes::focus_pane(state, pane);
-        }
-        Link::Follows { pane: source, seen } => {
-            let item = view.scroll.anchor().map(|at| at.item);
-            let place = Place {
-                selection: Selection::point(at),
-                anchor: None,
-            };
-            let key = TabKey::Text(buffer);
-            let shown = panes::show_at(state, source, key, OpenAs::Permanent, place);
-            let top = rope.char_to_line(shown.scroll.anchor);
-            (state.layout.set_focus(source)).expect("a link names a live pane");
-            // The view stays where it is; a link not yet synced is aligned by the next sync.
-            let seen = match (seen, item) {
-                (Some(_), Some(item)) => Some(DocumentSeen {
-                    cursor: click.line,
-                    top,
-                    item,
-                }),
-                (Some(_), None) | (None, _) => None,
-            };
-            let view =
-                (state.layout.document_mut(pane)).expect("showing the source leaves this view");
-            view.source.link = Link::Follows { pane: source, seen };
-        }
-    }
+    text.selection = Selection::point(doc.text.line_to_char(click.line));
+    panes::focus_pane(state, pane);
+    let State {
+        layout, buffers, ..
+    } = state;
+    let (Some((text, view, BesideMut::Source(seen @ Some(_), _))), Some(doc)) =
+        (layout.document_mut(pane), buffers[buffer].doc())
+    else {
+        return;
+    };
+    let rope = doc.text.slice(..);
+    *seen = (view.scroll.anchor()).map(|at| DocumentSeen {
+        cursor: click.line,
+        top: rope.char_to_line(text.scroll.anchor.min(rope.len_chars())),
+        item: at.item,
+    });
 }
 
 /// Flips the task checkbox whose `[` sits at byte `marker` of `buffer` at `version`, as one
@@ -518,7 +477,7 @@ pub fn toggle_task(state: &mut State, buffer: BufferId, version: u64, marker: us
 
 /// Flips the fold of callout `index` in `pane`'s document view; the source is untouched.
 pub fn toggle_fold(state: &mut State, pane: PaneId, index: u32) {
-    let Some(view) = state.layout.document_mut(pane) else {
+    let Some((_, view, _)) = state.layout.document_mut(pane) else {
         return;
     };
     match view.toggled.binary_search(&index) {

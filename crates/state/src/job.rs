@@ -7,8 +7,9 @@ use std::time::SystemTime;
 
 use git2::Oid;
 use helix_core::regex::bytes::Regex;
+use helix_core::syntax::HighlighterError;
 use helix_core::syntax::Loader;
-use helix_core::{Range, Rope};
+use helix_core::{Language, Range, Rope, Syntax};
 use model::command::{Command, Dirs};
 use model::notice::Notice;
 
@@ -17,6 +18,7 @@ use crate::git::diff::{Base, BaseRead, Diff, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
 use crate::project::files::{self, Changed, FileIndex, Indexed, OnIndexed, Rescan, Walked};
 use crate::text::buffer::{BufferId, Content, Disk, Jump, TextDoc};
+use crate::text::highlight;
 
 use crate::input::picker::{self, Hit, Items, Preview, Search};
 use crate::project::path::{Folder, RelPath};
@@ -115,6 +117,14 @@ pub enum Job {
         path: PathBuf,
         op: IndexOp,
     },
+    /// Parses an opened buffer's text at `version`.
+    Parse {
+        buffer: BufferId,
+        version: u64,
+        text: Rope,
+        language: Language,
+        languages: Arc<Loader>,
+    },
     /// Builds the highlighted HEAD copy a diff view shows on its left.
     ParseHead {
         buffer: BufferId,
@@ -189,8 +199,10 @@ pub enum JobResult {
         reads: Vec<(RelPath, backlinks::Read)>,
     },
 
+    /// `path` is where the buffer was in the repository when the read started.
     Bases {
         buffer: BufferId,
+        path: RepoPath,
         result: Result<[BaseRead; 2], git2::Error>,
     },
     Diffed {
@@ -203,6 +215,11 @@ pub enum JobResult {
         path: PathBuf,
         op: IndexOp,
         result: Result<(), IndexError>,
+    },
+    Parsed {
+        buffer: BufferId,
+        version: u64,
+        result: Result<Syntax, HighlighterError>,
     },
     HeadParsed {
         buffer: BufferId,
@@ -250,17 +267,18 @@ pub fn run(job: Job) -> JobResult {
             path,
             languages,
         } => {
+            let _span = tracing::info_span!("open job", ?path).entered();
             let read = match std::fs::read(&path) {
                 Ok(bytes) => match (String::from_utf8(bytes), modified(&path)) {
                     (Ok(text), Ok(mtime)) => OpenRead::Text {
-                        doc: TextDoc::new(Rope::from(text), &path, &languages),
+                        doc: TextDoc::unparsed(Rope::from(text), &path, &languages),
                         disk: Disk::Synced { mtime },
                     },
                     (Err(_), _) => OpenRead::NotUtf8,
                     (Ok(_), Err(error)) => OpenRead::Failed(error),
                 },
                 Err(error) if error.kind() == io::ErrorKind::NotFound => OpenRead::Text {
-                    doc: TextDoc::new(Rope::new(), &path, &languages),
+                    doc: TextDoc::unparsed(Rope::new(), &path, &languages),
                     disk: Disk::New,
                 },
                 Err(error) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
@@ -429,6 +447,7 @@ pub fn run(job: Job) -> JobResult {
         } => JobResult::Bases {
             buffer,
             result: git::read_bases(&git_dir, &path, known),
+            path,
         },
         Job::Diff {
             buffer,
@@ -456,6 +475,18 @@ pub fn run(job: Job) -> JobResult {
             path,
             op,
         },
+        Job::Parse {
+            buffer,
+            version,
+            text,
+            language,
+            languages,
+        } => JobResult::Parsed {
+            buffer,
+            version,
+            result: tracing::info_span!("syntax parse")
+                .in_scope(|| Syntax::new(text.slice(..), language, &languages)),
+        },
         Job::ParseHead {
             buffer,
             oid,
@@ -482,8 +513,9 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 Content::Text { .. } => return,
             };
             let notice = match read {
-                OpenRead::Text { doc, disk } => {
+                OpenRead::Text { mut doc, disk } => {
                     let len = doc.text.len_chars();
+                    out.extend(highlight::job(buffer, &mut doc, &state.languages).map(Effect::Job));
                     entry.content = Content::Text {
                         doc,
                         disk,
@@ -493,7 +525,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     // Views restored from a session were placed before the length was known.
                     for pane in state.layout.panes_mut().map(|(_, pane)| pane) {
                         for item in pane.items_mut() {
-                            let view = item.view.text_mut();
+                            let view = item.tab.text_mut();
                             match view.buffer() == buffer {
                                 true => {
                                     view.selection = view.selection.clone().transform(|range| {
@@ -506,9 +538,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         }
                     }
                     match jump {
-                        Some(Jump { pane, arrive, to }) => {
-                            crate::apply::place(state, pane, buffer, arrive, to)
-                        }
+                        Some(Jump { pane, to }) => crate::apply::place(state, pane, buffer, to),
                         None => {}
                     }
                     return;
@@ -853,7 +883,11 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             tracing::warn!(?path, %error, "export failed");
             state.notice = Some(Notice::WriteFailed { path, error });
         }
-        JobResult::Bases { buffer, result } => track::bases_read(state, buffer, result, out),
+        JobResult::Bases {
+            buffer,
+            path,
+            result,
+        } => track::bases_read(state, buffer, path, result, out),
         JobResult::Diffed {
             buffer,
             stamp,
@@ -861,6 +895,11 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             outcome,
         } => track::diffed(state, buffer, stamp, lines, outcome),
         JobResult::GitIndexed { path, op, result } => stage::indexed(state, path, op, result, out),
+        JobResult::Parsed {
+            buffer,
+            version,
+            result,
+        } => highlight::parsed(state, buffer, version, result, out),
         JobResult::HeadParsed { buffer, oid, doc } => {
             crate::git::diffview::head_parsed(state, buffer, oid, doc)
         }

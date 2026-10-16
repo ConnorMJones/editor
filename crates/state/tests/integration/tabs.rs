@@ -235,7 +235,7 @@ fn one_buffer_in_two_panes_maps_every_tab_through_edits() {
     let second = h.state.layout.focus();
     let selection = |h: &Harness, pane, index: usize| {
         h.state.layout.panes()[pane].items()[index]
-            .view
+            .tab
             .text()
             .selection
             .clone()
@@ -376,7 +376,7 @@ fn session_tab_lists_are_validated() {
     let mut h = Harness::new(dir.path());
     let path = dir.path().join("a.txt");
     let tab = format!(
-        "{{ kind = \"text\", path = {:?}, ranges = [[0, 0]], primary = 0, scroll = 0 }}",
+        "{{ path = {:?}, mode = {{ kind = \"source\" }}, ranges = [[0, 0]], primary = 0, scroll = 0 }}",
         path.display().to_string()
     );
     let session = |pane: &str| -> Session {

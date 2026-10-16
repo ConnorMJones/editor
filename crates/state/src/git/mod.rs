@@ -27,15 +27,15 @@ pub struct GitSnapshot {
     pub dirs: HashMap<Folder, GitStatus>,
     /// Changed files in sidebar order: by group, then path; a partly staged file appears twice.
     pub changes: Vec<Changed>,
+    /// The root folder's own change, when git reports it as a whole, as an ignored root.
+    pub root: Option<Change>,
     pub unlisted: Vec<Unlisted>,
 }
 
-/// A change git reported that has no path under the root to list it by.
+/// A change git reported that has no valid path to list it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unlisted {
     NotUtf8(Vec<u8>),
-    /// The root folder itself, as when it is untracked inside a larger repository.
-    Root(Change),
     /// A path with `.` or `..` components.
     Invalid(String),
 }
@@ -47,7 +47,11 @@ pub struct Changed {
 }
 
 impl GitSnapshot {
-    pub fn new(paths: HashMap<RelPath, Change>, unlisted: Vec<Unlisted>) -> GitSnapshot {
+    pub fn new(
+        paths: HashMap<RelPath, Change>,
+        root: Option<Change>,
+        unlisted: Vec<Unlisted>,
+    ) -> GitSnapshot {
         let mut changes: Vec<Changed> = paths
             .iter()
             .flat_map(|(path, change)| {
@@ -62,6 +66,7 @@ impl GitSnapshot {
             dirs: aggregate(&paths),
             paths,
             changes,
+            root,
             unlisted,
         }
     }
@@ -93,7 +98,8 @@ impl GitSnapshot {
                 .find_map(|ancestor| match self.paths.get(ancestor) {
                     Some(Change::Ignored) => Some(GitStatus::Ignored),
                     Some(_) | None => None,
-                }),
+                })
+                .or(self.root.map(Change::status)),
         }
     }
 }
@@ -193,6 +199,7 @@ pub fn status(root: &Path) -> Result<Option<Found>, git2::Error> {
         .exclude_submodules(true);
     let statuses = repo.statuses(Some(&mut options))?;
     let mut paths = HashMap::with_capacity(statuses.len());
+    let mut root = None;
     let mut unlisted = Vec::new();
     for entry in statuses.iter() {
         let Some(change) = classify(entry.status()) else {
@@ -219,7 +226,7 @@ pub fn status(root: &Path) -> Result<Option<Found>, git2::Error> {
             Some(Ok(relative)) => {
                 paths.insert(relative, change);
             }
-            Some(Err(RelPathError::Root)) => unlisted.push(Unlisted::Root(change)),
+            Some(Err(RelPathError::Root)) => root = Some(change),
             Some(Err(RelPathError::Outside(_) | RelPathError::NotUtf8(_))) => {
                 unlisted.push(Unlisted::Invalid(path.to_owned()))
             }
@@ -232,7 +239,7 @@ pub fn status(root: &Path) -> Result<Option<Found>, git2::Error> {
     Ok(Some(Found {
         git_dir: repo.path().to_owned(),
         workdir,
-        snapshot: GitSnapshot::new(paths, unlisted),
+        snapshot: GitSnapshot::new(paths, root, unlisted),
     }))
 }
 

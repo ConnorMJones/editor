@@ -13,7 +13,6 @@ use slotmap::new_key_type;
 
 use crate::git::conflict::{self, Conflicts};
 use crate::git::diff::Diff;
-use crate::git::navigate::Arrive;
 use crate::git::navigate::Edge;
 use crate::view::layout::PaneId;
 
@@ -41,7 +40,6 @@ pub enum Content {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Jump {
     pub pane: PaneId,
-    pub arrive: Arrive,
     pub to: Target,
 }
 
@@ -99,6 +97,11 @@ pub struct TextDoc {
 pub enum Highlight {
     /// No grammar matches the file.
     Plain,
+    /// Parsed off the UI thread from the text at `version`; drawn plain until it lands.
+    Parsing {
+        language: Language,
+        version: u64,
+    },
     Parsed(Syntax),
     /// The grammar failed on this text; the next edit parses again from scratch.
     Failed {
@@ -113,12 +116,18 @@ impl Highlight {
         match self {
             Highlight::Parsed(syntax) => Ok(syntax),
             Highlight::Plain => Err(Notice::NoSyntax),
+            Highlight::Parsing { .. } => Err(Notice::SyntaxPending),
             Highlight::Failed { .. } => Err(Notice::SyntaxFailed),
         }
     }
 
     pub fn parse(text: RopeSlice, language: Language, loader: &Loader) -> Highlight {
-        match Syntax::new(text, language, loader) {
+        Highlight::of(language, Syntax::new(text, language, loader))
+    }
+
+    /// The highlight a finished parse of `language` leaves.
+    pub fn of(language: Language, parsed: Result<Syntax, HighlighterError>) -> Highlight {
+        match parsed {
             Ok(syntax) => Highlight::Parsed(syntax),
             Err(error) => {
                 tracing::warn!(?error, "syntax parse failed");
@@ -131,7 +140,7 @@ impl Highlight {
     pub fn syntax(&self) -> Option<&Syntax> {
         match self {
             Highlight::Parsed(syntax) => Some(syntax),
-            Highlight::Plain | Highlight::Failed { .. } => None,
+            Highlight::Plain | Highlight::Parsing { .. } | Highlight::Failed { .. } => None,
         }
     }
 
@@ -139,7 +148,9 @@ impl Highlight {
         match self {
             Highlight::Plain => None,
             Highlight::Parsed(syntax) => Some(syntax.root_language()),
-            Highlight::Failed { language, .. } => Some(*language),
+            Highlight::Parsing { language, .. } | Highlight::Failed { language, .. } => {
+                Some(*language)
+            }
         }
     }
 }
@@ -154,14 +165,39 @@ pub enum Uncommitted {
 }
 
 impl TextDoc {
+    /// Parses at once, for callers already off the UI thread that want the tree with the text.
     pub fn new(text: Rope, path: &std::path::Path, loader: &Loader) -> TextDoc {
-        let highlight = match loader.language_for_filename(path) {
-            Some(language) => Highlight::parse(text.slice(..), language, loader),
+        TextDoc::build(text, path, loader, |text, language| {
+            tracing::info_span!("syntax parse")
+                .in_scope(|| Highlight::parse(text, language, loader))
+        })
+    }
+
+    /// Leaves a file with a grammar `Parsing`, for `highlight::job` to parse in the background.
+    pub fn unparsed(text: Rope, path: &std::path::Path, loader: &Loader) -> TextDoc {
+        TextDoc::build(text, path, loader, |_, language| Highlight::Parsing {
+            language,
+            version: 0,
+        })
+    }
+
+    fn build(
+        text: Rope,
+        path: &std::path::Path,
+        loader: &Loader,
+        highlight: impl FnOnce(RopeSlice, Language) -> Highlight,
+    ) -> TextDoc {
+        let language =
+            tracing::info_span!("language lookup").in_scope(|| loader.language_for_filename(path));
+        let highlight = match language {
+            Some(language) => highlight(text.slice(..), language),
             None => Highlight::Plain,
         };
-        let config = highlight
-            .language()
-            .map(|language| &**loader.language(language).config());
+        let config = tracing::info_span!("language config").in_scope(|| {
+            highlight
+                .language()
+                .map(|language| &**loader.language(language).config())
+        });
         let indent = config.and_then(|config| config.indent.as_ref());
         let mut conflicts = Conflicts::EMPTY;
         conflict::parse(text.slice(..), 0, &mut conflicts);
@@ -209,7 +245,7 @@ impl TextDoc {
                 let layer = syntax.layer_for_byte_range(byte as u32, byte as u32);
                 Some(&**loader.language(syntax.layer(layer).language).config())
             }
-            Highlight::Plain | Highlight::Failed { .. } => {
+            Highlight::Plain | Highlight::Parsing { .. } | Highlight::Failed { .. } => {
                 (self.highlight.language()).map(|language| &**loader.language(language).config())
             }
         }
@@ -272,6 +308,8 @@ impl TextDoc {
         let text = self.text.slice(..);
         self.highlight = match std::mem::replace(&mut self.highlight, Highlight::Plain) {
             Highlight::Plain => Highlight::Plain,
+            // `highlight::parsed` parses again when the text moved on meanwhile.
+            parsing @ Highlight::Parsing { .. } => parsing,
             Highlight::Parsed(mut syntax) => {
                 match syntax.update(old.slice(..), text, changes, loader) {
                     Ok(()) => Highlight::Parsed(syntax),

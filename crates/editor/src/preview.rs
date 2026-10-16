@@ -105,7 +105,7 @@ impl Element for PreviewElement {
                                 let cursor = (state.layout.panes().values())
                                     .flat_map(Pane::items)
                                     .find_map(|item| {
-                                        let view = item.view.text();
+                                        let view = item.tab.text();
                                         (view.buffer() == buffer)
                                             .then(|| view.selection.primary().head)
                                     });

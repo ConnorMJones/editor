@@ -11,7 +11,7 @@ use state::project::path::RelPath;
 use state::render::document::{self, DocumentScroll};
 use state::render::markdown::{BlockKind, EmbedKind, ImageFile};
 use state::text::buffer::Content;
-use state::view::layout::View;
+use state::view::tab::{Showing, Tab};
 use state::{Confirm, Overlay, input};
 
 use crate::harness::Harness;
@@ -185,8 +185,8 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
         )
     });
     assert_eq!(focused(&h), "notes/sub/c.md");
-    match h.state.layout.panes()[pane].active() {
-        Some(View::Document(view)) => {
+    match h.state.layout.panes()[pane].active().map(Tab::showing) {
+        Some(Showing::Document(_, view, _)) => {
             assert_eq!(
                 view.scroll,
                 DocumentScroll::item(2),
@@ -194,7 +194,9 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
             );
             assert_eq!(cursor_line(&h), 4);
         }
-        Some(View::Text(_) | View::Diff(_) | View::Pages(_)) | None => panic!("not rendered"),
+        Some(Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..)) | None => {
+            panic!("not rendered")
+        }
     }
 }
 

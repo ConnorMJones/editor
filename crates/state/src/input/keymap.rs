@@ -1,8 +1,8 @@
 use model::command::{
     Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand, Find, HunkOp,
     HunkTarget, Inclusion, Join, Motion, ObjectScope, PagesCommand, Paste, Pending, PickerCommand,
-    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, ScrollBy,
-    SyntaxObject, Take, TreeCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
+    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy,
+    Shown, SyntaxObject, Take, TreeCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -795,8 +795,32 @@ const WORKSPACE: Bindings = &[
     ),
 ];
 
-/// Diff views; shared by normal and select mode.
-const DIFF: Bindings = &[(&[SPACE, Key::char('d')], Command::ToggleDiff)];
+/// Modes of the focused tab; shared by every context that shows one.
+const MODES: Bindings = &[
+    (&[SPACE, Key::char('d')], Command::ToggleMode(Shown::Diff)),
+    (&[SPACE, Key::char('v')], Command::ToggleMode(Shown::Split)),
+    (&[SPACE, Key::char('V')], Command::ToggleMode(Shown::Render)),
+    (
+        &[SPACE, Key::code(KeyCode::Tab)],
+        Command::CycleMode(Direction::Forward),
+    ),
+    (
+        &[SPACE, with(KeyCode::Tab, Mods::SHIFT)],
+        Command::CycleMode(Direction::Backward),
+    ),
+    (
+        &[CTRL_W, Key::char('<')],
+        Command::ResizeSplit(Resize::Narrow),
+    ),
+    (
+        &[CTRL_W, Key::char('>')],
+        Command::ResizeSplit(Resize::Widen),
+    ),
+    (
+        &[CTRL_W, Key::char('=')],
+        Command::ResizeSplit(Resize::Even),
+    ),
+];
 
 const WINDOW: &[(&[Key], Command); 13] = &window_bindings!(CTRL_W);
 const SPACE_WINDOW: &[(&[Key], Command); 13] = &window_bindings!(SPACE, Key::char('w'));
@@ -969,15 +993,11 @@ const CONFLICTS: Bindings = &[
     ),
 ];
 
-/// Rendered markdown and typst views; shared by normal and select mode and rendered views.
-const MARKDOWN: Bindings = &[
-    (&[SPACE, Key::char('v')], Command::RenderedSplit),
-    (&[SPACE, Key::char('V')], Command::ToggleRendered),
-    (
-        &[SPACE, Key::char('l')],
-        Command::Picker(PickerCommand::Open(PickerKind::Backlinks)),
-    ),
-];
+/// Notes; shared by normal and select mode and rendered views.
+const MARKDOWN: Bindings = &[(
+    &[SPACE, Key::char('l')],
+    Command::Picker(PickerCommand::Open(PickerKind::Backlinks)),
+)];
 
 const fn read(command: ReadCommand) -> Command {
     Command::Read(command)
@@ -1107,7 +1127,7 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
         WINDOW,
         SPACE_WINDOW,
         GOTO_BUFFER,
-        DIFF,
+        MODES,
         CONFLICTS,
         MARKDOWN,
     ],
@@ -1120,7 +1140,7 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
         WINDOW,
         SPACE_WINDOW,
         GOTO_BUFFER,
-        DIFF,
+        MODES,
         CONFLICTS,
         MARKDOWN,
     ],
@@ -1133,6 +1153,7 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
         READ,
         DOCUMENT,
+        MODES,
         MARKDOWN,
         WORKSPACE,
         WINDOW,
@@ -1142,6 +1163,7 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
         READ,
         PAGES,
+        MODES,
         MARKDOWN,
         WORKSPACE,
         WINDOW,
@@ -1287,7 +1309,8 @@ Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours 
 | `esc` | changes | Back to the editor. |
 | mouse | changes | Click a file to open its diff, double-click to keep the tab, click a header to collapse it. Hover a row for `+` stage, `−` unstage and `↶` discard. |
 | `y` / `n` / `esc` | confirm | Answer a pending discard (or note creation, below). |
-| `space d` | normal, select | Toggle the tab between the file and its side-by-side diff (helix: diagnostics picker). The right side is the live buffer and takes every key. |
+| `space d` | normal, select, document, pages | Toggle the tab between its source and its side-by-side diff (helix: diagnostics picker). The right side is the live buffer and takes every key. |
+| `space tab` / `space S-tab` | normal, select, document, pages | Next / previous mode of the tab: source, then for `.md` and `.typ` files the split and the rendering, then the diff. |
 | `]g` / `[g` | normal, select | Next / previous change; past the file's last / first change, continue into the next / previous changed file (its diff when in a diff; conflicted files open as text). Helix stops at the file's ends. |
 | `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
 | `space h s` | normal, select | Stage the changes touched by the selections. |
@@ -1316,19 +1339,20 @@ dimmed. Clicking the strip puts the text cursor on the error.
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space v` | normal, select, document, pages | Open a rendered view of the file in a split to the right that follows the text pane; again (from either side) closes it. Focus stays in the text. |
-| `space V` | normal, select, document, pages | Toggle the tab between the file's text and its rendered view in place, keeping the position. |
+| `space v` | normal, select, document, pages | Toggle the tab between its source and a split: the source on the left takes the keys, the rendering on the right follows its cursor. Scrolling the rendering scrolls the source; clicking it moves the cursor. |
+| `C-w <` / `C-w >` / `C-w =` | normal, select | Narrow, widen or even out the source side of a split; dragging the divider between the sides resizes too, and double-clicking it evens them out. |
+| `space V` | normal, select, document, pages | Toggle the tab between its source and its rendering, keeping the position. |
 | `j` / `k`, down / up | document, pages | Scroll a little. |
 | `C-d` / `C-u` | document, pages | Scroll half a page. |
 | `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Scroll a page. |
 | `gg` / `ge` / `G`, home / end | document, pages | Top / bottom. |
 | `]]` / `[[` | document | Next / previous top-level heading. |
-| `esc` | document, pages | Back to the text pane it follows; a standalone view toggles back to text. |
+| `esc` | document, pages | Back to the source. |
 | `f` | pages | Fit pages to the pane width, or each page whole. |
 | `+` / `-` / `=` | pages | Zoom pages in / out from the fit, or back to it. |
 | `h` / `l`, left / right | pages | Pan sideways across pages wider than the pane. |
 | `:export-pdf` | typst file | Compile the focused typst file to `<file>.pdf` beside it (also in the `space ?` palette). Markdown export is not supported yet. |
-| mouse | document, pages | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
+| mouse | document, pages | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there. Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
 | `gf` | normal, select | Follow the link under the cursor: a wikilink, a markdown link or a URL in a markdown file; elsewhere the URL or file path under the cursor (or the selected text), relative to the file's folder, then the root, as in helix. |
 | `space l` | normal, select, document, pages | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
 | `y` / `n` / `esc` | confirm | Create the note an unresolved link names, or not. |

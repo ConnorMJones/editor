@@ -1,13 +1,15 @@
 use std::fs;
 use std::path::Path;
 
+use helix_core::Syntax;
 use model::git::GitStatus;
 use model::notice::Notice;
 use state::input::picker::Items;
 use state::project::files::{FileIndex, Indexed};
 use state::project::path::RelPath;
 use state::sidebar::tree::{RowKind, TreeAction, TreeTarget};
-use state::text::buffer::Disk;
+use state::text::buffer::{Disk, Highlight};
+use state::text::highlight;
 use state::view::layout::Node;
 use state::view::panes;
 use state::{Files, Overlay, Repo, Sidebar, State};
@@ -515,4 +517,44 @@ fn dragging_moves_entries_between_folders() {
         "other"
     );
     assert!(dir.path().join("b.md").is_file());
+}
+
+#[test]
+fn syntax_text_objects_without_a_tree_say_so() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("notes.txt"), "fn a() {}\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.txt<ret>w");
+    let before = h.view().selection.clone();
+    h.keys("mif");
+    assert!(matches!(h.state.notice, Some(Notice::NoSyntax)));
+    assert_eq!(h.view().selection, before);
+    // Plain objects still work without one.
+    h.keys("miw");
+    assert!(h.state.notice.is_none());
+}
+
+#[test]
+fn a_parse_of_older_text_is_redone_for_the_current_text() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.rs<ret>");
+    assert!(matches!(h.doc().highlight, Highlight::Parsed(_)));
+    let buffer = h.view().buffer();
+    let language = h.doc().highlight.language().unwrap();
+    let old = Syntax::new(h.doc().text.slice(..), language, &h.state.languages).unwrap();
+    // As if the text was edited while the first parse ran.
+    h.keys("ggOstruct B;<esc>");
+    h.state.buffers[buffer].doc_mut().unwrap().highlight = Highlight::Parsing {
+        language,
+        version: 0,
+    };
+    h.run(|state, out| highlight::parsed(state, buffer, 0, Ok(old), out));
+    let Highlight::Parsed(syntax) = &h.doc().highlight else {
+        panic!("not parsed again");
+    };
+    let root = syntax.tree().root_node();
+    let kinds: Vec<&str> = root.children().map(|node| node.kind()).collect();
+    assert_eq!(kinds, ["struct_item", "function_item"]);
 }

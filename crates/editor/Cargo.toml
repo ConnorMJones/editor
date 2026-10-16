@@ -9,6 +9,8 @@ workspace = true
 
 [features]
 tracy = ["dep:tracing-tracy", "dep:tracy-client"]
+# Reports every allocation too; heavier captures.
+tracy-alloc = ["tracy"]
 
 [dependencies]
 anyhow.workspace = true

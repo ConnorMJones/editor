@@ -3,9 +3,10 @@ use std::path::{Component, Path};
 use gpui::{
     ClickEvent, Context, Div, ElementId, MouseButton, ScrollHandle, Stateful, div, prelude::*, px,
 };
+use model::command::Shown;
 use slotmap::Key as _;
 use state::apply::Force;
-use state::view::layout::{Pane, PaneId, TabKey, Tabs};
+use state::view::layout::{Pane, PaneId, Tabs};
 use state::view::panes::{self, Click};
 
 use crate::fonts::hsla;
@@ -45,7 +46,7 @@ impl Workspace {
             .font(fonts.ui.clone())
             .text_size(fonts.ui_size);
         let tabs_iter = tabs.items().iter().enumerate().map(|(index, item)| {
-            let buffer = &state.buffers[item.view.buffer()];
+            let buffer = &state.buffers[item.tab.buffer()];
             let path = buffer.path.as_path();
             let name = path
                 .file_name()
@@ -56,7 +57,7 @@ impl Workspace {
             let parent = path.parent().unwrap_or(Path::new(""));
             let depth = (state.layout.panes().values())
                 .flat_map(Pane::items)
-                .map(|other| state.buffers[other.view.buffer()].path.as_path())
+                .map(|other| state.buffers[other.tab.buffer()].path.as_path())
                 .filter(|other| *other != path && other.file_name() == path.file_name())
                 .map(|other| {
                     let other = other.parent().unwrap_or(Path::new(""));
@@ -102,23 +103,17 @@ impl Workspace {
                 true => label.italic(),
                 false => label,
             };
-            // Zed marks a diff tab with a muted diff icon before the file name.
-            let (kind, close_id, icon) = match item.view.key() {
-                TabKey::Text(_) => ("tab", "tab-close", None),
-                TabKey::Diff(_) => (
-                    "diff-tab",
-                    "diff-tab-close",
-                    Some(div().text_color(hsla(theme.muted)).child("±")),
-                ),
-                TabKey::Document(_) | TabKey::Pages(_) => (
-                    "rendered-tab",
-                    "rendered-tab-close",
-                    Some(div().text_color(hsla(theme.muted)).child("◉")),
-                ),
-            };
-            let key = item.view.buffer().data().as_ffi();
+            // Zed marks a diff tab with a muted diff icon before the file name; a rendering gets one too.
+            let icon = match item.tab.shown() {
+                Shown::Source => None,
+                Shown::Diff => Some("±"),
+                Shown::Render => Some("◉"),
+                Shown::Split => Some("◧"),
+            }
+            .map(|icon| div().text_color(hsla(theme.muted)).child(icon));
+            let key = item.tab.buffer().data().as_ffi();
             let close = div()
-                .id(ElementId::NamedInteger(close_id.into(), key))
+                .id(ElementId::NamedInteger("tab-close".into(), key))
                 .absolute()
                 .top_0()
                 .left_0()
@@ -162,7 +157,7 @@ impl Workspace {
                 (false, false) => end.child(hover(close)),
             };
             div()
-                .id(ElementId::NamedInteger(kind.into(), key))
+                .id(ElementId::NamedInteger("tab".into(), key))
                 .group(GROUP)
                 .flex_none()
                 .h_full()

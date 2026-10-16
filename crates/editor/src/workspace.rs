@@ -13,7 +13,7 @@ use gpui::{
     canvas, deferred, div, point, prelude::*, px, size, transparent_black, uniform_list,
 };
 use helix_core::visual_offset_from_anchor;
-use model::command::{ChangesCommand, Command, PickerCommand};
+use model::command::{ChangesCommand, Command, PickerCommand, Shown};
 use model::config::TitleBar;
 use model::git::{Change, GitStatus, Group, Kind};
 use model::register::Clipboard;
@@ -21,25 +21,25 @@ use model::theme::Theme;
 use model::units::Px;
 use model::window::Axis;
 use slotmap::SecondaryMap;
+use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
 use state::git::diffview::{Left, RIGHT};
 use state::git::stage::Discard;
-use state::git::{Unlisted, conflict};
 use state::input::keymap::{self, Context as KeyContext};
 use state::input::picker::{Grep, Items, PALETTE, Referrers, Search};
 use state::job::{self, JobResult};
 use state::project::path::RelPath;
 use state::project::watch::{self, Watcher};
-use state::render::document::DocumentView;
-use state::render::pages::{Fit, PagesView};
-use state::render::source::{Link, Source};
+use state::render::pages::Fit;
 use state::render::typeset::Request;
 use state::sidebar::changes::{self, ListRow};
 use state::sidebar::tree::{self, Fold, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget};
 use state::text::buffer::{Content, Disk, Highlight};
 use state::view::display::{self, Gutter, Indent};
-use state::view::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
+use state::view::layout::{Node, Pane, PaneId, SplitPath, Tabs};
+use state::view::mode;
 use state::view::scroll;
+use state::view::tab::{Beside, InvalidShare, Share, Showing};
 use state::{
     Confirm, Dragged, Effect, Files, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply,
     input, project::session, text::registers, view::panes,
@@ -133,18 +133,26 @@ pub enum Drag {
         divider: usize,
         axis: Axis,
     },
+    /// The divider between a split's source and rendering in `pane`.
+    Split {
+        pane: PaneId,
+    },
 }
 
 #[derive(Default)]
 pub struct Areas {
     pub editor: Cell<Bounds<Pixels>>,
     pub sidebar: Cell<Bounds<Pixels>>,
+    /// The body of each pane showing a split, as last laid out.
+    pub splits: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
 }
 
 const INDENT: f32 = 14.0;
 const TITLE_HEIGHT: Pixels = px(32.0);
 /// Hit width of split and sidebar dividers; a 1px line is drawn in the middle.
 const DIVIDER: Pixels = px(5.0);
+/// Columns of the monospace font each side of a split keeps, however far its divider goes.
+const SPLIT_MIN_COLUMNS: f32 = 12.0;
 /// Sidebar widths in ems of the interface font.
 const SIDEBAR_DEFAULT: f32 = 20.0;
 const SIDEBAR_MIN: f32 = 8.0;
@@ -281,6 +289,7 @@ impl Workspace {
         results: impl IntoIterator<Item = JobResult>,
         cx: &mut Context<Self>,
     ) {
+        let _span = tracing::info_span!("complete jobs").entered();
         for result in results {
             job::complete(&mut self.state, result, &mut self.effects);
         }
@@ -332,6 +341,22 @@ impl Workspace {
                 self.state.layout.drag_divider(path, *divider, at);
                 cx.notify();
             }
+            (Drag::Split { pane }, Some(MouseButton::Left)) => {
+                let Some(area) = self.areas.splits.borrow().get(*pane).copied() else {
+                    return;
+                };
+                let least = self.fonts.cell.width * SPLIT_MIN_COLUMNS;
+                let room = area.size.width - DIVIDER;
+                let source = (event.position.x - area.origin.x)
+                    .min(room - least)
+                    .max(least);
+                match Share::new(source / room) {
+                    Ok(share) => mode::drag(&mut self.state, *pane, share),
+                    // A pane narrower than both sides' least keeps the share it had.
+                    Err(InvalidShare(_)) => {}
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -347,6 +372,7 @@ impl Workspace {
 
     /// Syncs the state once per change, brings the lists along and runs what they queued.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
+        let _span = tracing::trace_span!("flush").entered();
         loop {
             state::sync(&mut self.state, &mut self.effects);
             crate::rendered::sync(self, cx);
@@ -711,35 +737,19 @@ impl Workspace {
                             };
                             let highlight = match doc.highlight {
                                 Highlight::Failed { .. } => " [parse failed]",
-                                Highlight::Plain | Highlight::Parsed(_) => "",
+                                Highlight::Plain
+                                | Highlight::Parsing { .. }
+                                | Highlight::Parsed(_) => "",
                             };
                             let selections = match view.selection.len() {
                                 1 => "1 sel".to_owned(),
                                 n => format!("{n} sels"),
                             };
-                            let hunks = match (shown, &diff.bases) {
-                                (View::Text(_), _) => String::new(),
-                                (
-                                    View::Document(DocumentView {
-                                        source:
-                                            Source {
-                                                link: Link::Follows { .. },
-                                                ..
-                                            },
-                                        ..
-                                    })
-                                    | View::Pages(PagesView {
-                                        source:
-                                            Source {
-                                                link: Link::Follows { .. },
-                                                ..
-                                            },
-                                        ..
-                                    }),
-                                    _,
-                                ) => "rendered: following".to_owned(),
-                                (View::Document(_) | View::Pages(_), _) => "rendered".to_owned(),
-                                (View::Diff(_), Bases::Tracked(tracked)) => {
+                            let hunks = match (shown.shown(), &diff.bases) {
+                                (Shown::Source, _) => String::new(),
+                                (Shown::Render, _) => "rendered".to_owned(),
+                                (Shown::Split, _) => "split".to_owned(),
+                                (Shown::Diff, Bases::Tracked(tracked)) => {
                                     let at = diff::hunk_at(
                                         &tracked.hunks,
                                         Side::After,
@@ -754,11 +764,11 @@ impl Workspace {
                                         (None, count) => format!("diff: {count} hunks"),
                                     }
                                 }
-                                (View::Diff(_), Bases::Untracked) => "diff: untracked".to_owned(),
-                                (View::Diff(_), Bases::NoRepo) => {
+                                (Shown::Diff, Bases::Untracked) => "diff: untracked".to_owned(),
+                                (Shown::Diff, Bases::NoRepo) => {
                                     "diff: not in a repository".to_owned()
                                 }
-                                (View::Diff(_), Bases::Loading { .. }) => "diff".to_owned(),
+                                (Shown::Diff, Bases::Loading { .. }) => "diff".to_owned(),
                             };
                             let list = &conflict::current(doc).list;
                             let at = list.partition_point(|conflict| conflict.close < line);
@@ -871,14 +881,14 @@ impl Workspace {
                 };
                 let body = match target.and_then(Pane::active) {
                     Some(view) => {
-                        match (&self.state.buffers[view.buffer()].content, view) {
-                            (Content::Text { .. }, View::Text(_)) => div()
+                        match (&self.state.buffers[view.buffer()].content, view.showing()) {
+                            (Content::Text { .. }, Showing::Source(_)) => div()
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_hidden()
                                 .child(element(Part::Text)),
                             // Equal halves, so both sides wrap at the same width.
-                            (Content::Text { .. }, View::Diff(_)) => div()
+                            (Content::Text { .. }, Showing::Diff(..)) => div()
                                 .flex_1()
                                 .min_h_0()
                                 .flex()
@@ -904,7 +914,71 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(element(Part::Buffer)),
                                 ),
-                            (Content::Text { .. }, View::Document(_) | View::Pages(_)) => div()
+                            (
+                                Content::Text { .. },
+                                Showing::Document(_, _, Beside::Source(_, share))
+                                | Showing::Pages(_, _, Beside::Source(_, share)),
+                            ) => {
+                                let least = self.fonts.cell.width * SPLIT_MIN_COLUMNS;
+                                let areas = self.areas.clone();
+                                let side = |grow: f32| {
+                                    let mut side =
+                                        div().min_w(least).flex_basis(px(0.)).overflow_hidden();
+                                    side.style().flex_grow = Some(grow);
+                                    side
+                                };
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .relative()
+                                    .flex()
+                                    .flex_row()
+                                    .overflow_hidden()
+                                    .child(
+                                        canvas(
+                                            move |bounds, _, _| {
+                                                areas.splits.borrow_mut().insert(pane, bounds);
+                                            },
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .size_full(),
+                                    )
+                                    .child(side(share.get()).child(element(Part::Text)))
+                                    .child(
+                                        divider(Axis::Row, hsla(self.theme.chrome.border))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    move |this, event: &MouseDownEvent, _, cx| {
+                                                        match event.click_count {
+                                                            2 => mode::drag(
+                                                                &mut this.state,
+                                                                pane,
+                                                                Share::EVEN,
+                                                            ),
+                                                            _ => this.drag = Drag::Split { pane },
+                                                        }
+                                                        cx.stop_propagation();
+                                                        cx.notify();
+                                                    },
+                                                ),
+                                            ),
+                                    )
+                                    .child(
+                                        side(1.0 - share.get())
+                                            .flex()
+                                            .flex_col()
+                                            .overflow_hidden()
+                                            .bg(hsla(self.theme.background))
+                                            .child(crate::rendered::body(self, pane, cx)),
+                                    )
+                            }
+                            (
+                                Content::Text { .. },
+                                Showing::Document(_, _, Beside::Alone)
+                                | Showing::Pages(_, _, Beside::Alone),
+                            ) => div()
                                 .flex_1()
                                 .min_h_0()
                                 .flex()
@@ -1030,15 +1104,7 @@ impl Workspace {
                     )
                     .children(match (&self.state.sidebar, &self.state.project.git) {
                         (Sidebar::Changes(_), Repo::Found { snapshot, .. }) => {
-                            let missing = (snapshot.unlisted.iter())
-                                .filter(|unlisted| match unlisted {
-                                    Unlisted::Root(Change::Ignored) => false,
-                                    Unlisted::Root(_)
-                                    | Unlisted::NotUtf8(_)
-                                    | Unlisted::Invalid(_) => true,
-                                })
-                                .count();
-                            let note = match missing {
+                            let note = match snapshot.unlisted.len() {
                                 0 => None,
                                 1 => Some("1 change is not listed; see the log".to_owned()),
                                 count => {
@@ -1770,10 +1836,16 @@ impl EntityInputHandler for Workspace {
             Content::Loading { .. } => return None,
         };
         let text = doc.text.slice(..);
-        let (padding, gutter_lines) = match shown {
-            View::Document(_) | View::Pages(_) => return None,
-            View::Text(_) => (conflict::padding(doc), text.len_lines()),
-            View::Diff(diff) => (
+        let (padding, gutter_lines) = match shown.showing() {
+            Showing::Document(_, _, Beside::Alone) | Showing::Pages(_, _, Beside::Alone) => {
+                return None;
+            }
+            Showing::Source(_)
+            | Showing::Document(_, _, Beside::Source(..))
+            | Showing::Pages(_, _, Beside::Source(..)) => {
+                (conflict::padding(doc), text.len_lines())
+            }
+            Showing::Diff(_, diff) => (
                 diff.align.sides[RIGHT].padding(),
                 match &diff.left {
                     Left::Head { doc: head, .. } => text.len_lines().max(head.text.len_lines()),
@@ -1820,7 +1892,10 @@ impl EntityInputHandler for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = tracing::trace_span!("workspace render").entered();
         self.window_height = window.viewport_size().height;
+        // Split bodies record their bounds again as this frame lays them out.
+        self.areas.splits.borrow_mut().clear();
         let mut rasters = self.rasters.borrow_mut();
         let frame = rasters.frame;
         rasters

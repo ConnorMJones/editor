@@ -12,7 +12,7 @@ use helix_core::{
     graphemes, object,
 };
 use helix_stdx::rope::RopeSliceExt;
-use model::command::{Answer, Command, Direction, Dirs, Motion, Paste};
+use model::command::{Answer, Command, Direction, Dirs, Motion, Paste, Shown};
 use model::config::OpenAs;
 use model::mode::Mode;
 use model::notice::Notice;
@@ -20,7 +20,6 @@ use model::register::Register;
 use slotmap::SlotMap;
 
 use crate::git::diffview::{self, Right};
-use crate::git::navigate::Arrive;
 use crate::git::navigate::{self, Landing};
 use crate::input::prompt::{Candidate, Chosen};
 use crate::job::{FsOp, Job, ReloadIf, ReloadPolicy};
@@ -29,7 +28,9 @@ use crate::text::buffer::{
     Buffer, BufferId, Content, Disk, HistoryStep, Jump, Position, Target, TextDoc, Uncommitted,
 };
 use crate::text::registers::{self, ClipboardUse, Values};
-use crate::view::layout::{Layout, PaneId, TabKey, Tabs, TextView, View};
+use crate::view::layout::{Layout, PaneId, Tabs, TextView};
+use crate::view::panes::Arrive;
+use crate::view::tab::{BesideMut, ShowingMut, Tab};
 use crate::{
     Confirm, Effect, Exit, InsertExit, LastMotion, Overlay, Prompt, PromptKind, State, Sticky,
     git::conflict,
@@ -40,10 +41,10 @@ use crate::{
     render,
     render::document::{self, DocumentScroll},
     render::pages::{self, PagesScroll},
-    render::source,
     text::edit,
     text::motion,
     text::select,
+    view::mode,
     view::panes,
     view::scroll,
 };
@@ -684,7 +685,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             }
         },
 
-        Command::Open(path) => open(state, path, Arrive::Text, None, OpenAs::Permanent, out),
+        Command::Open(path) => open(state, path, Arrive::AsIs, None, OpenAs::Permanent, out),
         Command::GotoFile => links::goto_file(state, out),
         Command::Write => match focused_buffer(state) {
             Some(id) => out.extend(write_job(state, id, Dirs::Existing).map(Effect::Job)),
@@ -808,13 +809,13 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             }
         }
 
-        Command::ToggleDiff => panes::toggle_diff(state),
+        Command::ToggleMode(shown) => mode::toggle(state, shown),
+        Command::CycleMode(direction) => mode::cycle(state, direction),
+        Command::ResizeSplit(resize) => mode::resize(state, resize),
         Command::Changes(command) => crate::sidebar::changes::list(state, command, out),
         Command::GotoConflict(direction) => conflict::goto(state, direction),
         Command::Resolve(take) => conflict::resolve(state, take),
 
-        Command::RenderedSplit => source::split(state),
-        Command::ToggleRendered => source::toggle(state),
         Command::Read(command) => render::read(state, command),
         Command::Document(command) => document::command(state, command),
         Command::Pages(command) => pages::command(state, command),
@@ -934,17 +935,17 @@ pub(crate) fn focused<'a, 'b>(
     layout: &'a mut Layout,
     buffers: &'b mut SlotMap<BufferId, Buffer>,
 ) -> Focused<'a, 'b> {
-    let Some(view) = layout.focused_mut().active_mut() else {
+    let Some(tab) = layout.focused_mut().active_mut() else {
         return Focused::Empty;
     };
-    let buffer = &mut buffers[view.buffer()];
-    let right = match view {
-        View::Text(_) => Right::Live,
-        View::Diff(_) => diffview::right(&buffer.content),
-        View::Document(_) | View::Pages(_) => return Focused::ReadOnly,
+    let buffer = &mut buffers[tab.buffer()];
+    let right = match tab.shown() {
+        Shown::Source | Shown::Split => Right::Live,
+        Shown::Diff => diffview::right(&buffer.content),
+        Shown::Render => return Focused::ReadOnly,
     };
     match (right, &mut buffer.content) {
-        (Right::Live, Content::Text { doc, .. }) => Focused::Text(view.text_mut(), doc),
+        (Right::Live, Content::Text { doc, .. }) => Focused::Text(tab.text_mut(), doc),
         (Right::Live, Content::Loading { .. }) => Focused::Loading(&buffer.path),
         (Right::Deleted, _) => Focused::ReadOnly,
     }
@@ -969,7 +970,7 @@ pub(crate) fn focused_text<'a, 'b>(
 }
 
 fn focused_buffer(state: &State) -> Option<BufferId> {
-    state.layout.focused().active().map(View::buffer)
+    state.layout.focused().active().map(Tab::buffer)
 }
 
 fn modified_buffers(buffers: &SlotMap<BufferId, Buffer>) -> Vec<BufferId> {
@@ -990,7 +991,7 @@ pub(crate) fn map_views(
 ) {
     for pane in layout.panes_mut().map(|(_, pane)| pane) {
         for item in pane.items_mut() {
-            let view = item.view.text_mut();
+            let view = item.tab.text_mut();
             match view.buffer() == buffer {
                 true => {
                     view.selection = view.selection.clone().map(changes).ensure_invariants(text);
@@ -1239,8 +1240,8 @@ pub(crate) fn load(state: &mut State, path: PathBuf, out: &mut Vec<Effect>) -> O
     }
 }
 
-/// Shows `path` in the focused pane; `to` places the cursor, once the text or diff arrives if
-/// need be.
+/// Shows `path` in the focused pane as `panes::show` does; `to` places the cursor, once the text
+/// or diff arrives if need be.
 pub(crate) fn open(
     state: &mut State,
     path: PathBuf,
@@ -1253,24 +1254,16 @@ pub(crate) fn open(
         return;
     };
     let focus = state.layout.focus();
-    panes::show(state, focus, arrive.key(id), open);
-    let Some(to) = to else {
-        return;
-    };
-    match &mut state.buffers[id].content {
-        Content::Loading { jump } => {
-            *jump = Some(Jump {
-                pane: focus,
-                arrive,
-                to,
-            })
-        }
-        Content::Text { .. } => place(state, focus, id, arrive, to),
+    panes::show(state, focus, id, arrive, open);
+    match to {
+        Some(to) => place(state, focus, id, to),
+        None => {}
     }
 }
 
-/// Puts the cursor of `buffer`'s tab in `pane` at `to`; a hunk waits for the buffer's diff.
-pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, arrive: Arrive, to: Target) {
+/// Puts the cursor of `buffer`'s tab in `pane` at `to`, once its text arrives when it is still
+/// loading; a hunk waits for the buffer's diff.
+pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Target) {
     let State {
         layout,
         buffers,
@@ -1278,39 +1271,49 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, arrive: A
         notice,
         ..
     } = state;
-    let (at, line) = match (to, buffers[buffer].doc()) {
-        (Target::Hunk(edge), _) => {
-            return navigate::expect_landing(state, buffer, Landing { pane, edge, arrive });
+    let (doc, diff) = match &mut buffers[buffer].content {
+        Content::Loading { jump } => return *jump = Some(Jump { pane, to }),
+        Content::Text { doc, diff, .. } => (doc, diff),
+    };
+    let (at, line) = match to {
+        Target::Hunk(edge) => {
+            navigate::expect_landing(diff, Landing { pane, edge });
+            return navigate::land(state, buffer);
         }
-        (Target::Position(to), Some(doc)) => {
+        Target::Position(to) => {
             let at = line_column(&doc.text, to);
             (at, doc.text.char_to_line(at))
         }
-        (Target::Heading(heading), Some(doc)) => {
+        Target::Heading(heading) => {
             let parsed = document::markdown(documents, buffer, doc);
             match links::heading_line(doc, parsed, &heading) {
                 Some(line) => (doc.text.line_to_char(line), line),
                 None => return *notice = Some(Notice::HeadingNotFound { heading }),
             }
         }
-        (Target::Position(_) | Target::Heading(_), None) => return,
     };
-    let view = layout.find_pane(pane).and_then(|target| {
-        let index = target.tabs.as_ref()?.find(arrive.key(buffer))?;
-        Some(&mut target.items_mut()[index].view)
+    let tab = layout.find_pane(pane).and_then(|target| {
+        let index = target.tabs.as_ref()?.find(buffer)?;
+        Some(&mut target.items_mut()[index].tab)
     });
-    match view {
+    match tab.map(Tab::showing_mut) {
         // The render sync brings the line to the top once parsed or located.
-        Some(View::Document(view)) => {
-            view.source.text.selection = Selection::point(at);
+        Some(ShowingMut::Document(text, view, BesideMut::Alone)) => {
+            text.selection = Selection::point(at);
             view.scroll = DocumentScroll::Line(line);
         }
-        Some(View::Pages(view)) => {
-            view.source.text.selection = Selection::point(at);
+        Some(ShowingMut::Pages(text, view, BesideMut::Alone)) => {
+            text.selection = Selection::point(at);
             view.scroll = PagesScroll::Line(line);
         }
-        Some(view @ (View::Text(_) | View::Diff(_))) => {
-            view.text_mut().selection = Selection::point(at);
+        // Beside the source, the rendering follows its cursor.
+        Some(
+            ShowingMut::Source(text)
+            | ShowingMut::Diff(text, _)
+            | ShowingMut::Document(text, _, BesideMut::Source(..))
+            | ShowingMut::Pages(text, _, BesideMut::Source(..)),
+        ) => {
+            text.selection = Selection::point(at);
             scroll::follow_cursor(state, pane);
         }
         None => {}
@@ -1322,22 +1325,13 @@ pub(crate) fn remove_buffer(state: &mut State, id: BufferId) {
     state.buffers.remove(id);
     let panes: SmallVec<[PaneId; 8]> = state.layout.panes().keys().collect();
     for pane in panes {
-        // A pane may show the buffer as text, as a diff and rendered.
-        let keys = [
-            TabKey::Text(id),
-            TabKey::Diff(id),
-            TabKey::Document(id),
-            TabKey::Pages(id),
-        ];
-        for key in keys {
-            let index =
-                (state.layout.panes().get(pane)).and_then(|target| target.tabs.as_ref()?.find(key));
-            match index {
-                Some(index) => {
-                    state.layout.remove_tab(pane, index);
-                }
-                None => {}
+        let index =
+            (state.layout.panes().get(pane)).and_then(|target| target.tabs.as_ref()?.find(id));
+        match index {
+            Some(index) => {
+                state.layout.remove_tab(pane, index);
             }
+            None => {}
         }
     }
 }

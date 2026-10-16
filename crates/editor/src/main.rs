@@ -32,6 +32,12 @@ use typeset::{FontSource, Typesetter};
 use crate::fonts::Fonts;
 use crate::workspace::{Drag, SessionFile, Workspace};
 
+/// Reports every allocation to tracy with up to 16 frames of callstack.
+#[cfg(feature = "tracy-alloc")]
+#[global_allocator]
+static ALLOCATOR: tracy_client::ProfiledAllocator<std::alloc::System> =
+    tracy_client::ProfiledAllocator::new(std::alloc::System, 16);
+
 fn main() -> anyhow::Result<()> {
     let registry = tracing_subscriber::registry()
         .with(EnvFilter::try_from_env("EDITOR_LOG").unwrap_or_else(|_| EnvFilter::new("info")))

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use git2::Status;
 use model::git::{Change, GitStatus, Group, Kind};
-use state::git::{Changed, GitSnapshot, Unlisted, aggregate, classify};
+use state::git::{Changed, GitSnapshot, aggregate, classify};
 use state::project::path::{Folder, RelPath};
 
 fn p(path: &str) -> RelPath {
@@ -33,6 +33,7 @@ fn ignored_dirs_cover_their_contents() {
             (p("target"), Change::Ignored),
             (p("a.rs"), Change::Unstaged(Kind::Deleted)),
         ]),
+        None,
         Vec::new(),
     );
     assert_eq!(snapshot.get(&p("target/debug/x")), Some(GitStatus::Ignored));
@@ -111,6 +112,7 @@ fn changes_list_in_sidebar_order() {
             (p("m.rs"), Change::Conflicted),
             (p("target"), Change::Ignored),
         ]),
+        None,
         Vec::new(),
     );
     let order: Vec<(Group, &str)> = snapshot
@@ -131,7 +133,7 @@ fn changes_list_in_sidebar_order() {
 }
 
 #[test]
-fn a_root_the_enclosing_repository_ignores_is_unlisted_not_lost() {
+fn a_root_the_enclosing_repository_ignores_shows_its_files_as_ignored() {
     let dir = tempfile::tempdir().unwrap();
     git2::Repository::init(dir.path()).unwrap();
     std::fs::write(dir.path().join(".gitignore"), "sub/\n").unwrap();
@@ -142,5 +144,7 @@ fn a_root_the_enclosing_repository_ignores_is_unlisted_not_lost() {
         .unwrap()
         .expect("inside a repository");
     assert!(found.snapshot.paths.is_empty());
-    assert_eq!(found.snapshot.unlisted, [Unlisted::Root(Change::Ignored)]);
+    assert!(found.snapshot.unlisted.is_empty());
+    assert_eq!(found.snapshot.root, Some(Change::Ignored));
+    assert_eq!(found.snapshot.get(&p("a.txt")), Some(GitStatus::Ignored));
 }

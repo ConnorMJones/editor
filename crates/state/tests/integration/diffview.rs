@@ -1,20 +1,21 @@
 use std::fs;
 
 use helix_core::Selection;
-use model::command::ChangesCommand;
+use model::command::{ChangesCommand, Shown};
 use model::git::Group;
 use model::notice::Notice;
 use state::Confirm;
-use state::git::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
+use state::git::diffview::{self, DiffSides, LEFT, Left, RIGHT, Right};
 use state::git::stage::Discard;
 use state::input;
 use state::input::keymap::Context;
-use state::project::session::{self, SessionItem, SessionPane, SessionSidebar};
+use state::project::session::{self, SessionMode, SessionPane, SessionSidebar};
 use state::sidebar::changes::{self, ListCursor, ListRow};
 use state::sidebar::tree::Fold;
-use state::view::layout::{View, Viewport};
+use state::view::layout::Viewport;
 use state::view::panes::{self, Click};
 use state::view::scroll;
+use state::view::tab::{Showing, Tab};
 use state::{Focus, Repo, Sidebar};
 
 use crate::git::{init, stage_path, staged_text};
@@ -22,14 +23,18 @@ use crate::harness::Harness;
 
 const FIVE: &str = "a\nb\nc\nd\ne\n";
 
-fn diff(h: &Harness) -> &DiffView {
-    match h.state.layout.panes()[h.state.layout.focus()].active() {
-        Some(View::Diff(diff)) => diff,
-        Some(View::Text(_) | View::Document(_) | View::Pages(_)) => {
+fn diff(h: &Harness) -> &DiffSides {
+    match h.state.layout.focused().active().map(Tab::showing) {
+        Some(Showing::Diff(_, diff)) => diff,
+        Some(Showing::Source(_) | Showing::Document(..) | Showing::Pages(..)) => {
             panic!("focused tab is not a diff")
         }
         None => panic!("focused pane has no tab"),
     }
+}
+
+fn shown(h: &Harness) -> Shown {
+    h.state.layout.focused().active().map(Tab::shown).unwrap()
 }
 
 /// Draws nothing but records the size of the focused diff, as a frame would.
@@ -55,13 +60,13 @@ fn changed(h: &Harness) -> Vec<(Group, String)> {
 }
 
 #[test]
-fn a_pane_holds_a_file_and_its_diff() {
+fn a_tab_toggles_between_its_file_and_its_diff() {
     let dir = tempfile::tempdir().unwrap();
     init(dir.path(), &[("a.txt", FIVE)]);
     fs::write(dir.path().join("a.txt"), "a\nb\nX\nd\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>3gg<space>d");
-    assert_eq!(h.focused_tabs(), ["a.txt", "±a.txt"]);
+    assert_eq!(h.focused_tabs(), ["±a.txt"]);
     assert_eq!(cursor_line(&h), 2, "the selection carries over");
     show(&mut h, 20);
     let shown = diff(&h);
@@ -69,13 +74,9 @@ fn a_pane_holds_a_file_and_its_diff() {
     assert_eq!(shown.align.sides[LEFT].shades.len(), 1);
     assert_eq!(shown.align.sides[RIGHT].shades[0].lines, 2..3);
 
-    // Toggling back activates the existing text tab.
+    // Toggling back shows the file in the same tab, where the diff left it.
     h.keys("j<space>d");
-    assert_eq!(h.focused_tabs(), ["a.txt", "±a.txt"]);
-    assert!(matches!(
-        h.state.layout.panes()[h.state.layout.focus()].active(),
-        Some(View::Text(_))
-    ));
+    assert_eq!(h.focused_tabs(), ["a.txt"]);
     assert_eq!(cursor_line(&h), 3);
 
     // The diff's buffer side edits the same buffer.
@@ -83,11 +84,6 @@ fn a_pane_holds_a_file_and_its_diff() {
     assert_eq!(h.doc().text, "Za\nb\nX\nd\ne\n");
     h.keys("<space>d");
     assert_eq!(h.doc().text, "Za\nb\nX\nd\ne\n");
-
-    // Closing the diff keeps the buffer the text tab still shows.
-    h.keys("<space>d:bc<ret>");
-    assert_eq!(h.focused_tabs(), ["a.txt"]);
-    assert_eq!(h.state.buffers.len(), 1);
 }
 
 #[test]
@@ -129,14 +125,12 @@ fn next_hunk_past_the_end_opens_the_next_diff() {
     h.keys(":o a.txt<ret><space>d]g");
     assert_eq!(cursor_line(&h), 1);
     h.keys("]g");
-    assert_eq!(h.focused_tabs(), ["a.txt", "±a.txt", "±b.txt*"]);
+    assert_eq!(h.focused_tabs(), ["±a.txt", "±b.txt*"]);
     assert_eq!(cursor_line(&h), 3, "lands on the first change of b.txt");
-    // From a text view it opens text, as before.
+    // From a file it moves on to the next file, which shows as a file too.
     h.keys("<space>d]g");
-    assert!(matches!(
-        h.state.layout.panes()[h.state.layout.focus()].active(),
-        Some(View::Text(_))
-    ));
+    assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
+    assert_eq!(shown(&h), Shown::Source);
 }
 
 #[test]
@@ -341,9 +335,9 @@ fn session_restores_diff_tabs_and_the_changes_sidebar() {
     assert_eq!(saved.sidebar, SessionSidebar::Changes);
     match &saved.panes[0] {
         SessionPane::Tabs { tabs, active, .. } => {
-            assert!(matches!(tabs[0], SessionItem::Text { .. }));
-            assert!(matches!(tabs[1], SessionItem::Diff { .. }));
-            assert_eq!(*active, 1);
+            assert_eq!(tabs.len(), 1);
+            assert_eq!(tabs[0].mode, SessionMode::Diff);
+            assert_eq!(*active, 0);
         }
         SessionPane::Empty => panic!("pane lost its tabs"),
     }
@@ -355,7 +349,7 @@ fn session_restores_diff_tabs_and_the_changes_sidebar() {
         .expect("valid session");
     assert_eq!(session::snapshot(&after.state), saved);
     assert_eq!(after.state.sidebar, Sidebar::Changes(Focus::Editor));
-    assert_eq!(after.focused_tabs(), ["a.txt", "±a.txt"]);
+    assert_eq!(after.focused_tabs(), ["±a.txt"]);
     assert_eq!(cursor_line(&after), 2);
     assert!(matches!(diff(&after).left, Left::Head { .. }));
 }

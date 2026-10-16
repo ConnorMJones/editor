@@ -5,8 +5,8 @@ pub mod prompt;
 use std::num::NonZeroUsize;
 
 use model::command::{
-    CharTarget, Command, Object, Paste, Pending, PickerCommand, SurroundPair, SyntaxObject,
-    TreeCommand,
+    CharTarget, Command, Object, Paste, Pending, PickerCommand, PlainObject, SurroundPair,
+    SyntaxObject, TreeCommand,
 };
 use model::key::{Key, KeyCode, KeySeq};
 use model::mode::Mode;
@@ -14,7 +14,7 @@ use model::register::Register;
 
 use crate::apply::{apply, commit_focused};
 use crate::input::keymap::{Context, Resolved};
-use crate::view::layout::View;
+use crate::view::tab::{Beside, Showing, Tab};
 use crate::{Effect, Files, Focus, Overlay, Sidebar, State, Sticky, view::scroll};
 
 pub fn context(state: &State) -> Context {
@@ -28,12 +28,21 @@ pub fn context(state: &State) -> Context {
         (
             Overlay::None,
             Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
-        ) => match (state.layout.focused().active(), state.input.mode) {
-            (Some(View::Document(_)), _) => Context::Document,
-            (Some(View::Pages(_)), _) => Context::Pages,
-            (Some(View::Text(_) | View::Diff(_)) | None, Mode::Normal) => Context::Normal,
-            (Some(View::Text(_) | View::Diff(_)) | None, Mode::Insert) => Context::Insert,
-            (Some(View::Text(_) | View::Diff(_)) | None, Mode::Select) => Context::Select,
+        ) => match state.layout.focused().active().map(Tab::showing) {
+            Some(Showing::Document(_, _, Beside::Alone)) => Context::Document,
+            Some(Showing::Pages(_, _, Beside::Alone)) => Context::Pages,
+            // Beside its rendering, the source takes the keys.
+            Some(
+                Showing::Source(_)
+                | Showing::Diff(..)
+                | Showing::Document(_, _, Beside::Source(..))
+                | Showing::Pages(_, _, Beside::Source(..)),
+            )
+            | None => match state.input.mode {
+                Mode::Normal => Context::Normal,
+                Mode::Insert => Context::Insert,
+                Mode::Select => Context::Select,
+            },
         },
     }
 }
@@ -194,9 +203,9 @@ fn complete_pending(state: &mut State, pending: Pending, key: Key, out: &mut Vec
         }
         (Pending::TextObject(scope), Some(c), _) => {
             let object = match c {
-                'w' => Some(Object::Word),
-                'W' => Some(Object::LongWord),
-                'p' => Some(Object::Paragraph),
+                'w' => Some(Object::Plain(PlainObject::Word)),
+                'W' => Some(Object::Plain(PlainObject::LongWord)),
+                'p' => Some(Object::Plain(PlainObject::Paragraph)),
                 't' => Some(Object::Syntax(SyntaxObject::Class)),
                 'f' => Some(Object::Syntax(SyntaxObject::Function)),
                 'a' => Some(Object::Syntax(SyntaxObject::Parameter)),
@@ -204,8 +213,8 @@ fn complete_pending(state: &mut State, pending: Pending, key: Key, out: &mut Vec
                 'T' => Some(Object::Syntax(SyntaxObject::Test)),
                 'e' => Some(Object::Syntax(SyntaxObject::Entry)),
                 'x' => Some(Object::Syntax(SyntaxObject::XmlElement)),
-                'm' => Some(Object::ClosestPair),
-                c if !c.is_ascii_alphanumeric() => Some(Object::Pair(c)),
+                'm' => Some(Object::Plain(PlainObject::ClosestPair)),
+                c if !c.is_ascii_alphanumeric() => Some(Object::Plain(PlainObject::Pair(c))),
                 _ => None,
             };
             object.map(|object| Command::SelectTextObject(scope, object))

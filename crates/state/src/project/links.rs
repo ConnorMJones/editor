@@ -8,16 +8,17 @@ use std::sync::Arc;
 
 use helix_core::SmallVec;
 use helix_stdx::rope::RopeSliceExt;
+use model::command::Shown;
 use model::config::OpenAs;
 use model::notice::Notice;
 
 use crate::apply::{self, focused_text};
-use crate::git::navigate::Arrive;
 use crate::project::files::FileIndex;
 use crate::project::path::{Folder, RelPath};
 use crate::render::markdown::{self, BlockKind, Format, LinkTarget, Markdown, WikiLink};
 use crate::text::buffer::{BufferId, Target, TextDoc};
 use crate::view::layout::{NotInLayout, PaneId};
+use crate::view::panes::Arrive;
 use crate::{Confirm, Effect, Overlay, State};
 
 /// File names of the file index, for resolving links by name.
@@ -289,9 +290,10 @@ pub fn follow(
     origin: Origin,
     out: &mut Vec<Effect>,
 ) {
+    // A link followed from a rendering opens the target rendered too, when its kind has one.
     let (pane, arrive) = match origin {
-        Origin::Text(pane) => (pane, Arrive::Text),
-        Origin::Document(pane) => (pane, Arrive::Document),
+        Origin::Text(pane) => (pane, Arrive::In(Shown::Source)),
+        Origin::Document(pane) => (pane, Arrive::In(Shown::Render)),
     };
     match state.layout.set_focus(pane) {
         Ok(()) => {}
@@ -300,13 +302,13 @@ pub fn follow(
     let (dest, heading) = match target {
         LinkTarget::Url(url) => return out.push(Effect::OpenUrl(url.clone())),
         LinkTarget::Heading(heading) => {
-            return apply::place(state, pane, note, arrive, Target::Heading(heading.clone()));
+            return apply::place(state, pane, note, Target::Heading(heading.clone()));
         }
         LinkTarget::Wiki(WikiLink {
             target, heading, ..
         }) if target.trim().is_empty() => match heading {
             Some(heading) => {
-                return apply::place(state, pane, note, arrive, Target::Heading(heading.clone()));
+                return apply::place(state, pane, note, Target::Heading(heading.clone()));
             }
             None => return,
         },
@@ -332,14 +334,6 @@ pub fn follow(
         Resolution::Missing(path) => state.overlay = Overlay::Confirm(Confirm::Create(path)),
         Resolution::File(path) => {
             let full = path.to_path(state.project.root.path());
-            // A link followed from a rendered view opens the target rendered too, when it can be.
-            let arrive = match (arrive, Format::of(&full)) {
-                (Arrive::Document | Arrive::Pages, Some(Format::Markdown)) => Arrive::Document,
-                (Arrive::Document | Arrive::Pages, Some(Format::Typst)) => Arrive::Pages,
-                (Arrive::Document | Arrive::Pages, None) | (Arrive::Text | Arrive::Diff, _) => {
-                    Arrive::Text
-                }
-            };
             // Block references (`#^id`) only open the note.
             let to = heading
                 .filter(|heading| !heading.is_empty() && !heading.starts_with('^'))
@@ -496,7 +490,7 @@ pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
             };
             match found {
                 Some(found) => {
-                    apply::open(state, found, Arrive::Text, None, OpenAs::Permanent, out)
+                    apply::open(state, found, Arrive::AsIs, None, OpenAs::Permanent, out)
                 }
                 None => state.notice = Some(Notice::LinkNotFound { target: picked }),
             }

@@ -9,8 +9,9 @@ use gpui::{
 };
 use model::typeset::{Diagnostic, Origin, PagePoint, SourceFile, Svg};
 use model::units::Pt;
-use state::render::pages::{Fit, PagesView, Zoom};
+use state::render::pages::{Fit, PagesState, Zoom};
 use state::render::typeset::{Compiled, Outcome, Typst};
+use state::text::buffer::BufferId;
 use state::view::layout::PaneId;
 
 use super::raster::svg_canvas;
@@ -106,11 +107,12 @@ pub(super) fn header(
 pub(super) fn item(
     this: &Workspace,
     pane: PaneId,
-    view: &PagesView,
+    buffer: BufferId,
+    view: &PagesState,
     index: usize,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let typst = this.state.compiles.get(view.source.text.buffer());
+    let typst = this.state.compiles.get(buffer);
     let (Some(typst), Some(cache)) = (typst, this.rendered.get(pane)) else {
         return div().into_any_element();
     };

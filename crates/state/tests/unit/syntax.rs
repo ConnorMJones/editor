@@ -59,3 +59,15 @@ fn files_without_a_grammar_are_plain() {
     assert!(matches!(doc.highlight, Highlight::Plain));
     assert!(matches!(doc.highlight.tree(), Err(Notice::NoSyntax)));
 }
+
+#[test]
+fn an_unparsed_doc_waits_for_its_tree() {
+    let loader = helix_core::config::default_lang_loader();
+    let doc = TextDoc::unparsed(Rope::from("fn a() {}\n"), Path::new("a.rs"), &loader);
+    assert!(matches!(
+        doc.highlight,
+        Highlight::Parsing { version: 0, .. }
+    ));
+    assert!(matches!(doc.highlight.tree(), Err(Notice::SyntaxPending)));
+    assert!(doc.highlight.language().is_some());
+}

@@ -1,16 +1,32 @@
-//! Document and pages views of markdown and typst, and the typesetting they ask for.
+//! Renderings of markdown and typst, and the typesetting they ask for.
 
 pub mod document;
 pub mod markdown;
 pub mod pages;
-pub mod source;
 pub mod typeset;
 
-use model::command::{Direction, ReadCommand, ScrollBy};
+use model::command::{Direction, ReadCommand, ScrollBy, Shown};
 
-use crate::render::source::leave;
-use crate::view::layout::View;
+use crate::view::mode;
+use crate::view::tab::{Showing, Tab};
 use crate::{Effect, State};
+
+/// Where a rendering opens: on a source line, placed once the rendering is ready, or at a block
+/// or page it showed before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Opening {
+    Line(usize),
+    Item(usize),
+}
+
+/// A rendering's place and settings, kept while its tab shows it.
+pub trait Rendering: Clone {
+    /// Where a split's source and rendering last agreed; a change on one side moves the other.
+    type Seen: Clone + Copy;
+
+    fn open(at: Opening) -> Self;
+}
 
 /// Brings every open document and pages view up to date with its text.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
@@ -18,22 +34,18 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     pages::sync(state, out);
 }
 
-/// Scrolling and leaving keys, for the kind of view focused.
+/// Scrolling keys for the rendering focused, and leaving it for the source.
 pub fn read(state: &mut State, command: ReadCommand) {
-    match (command, state.layout.focused().active()) {
-        (ReadCommand::Leave, Some(View::Document(view))) => {
-            let link = view.source.link;
-            leave(state, &link)
-        }
-        (ReadCommand::Leave, Some(View::Pages(view))) => {
-            let link = view.source.link;
-            leave(state, &link)
-        }
-        (ReadCommand::Move(motion), Some(View::Document(_))) => document::moved(state, motion),
-        (ReadCommand::Move(motion), Some(View::Pages(_))) => pages::moved(state, motion),
-        (ReadCommand::Leave | ReadCommand::Move(_), Some(View::Text(_) | View::Diff(_)) | None) => {
-        }
-    }
+    let motion = match command {
+        ReadCommand::Leave => return mode::show(state, Shown::Source),
+        ReadCommand::Move(motion) => motion,
+    };
+    let moved = match state.layout.focused().active().map(Tab::showing) {
+        Some(Showing::Document(..)) => document::moved,
+        Some(Showing::Pages(..)) => pages::moved,
+        Some(Showing::Source(_) | Showing::Diff(..)) | None => return,
+    };
+    moved(state, motion)
 }
 
 /// Lines and half viewports a scroll key moves by.

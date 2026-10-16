@@ -15,13 +15,14 @@ use model::theme::{Modifiers, Theme, Tone};
 use slotmap::Key as _;
 use state::git::conflict;
 use state::git::diff::{self, Bases, Diff, Stage};
-use state::git::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
+use state::git::diffview::{self, DiffSides, LEFT, Left, RIGHT, Right};
 use state::text::buffer::Content;
 use state::view::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
-use state::view::layout::{Pane, PaneId, View, Viewport};
+use state::view::layout::{Pane, PaneId, Viewport};
 use state::view::scroll::{self, Gesture, Press, Scrollbar, Unit};
+use state::view::tab::{Showing, Tab};
 
 use crate::fonts::{Fonts, hsla};
 use crate::workspace::Workspace;
@@ -30,7 +31,7 @@ use crate::workspace::Workspace;
 const SCROLLBAR_WIDTH: Pixels = px(8.);
 const MIN_THUMB: f32 = 16.;
 
-/// Draws one side of the view shown in `pane`: a text view, or either side of a diff.
+/// Draws one side of the tab shown in `pane`: its source, or either side of its diff.
 pub struct TextElement {
     pub workspace: Entity<Workspace>,
     pub pane: PaneId,
@@ -219,14 +220,18 @@ impl Element for TextElement {
             Some(Content::Loading { .. }) | None => 1,
         };
         // Both sides of a diff share one gutter width so their text wraps alike.
-        let gutter_lines = match active {
-            Some(View::Diff(DiffView {
-                left: Left::Head { doc, .. },
-                ..
-            })) => len_lines.max(doc.text.len_lines()),
-            Some(View::Diff(_) | View::Text(_) | View::Document(_) | View::Pages(_)) | None => {
-                len_lines
-            }
+        let gutter_lines = match active.map(Tab::showing) {
+            Some(Showing::Diff(
+                _,
+                DiffSides {
+                    left: Left::Head { doc, .. },
+                    ..
+                },
+            )) => len_lines.max(doc.text.len_lines()),
+            Some(
+                Showing::Diff(..) | Showing::Source(_) | Showing::Document(..) | Showing::Pages(..),
+            )
+            | None => len_lines,
         };
         let gutter = Gutter::new(gutter_lines);
         let text_origin = point(
@@ -279,9 +284,9 @@ impl Element for TextElement {
             cache.numbers.swap(0, 1);
             let [frame, previous] = &mut cache.frames;
             let active = state.layout.panes().get(pane).and_then(Pane::active);
-            match (part, active) {
-                (Part::Text, Some(View::Text(view))) => match &state.buffers[view.buffer()].content
-                {
+            let showing = active.map(Tab::showing);
+            match (part, showing.and_then(|showing| showing.source()), showing) {
+                (Part::Text, Some(view), _) => match &state.buffers[view.buffer()].content {
                     Content::Text { doc, .. } => {
                         let conflicts = conflict::current(doc);
                         let drawn = scroll::fit(
@@ -306,15 +311,15 @@ impl Element for TextElement {
                     }
                     Content::Loading { .. } => display::blank(frame, 0),
                 },
-                (Part::Buffer, Some(View::Diff(diff))) => {
-                    let content = &state.buffers[diff.text.buffer()].content;
+                (Part::Buffer, _, Some(Showing::Diff(view, diff))) => {
+                    let content = &state.buffers[view.buffer()].content;
                     match (content, diffview::right(content)) {
                         (Content::Text { doc, .. }, Right::Live) => {
                             let side = &diff.align.sides[RIGHT];
                             let drawn = scroll::fit(
                                 doc,
-                                &diff.text.selection,
-                                diff.text.scroll,
+                                &view.selection,
+                                view.scroll,
                                 viewport,
                                 side.padding(),
                                 &state.languages,
@@ -322,7 +327,7 @@ impl Element for TextElement {
                             display::layout(
                                 frame,
                                 doc,
-                                &diff.text.selection,
+                                &view.selection,
                                 drawn,
                                 &state.languages,
                                 focus,
@@ -336,7 +341,7 @@ impl Element for TextElement {
                         (Content::Loading { .. }, _) => display::blank(frame, 0),
                     }
                 }
-                (Part::Head, Some(View::Diff(diff))) => match &diff.left {
+                (Part::Head, _, Some(Showing::Diff(_, diff))) => match &diff.left {
                     Left::Head {
                         doc, scroll: top, ..
                     } => {
@@ -356,10 +361,12 @@ impl Element for TextElement {
                         display::blank(frame, viewport.rows)
                     }
                 },
-                (Part::Text, Some(View::Diff(_)))
-                | (Part::Head | Part::Buffer, Some(View::Text(_)))
-                | (_, Some(View::Document(_) | View::Pages(_)))
-                | (_, None) => display::blank(frame, 0),
+                (Part::Text, None, _)
+                | (
+                    Part::Head | Part::Buffer,
+                    _,
+                    Some(Showing::Source(_) | Showing::Document(..) | Showing::Pages(..)) | None,
+                ) => display::blank(frame, 0),
             }
 
             let span = tracing::trace_span!("shape rows").entered();

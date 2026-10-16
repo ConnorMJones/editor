@@ -22,13 +22,8 @@ pub struct Indent {
 
 impl Indent {
     pub fn of(doc: &TextDoc, loader: &Loader) -> Indent {
-        let config = doc.highlight.syntax().and_then(|syntax| {
-            loader
-                .language(syntax.root_language())
-                .config()
-                .indent
-                .as_ref()
-        });
+        let config = (doc.highlight.language())
+            .and_then(|language| loader.language(language).config().indent.as_ref());
         match config {
             Some(config) => {
                 let tab_width = config.tab_width.max(1) as u16;
@@ -225,6 +220,7 @@ pub fn layout(
     annotations: &TextAnnotations,
     shades: &[Shade],
 ) {
+    let _span = tracing::trace_span!("display layout").entered();
     frame.rows.clear();
     frame.text.clear();
     frame.runs.clear();

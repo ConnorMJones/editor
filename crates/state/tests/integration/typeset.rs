@@ -7,7 +7,8 @@ use state::render::markdown::Figure;
 use state::render::pages::{self, PagesScroll};
 use state::render::typeset::{self, Compile, Outcome, Render, SPARE, Typst};
 use state::text::buffer::Content;
-use state::view::layout::{PaneId, View};
+use state::view::layout::PaneId;
+use state::view::tab::{Showing, Tab};
 
 use crate::harness::{Harness, Typesetting};
 
@@ -79,8 +80,8 @@ fn preview(h: &Harness) -> PaneId {
         .iter()
         .find(|pane| {
             matches!(
-                h.state.layout.panes()[**pane].active(),
-                Some(View::Pages(_))
+                h.state.layout.panes()[**pane].active().map(Tab::showing),
+                Some(Showing::Pages(..))
             )
         })
         .expect("a preview pane")
@@ -90,7 +91,7 @@ fn preview(h: &Harness) -> PaneId {
 fn figures_go_from_pending_to_ready_and_bad_tex_fails() {
     let (_dir, mut h) = open("note.md", NOTE);
     h.typesetting = Typesetting::Hold;
-    h.keys("<space>v");
+    h.keys("<space>V");
     assert_eq!(h.held.len(), 4, "one request per figure");
     for (source, _) in figures(&h) {
         assert!(
@@ -125,11 +126,12 @@ fn figures_go_from_pending_to_ready_and_bad_tex_fails() {
 #[test]
 fn figures_are_reused_across_parses_and_bounded() {
     let (_dir, mut h) = open("note.md", NOTE);
-    h.keys("<space>v");
+    h.keys("<C-w>v<space>V<C-w>h");
     let cached = h.state.figures.entries.len();
     assert_eq!(cached, 4);
     let generation = h.state.figures.generation;
-    // An edit away from the formulas reparses without typesetting anything again.
+    let mut entries = h.state.figures.entries.values();
+    assert!(entries.all(|entry| (1..=generation).contains(&entry.filled)));
     h.typesetting = Typesetting::Hold;
     h.keys("ggA more<esc>");
     assert!(h.held.is_empty());
@@ -149,15 +151,15 @@ fn figures_are_reused_across_parses_and_bounded() {
             "{source} is still cached"
         );
     }
-    // Closing the preview leaves every figure unreferenced, still bounded.
-    h.keys("<space>v");
+    // Closing the rendering pane leaves every figure unreferenced, still bounded.
+    h.keys("<C-w>l<C-w>q");
     assert!(h.state.figures.entries.len() <= SPARE);
 }
 
 #[test]
 fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     let (dir, mut h) = open("main.typ", DOC);
-    h.keys("<space>v");
+    h.keys("<C-w>v<space>V<C-w>h");
     let (version, preview_state) = typst(&h);
     let compiled = preview_state.pages.as_ref().expect("compiled");
     assert_eq!(compiled.pages.len(), 2);
@@ -212,15 +214,16 @@ fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
         .position(|text| text.to_string().starts_with("#foo"));
     assert_eq!(Some(line), typed, "{errors:?}");
 
-    // Clicking the error strip puts the source cursor on it.
+    // Clicking the error strip shows the source in that tab, its cursor on the error.
     h.keys("gg");
     let pane = preview(&h);
     h.run(|state, out| pages::goto_diagnostic(state, pane, out));
+    assert_eq!(h.state.layout.focus(), pane);
     let text = h.doc().text.slice(..);
     assert_eq!(h.view().selection.primary().cursor_line(text), line);
 
     // Fixing it clears the errors.
-    h.keys("u");
+    h.keys("u<space>V");
     let (version, preview_state) = typst(&h);
     assert_eq!(preview_state.outcome, Outcome::Compiled);
     assert_eq!(preview_state.pages.as_ref().unwrap().version, version);
@@ -254,7 +257,7 @@ fn saving_an_imported_file_recompiles_the_preview() {
     )
     .unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o main.typ<ret><space>v");
+    h.keys(":o main.typ<ret><space>V");
     let lib = dir.path().canonicalize().unwrap().join("lib.typ");
     assert_eq!(typst(&h).1.deps, [lib.clone()]);
     h.typesetting = Typesetting::Hold;
@@ -264,17 +267,14 @@ fn saving_an_imported_file_recompiles_the_preview() {
 }
 
 #[test]
-fn a_following_preview_goes_to_the_page_under_the_cursor() {
+fn split_pages_go_to_the_page_under_the_cursor() {
     let (_dir, mut h) = open("main.typ", DOC);
     h.keys("<space>v");
-    let pane = preview(&h);
+    let pane = h.state.layout.focus();
     // Line 4 is "= Two", on the second page; the cursor sits before its text.
     h.keys("4gg");
-    match h.state.layout.panes()[pane].active() {
-        Some(View::Pages(view)) => match view.scroll {
-            PagesScroll::Point(at) => assert_eq!(at.page, 1),
-            other => panic!("not located: {other:?}"),
-        },
-        Some(View::Text(_) | View::Diff(_) | View::Document(_)) | None => panic!("not rendered"),
+    match h.state.layout.pages(pane).map(|(_, view)| view.scroll) {
+        Some(PagesScroll::Point(at)) => assert_eq!(at.page, 1),
+        other => panic!("not located: {other:?}"),
     }
 }

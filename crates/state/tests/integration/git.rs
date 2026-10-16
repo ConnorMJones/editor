@@ -6,8 +6,10 @@ use model::command::{Answer, Command, FileOp};
 use model::notice::Notice;
 use state::Confirm;
 use state::apply::apply;
-use state::git::diff::{Bases, Diff, Hunk, Stage, Tracked, stage};
+use state::git::diff::{Base, BaseRead, Bases, Diff, Hunk, Stage, Tracked, stage};
 use state::git::stage::Discard;
+use state::git::{RepoPath, track};
+use state::project::path::RelPath;
 use state::text::buffer::Content;
 
 use crate::harness::Harness;
@@ -353,4 +355,20 @@ fn deleted_file_shows_one_removal() {
     assert_eq!(h.view().selection, Selection::point(0));
     h.keys("<space>hr");
     assert_eq!(h.doc().text, "x\ny\n");
+}
+
+#[test]
+fn bases_read_for_a_path_the_buffer_left_are_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &[("a.txt", FIVE)]);
+    std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.txt<ret>");
+    let head = tracked(&h).head.oid();
+    let buffer = h.view().buffer();
+    // As if the buffer moved away from `old.txt` while its read ran.
+    let old = RepoPath(RelPath::parse("old.txt").unwrap());
+    let absent = || BaseRead::Fresh(Base::Absent);
+    h.run(|state, out| track::bases_read(state, buffer, old, Ok([absent(), absent()]), out));
+    assert_eq!(tracked(&h).head.oid(), head);
 }

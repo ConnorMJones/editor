@@ -5,7 +5,6 @@ use helix_core::Selection;
 use model::command::{Command, PickerCommand, PickerKind};
 use model::notice::Notice;
 use state::apply::apply;
-use state::git::navigate::Arrive;
 use state::job::{self, Job};
 use state::text::buffer::{Content, Disk, Jump, Position, Target};
 use state::{Effect, State};
@@ -181,7 +180,6 @@ fn grep_jump_waits_for_the_text() {
         },
         Some(Jump {
             pane: focus,
-            arrive: Arrive::Text,
             to: Target::Position(Position { line: 1, column: 4 }),
         })
     );

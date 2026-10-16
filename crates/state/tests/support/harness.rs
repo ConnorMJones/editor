@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use model::color::{Palette, Rgb};
+use model::command::Shown;
 use model::config::TabsConfig;
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
@@ -13,7 +14,7 @@ use state::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
 
 use state::project::watch::{self, Watcher};
 use state::render::typeset::{Look, Request};
-use state::view::layout::{PaneId, TextView, View};
+use state::view::layout::{PaneId, TextView};
 use state::{Confirm, Effect, Overlay, Root, State, input, job, text::registers};
 
 pub struct Harness {
@@ -246,8 +247,7 @@ impl Harness {
         }
     }
 
-    /// Active view of the focused pane.
-    /// Active view of the focused pane: a text view, or a diff's buffer side.
+    /// Text of the focused pane's active tab, which every mode shares.
     pub fn view(&self) -> &TextView {
         match self.state.layout.focused().active() {
             Some(view) => view.text(),
@@ -283,7 +283,7 @@ impl Harness {
             .map(|view| self.state.buffers[view.buffer()].path.clone())
     }
 
-    /// File names of `pane`'s tabs in bar order, diffs prefixed `±`, rendered views `◉` and the
+    /// File names of `pane`'s tabs in bar order, diffs prefixed `±`, renderings `◉`, splits `◧` and the
     /// preview marked `*`.
     pub fn tabs(&self, pane: PaneId) -> Vec<String> {
         let target = &self.state.layout.panes()[pane];
@@ -293,12 +293,13 @@ impl Harness {
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let path = &self.state.buffers[item.view.buffer()].path;
+                let path = &self.state.buffers[item.tab.buffer()].path;
                 let name = path.file_name().unwrap().to_string_lossy();
-                let kind = match item.view {
-                    View::Text(_) => "",
-                    View::Diff(_) => "±",
-                    View::Document(_) | View::Pages(_) => "◉",
+                let kind = match item.tab.shown() {
+                    Shown::Source => "",
+                    Shown::Diff => "±",
+                    Shown::Render => "◉",
+                    Shown::Split => "◧",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),

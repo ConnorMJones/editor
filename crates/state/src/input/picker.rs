@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::regex::bytes::{Regex, RegexBuilder};
 use model::command::{
-    Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, PickerKind, Take, TreeCommand,
-    WindowCommand,
+    Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, PickerKind, Shown, Take,
+    TreeCommand, WindowCommand,
 };
 use model::window::{Axis, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
@@ -330,8 +330,10 @@ pub static PALETTE: &[(&str, Command)] = &[
     ("conflict-theirs", Command::Resolve(Take::Theirs)),
     ("conflict-both", Command::Resolve(Take::Both)),
     ("conflict-base", Command::Resolve(Take::Base)),
-    ("markdown-preview", Command::RenderedSplit),
-    ("markdown-toggle", Command::ToggleRendered),
+    ("diff-toggle", Command::ToggleMode(Shown::Diff)),
+    ("split-toggle", Command::ToggleMode(Shown::Split)),
+    ("render-toggle", Command::ToggleMode(Shown::Render)),
+    ("mode-next", Command::CycleMode(Direction::Forward)),
     ("export-pdf", Command::ExportPdf),
     (
         "backlinks",

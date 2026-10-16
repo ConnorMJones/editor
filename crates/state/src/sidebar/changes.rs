@@ -2,16 +2,16 @@
 
 use std::path::PathBuf;
 
-use model::command::{ChangesCommand, FileOp};
+use model::command::{ChangesCommand, FileOp, Shown};
 use model::config::OpenAs;
 use model::git::Group;
 use model::notice::Notice;
 
 use crate::git::Changed;
-use crate::git::navigate::Arrive;
 use crate::git::stage::file_op;
 use crate::sidebar::tree::Fold;
 use crate::view::panes;
+use crate::view::panes::Arrive;
 use crate::{Effect, Focus, Repo, Sidebar, State};
 
 /// Entries of each sidebar group in `changes`, which is sorted by group.
@@ -151,8 +151,8 @@ pub(crate) fn open_entry(state: &mut State, index: usize, open: OpenAs, out: &mu
     };
     let path = changed.path.to_path(state.project.root.path());
     let arrive = match changed.group {
-        Group::Conflicts => Arrive::Text,
-        Group::Staged | Group::Changes => Arrive::Diff,
+        Group::Conflicts => Arrive::In(Shown::Source),
+        Group::Staged | Group::Changes => Arrive::In(Shown::Diff),
     };
     state.changes.cursor = Some(ListCursor::Entry(changed));
     crate::apply::open(state, path, arrive, None, open, out);

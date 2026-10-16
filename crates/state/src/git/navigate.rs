@@ -1,45 +1,25 @@
 //! `]g` navigation through hunks and on to the next changed file.
 
 use helix_core::{Range, RopeSlice, Selection};
-use model::command::{Direction, HunkTarget};
+use model::command::{Direction, HunkTarget, Shown};
 use model::config::OpenAs;
 use model::git::Group;
 use model::mode::Mode;
 use model::notice::Notice;
 
 use crate::apply::count_of;
-use crate::git::diff::{Bases, Hunk, Side, next_hunk, prev_hunk};
+use crate::git::diff::{Bases, Diff, Hunk, Side, next_hunk, prev_hunk};
 use crate::project::path::RelPath;
 use crate::text::buffer::{BufferId, Content, Target};
-use crate::view::layout::{PaneId, TabKey, View};
+use crate::view::layout::PaneId;
+use crate::view::panes::Arrive;
 use crate::view::scroll;
 use crate::{Effect, Repo, State};
-
-/// Which view of a file a tab shows; `]g` keeps it when it moves on to the next changed file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Arrive {
-    Text,
-    Diff,
-    Document,
-    Pages,
-}
-
-impl Arrive {
-    pub fn key(self, buffer: BufferId) -> TabKey {
-        match self {
-            Arrive::Text => TabKey::Text(buffer),
-            Arrive::Diff => TabKey::Diff(buffer),
-            Arrive::Document => TabKey::Document(buffer),
-            Arrive::Pages => TabKey::Pages(buffer),
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Landing {
     pub pane: PaneId,
     pub edge: Edge,
-    pub arrive: Arrive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,8 +59,8 @@ pub fn land(state: &mut State, buffer: BufferId) {
         Edge::Last => tracked.hunks.last(),
     };
     let view = (layout.find_pane(landing.pane)).and_then(|pane| {
-        let index = pane.tabs.as_ref()?.find(landing.arrive.key(buffer))?;
-        Some(pane.items_mut()[index].view.text_mut())
+        let index = pane.tabs.as_ref()?.find(buffer)?;
+        Some(pane.items_mut()[index].tab.text_mut())
     });
     match (hunk, view) {
         (Some(hunk), Some(view)) => {
@@ -139,15 +119,16 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
         notice,
         ..
     } = &mut *state;
-    let Some(view) = layout.focused_mut().active_mut() else {
+    let Some(tab) = layout.focused_mut().active_mut() else {
         *notice = Some(Notice::NoBuffer);
         return;
     };
-    let arrive = match view {
-        View::Text(_) | View::Document(_) | View::Pages(_) => Arrive::Text,
-        View::Diff(_) => Arrive::Diff,
+    let arrive = match tab.shown() {
+        Shown::Diff => Shown::Diff,
+        Shown::Split => Shown::Split,
+        Shown::Source | Shown::Render => Shown::Source,
     };
-    let view = view.text_mut();
+    let view = tab.text_mut();
     let buffer = view.buffer();
     let Some(Content::Text { doc, diff, .. }) = buffers.get(buffer).map(|b| &b.content) else {
         return;
@@ -203,7 +184,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
             let path = changed.path.to_path(root);
             // Conflicts are resolved in the text, so they never open as a diff.
             let arrive = match changed.group {
-                Group::Conflicts => Arrive::Text,
+                Group::Conflicts => Shown::Source,
                 Group::Staged | Group::Changes => arrive,
             };
             let edge = match direction {
@@ -213,7 +194,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
             crate::apply::open(
                 state,
                 path,
-                arrive,
+                Arrive::In(arrive),
                 Some(Target::Hunk(edge)),
                 OpenAs::Preview,
                 out,
@@ -222,16 +203,12 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
     }
 }
 
-/// Lands on `edge` of a text buffer once its diff allows; called when `]g` opens a file.
-pub(crate) fn expect_landing(state: &mut State, buffer: BufferId, landing: Landing) {
-    match &mut state.buffers[buffer].content {
-        Content::Text { diff, .. } => match &mut diff.bases {
-            Bases::Loading { landing: waiting } => *waiting = Some(landing),
-            Bases::Tracked(tracked) => tracked.landing = Some(landing),
-            // An untracked file is all new; it opens at its start.
-            Bases::NoRepo | Bases::Untracked => {}
-        },
-        Content::Loading { .. } => {}
+/// Keeps `landing` until the diff's hunks are fresh, for `land` to apply.
+pub(crate) fn expect_landing(diff: &mut Diff, landing: Landing) {
+    match &mut diff.bases {
+        Bases::Loading { landing: waiting } => *waiting = Some(landing),
+        Bases::Tracked(tracked) => tracked.landing = Some(landing),
+        // An untracked file is all new; it opens at its start.
+        Bases::NoRepo | Bases::Untracked => {}
     }
-    land(state, buffer);
 }

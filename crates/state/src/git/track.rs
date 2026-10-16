@@ -1,8 +1,8 @@
 //! Base reads and diff jobs that keep each tracked buffer's hunks current.
 
 use crate::git::diff::{Base, BaseRead, Bases, Compute, Finished, Lines, Outcome, Stamp, Tracked};
-use crate::git::locate;
 use crate::git::navigate::land;
+use crate::git::{RepoPath, locate};
 use crate::job::Job;
 use crate::text::buffer::{BufferId, Content};
 use crate::{Effect, Refresh, Repo, State};
@@ -48,17 +48,27 @@ pub fn request_all_bases(state: &mut State, out: &mut Vec<Effect>) {
     }
 }
 
+/// Takes the bases read for `buffer` at repository `path`.
 pub fn bases_read(
     state: &mut State,
     buffer: BufferId,
+    path: RepoPath,
     result: Result<[BaseRead; 2], git2::Error>,
     out: &mut Vec<Effect>,
 ) {
-    let Some(Content::Text { diff, .. }) = state.buffers.get_mut(buffer).map(|b| &mut b.content)
-    else {
+    let Some(entry) = state.buffers.get_mut(buffer) else {
+        return;
+    };
+    let Content::Text { diff, .. } = &mut entry.content else {
         return;
     };
     let again = std::mem::replace(&mut diff.read, Refresh::Idle);
+    let result = match (result, locate(&state.project.git, &entry.path)) {
+        (Ok(read), Some((_, now))) if now == path => Ok(read),
+        // The buffer was renamed or left the repository while the read ran.
+        (Ok(_), Some(_) | None) => return request_bases(state, buffer, out),
+        (Err(error), _) => Err(error),
+    };
     match result {
         Err(error) => tracing::warn!(%error, "reading diff bases failed"),
         Ok([head, index]) => {

@@ -13,7 +13,7 @@ use model::theme::{Modifiers, Theme};
 use model::typeset::{Display, Svg};
 use model::units::Px;
 use state::project::links::{self, Origin as LinkOrigin, Resolution};
-use state::render::document::{BlockClick, DocumentView, Parsed};
+use state::render::document::{BlockClick, DocumentState, Parsed};
 use state::render::markdown::{
     self, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, Figure, FigureKind, ImageFile,
     Inline, LinkTarget, ListKind, Markdown, RowKind, Span, SpanKind, Task,
@@ -36,7 +36,7 @@ const SCALES: [f32; 6] = [1.6, 1.4, 1.25, 1.12, 1.05, 1.0];
 struct Draw<'a> {
     theme: &'a Theme,
     fonts: &'a Fonts,
-    view: &'a DocumentView,
+    view: &'a DocumentState,
     markdown: &'a Markdown,
     figures: &'a Figures,
     rasters: &'a Rc<RefCell<Rasters>>,
@@ -57,12 +57,12 @@ enum Ink {
 pub(super) fn item(
     this: &Workspace,
     pane: PaneId,
-    view: &DocumentView,
+    buffer: BufferId,
+    view: &DocumentState,
     index: usize,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let (state, theme, fonts) = (&this.state, &this.theme, &this.fonts);
-    let buffer = view.source.text.buffer();
     let Some(Parsed {
         version, markdown, ..
     }) = state.documents.get(buffer)

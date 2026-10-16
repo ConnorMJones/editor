@@ -15,8 +15,9 @@ use crate::git::diff::{Base, Bases, Diff, Hunk, Side, Stamp, Tracked};
 use crate::job::Job;
 use crate::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
 use crate::view::display::{Indent, Shade, text_format};
-use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, View};
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView};
 use crate::view::scroll::{self, Padding};
+use crate::view::tab::{Showing, ShowingMut, Tab};
 use crate::{Effect, State};
 
 /// Index of the HEAD side in per-side arrays.
@@ -24,18 +25,17 @@ pub const LEFT: usize = 0;
 /// Index of the buffer side in per-side arrays.
 pub const RIGHT: usize = 1;
 
+/// What a diff mode adds to its tab: the HEAD side and how the sides line up. The buffer side
+/// is the tab's text, whose selection takes every key and whose scroll drives both sides.
 #[derive(Clone)]
-pub struct DiffView {
-    /// The buffer side; its selection takes every key and its scroll drives both sides.
-    pub text: TextView,
+pub struct DiffSides {
     pub left: Left,
     pub align: Align,
 }
 
-impl DiffView {
-    pub(crate) fn new(buffer: BufferId) -> DiffView {
-        DiffView {
-            text: TextView::new(buffer),
+impl DiffSides {
+    pub(crate) fn new() -> DiffSides {
+        DiffSides {
             left: Left::Pending,
             align: Align::default(),
         }
@@ -377,16 +377,21 @@ pub fn place(
     }
 }
 
-/// The diff view active in `pane` with its buffer's text and tracked bases.
+/// The tab in `pane` when it shows a diff, with its buffer's text and tracked bases.
 fn active<'a>(
     layout: &'a mut Layout,
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
-) -> Option<(&'a mut DiffView, &'a TextDoc, &'a Tracked)> {
-    let View::Diff(diff) = layout.find_pane(pane)?.active_mut()? else {
+) -> Option<(
+    &'a mut TextView,
+    &'a mut DiffSides,
+    &'a TextDoc,
+    &'a Tracked,
+)> {
+    let ShowingMut::Diff(text, sides) = layout.find_pane(pane)?.active_mut()?.showing_mut() else {
         return None;
     };
-    match &buffers[diff.text.buffer()].content {
+    match &buffers[text.buffer()].content {
         Content::Text {
             doc,
             diff:
@@ -395,7 +400,7 @@ fn active<'a>(
                     ..
                 },
             ..
-        } => Some((diff, doc, tracked)),
+        } => Some((text, sides, doc, tracked)),
         Content::Text { .. } | Content::Loading { .. } => None,
     }
 }
@@ -409,10 +414,10 @@ pub fn sync_left(state: &mut State, pane: PaneId) {
         languages,
         ..
     } = state;
-    let Some((diff, doc, tracked)) = active(layout, buffers, pane) else {
+    let Some((text, sides, doc, tracked)) = active(layout, buffers, pane) else {
         return;
     };
-    let DiffView { text, left, align } = diff;
+    let DiffSides { left, align } = sides;
     let Left::Head {
         oid,
         doc: head,
@@ -487,10 +492,13 @@ enum Wanted<'a> {
 /// Brings the left side of the diff active in `pane` up to date with its buffer's HEAD copy,
 /// starting a parse when HEAD moved, then realigns.
 pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
-    let Some(View::Diff(diff)) = state.layout.panes().get(pane).and_then(Pane::active) else {
+    let Some(Showing::Diff(text, diff)) = (state.layout.panes().get(pane))
+        .and_then(Pane::active)
+        .map(Tab::showing)
+    else {
         return;
     };
-    let buffer = diff.text.buffer();
+    let buffer = text.buffer();
     let Some(entry) = state.buffers.get(buffer) else {
         return;
     };
@@ -521,8 +529,8 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
             // Another view of the same blob shares its parse, done or under way.
             let shared = (state.layout.panes().values())
                 .flat_map(Pane::items)
-                .find_map(|item| match &item.view {
-                    View::Diff(other) if other.text.buffer() == buffer => match &other.left {
+                .find_map(|item| match item.tab.showing() {
+                    Showing::Diff(text, other) if text.buffer() == buffer => match &other.left {
                         Left::Head {
                             oid: theirs, doc, ..
                         } if *theirs == oid => Some(Left::Head {
@@ -537,7 +545,10 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
                             None
                         }
                     },
-                    View::Diff(_) | View::Text(_) | View::Document(_) | View::Pages(_) => None,
+                    Showing::Diff(..)
+                    | Showing::Source(_)
+                    | Showing::Document(..)
+                    | Showing::Pages(..) => None,
                 });
             Some(match shared {
                 Some(left) => left,
@@ -556,13 +567,19 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     };
     match (
         next,
-        state.layout.find_pane(pane).and_then(Pane::active_mut),
+        (state.layout.find_pane(pane))
+            .and_then(Pane::active_mut)
+            .map(Tab::showing_mut),
     ) {
-        (Some(left), Some(View::Diff(diff))) => {
+        (Some(left), Some(ShowingMut::Diff(_, diff))) => {
             diff.left = left;
             diff.align = Align::default();
         }
-        (Some(_), Some(View::Text(_) | View::Document(_) | View::Pages(_)) | None) | (None, _) => {}
+        (
+            Some(_),
+            Some(ShowingMut::Source(_) | ShowingMut::Document(..) | ShowingMut::Pages(..)) | None,
+        )
+        | (None, _) => {}
     }
     sync_left(state, pane);
 }
@@ -580,8 +597,8 @@ pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) 
     let doc = Arc::new(doc);
     for pane in state.layout.panes_mut().map(|(_, pane)| pane) {
         for item in pane.items_mut() {
-            match &mut item.view {
-                View::Diff(diff) if diff.text.buffer() == buffer => match diff.left {
+            match item.tab.showing_mut() {
+                ShowingMut::Diff(text, diff) if text.buffer() == buffer => match diff.left {
                     Left::Parsing { oid: waiting } if waiting == oid => {
                         diff.left = Left::Head {
                             oid,
@@ -592,7 +609,10 @@ pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) 
                     }
                     Left::Pending | Left::Absent | Left::Parsing { .. } | Left::Head { .. } => {}
                 },
-                View::Diff(_) | View::Text(_) | View::Document(_) | View::Pages(_) => {}
+                ShowingMut::Diff(..)
+                | ShowingMut::Source(_)
+                | ShowingMut::Document(..)
+                | ShowingMut::Pages(..) => {}
             }
         }
     }
@@ -610,10 +630,10 @@ pub fn click_left(state: &mut State, pane: PaneId, row: u16, col: u16) {
         languages,
         ..
     } = state;
-    let Some((diff, doc, tracked)) = active(layout, buffers, pane) else {
+    let Some((text_view, diff, doc, tracked)) = active(layout, buffers, pane) else {
         return;
     };
-    let content = &buffers[diff.text.buffer()].content;
+    let content = &buffers[text_view.buffer()].content;
     let (
         Left::Head {
             doc: head, scroll, ..
@@ -623,7 +643,7 @@ pub fn click_left(state: &mut State, pane: PaneId, row: u16, col: u16) {
     else {
         return;
     };
-    let format = text_format(diff.text.scroll.viewport, Indent::of(doc, languages));
+    let format = text_format(text_view.scroll.viewport, Indent::of(doc, languages));
     let head_text = head.text.slice(..);
     let annotations = scroll::annotations(head_text, diff.align.sides[LEFT].padding());
     let pos = scroll::char_at(head_text, *scroll, row, col, &format, &annotations);
@@ -634,7 +654,7 @@ pub fn click_left(state: &mut State, pane: PaneId, row: u16, col: u16) {
     let text = doc.text.slice(..);
     let line = facing(hunks, Side::Before, head_text.char_to_line(pos))
         .min(text.len_lines().saturating_sub(1));
-    diff.text.selection = Selection::point(text.line_to_char(line));
+    text_view.selection = Selection::point(text.line_to_char(line));
     drop(annotations);
     scroll::follow_cursor(state, pane);
 }

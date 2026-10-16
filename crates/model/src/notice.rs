@@ -74,6 +74,8 @@ pub enum Notice {
     AlreadyNewest,
     NoSyntax,
     SyntaxFailed,
+    SyntaxPending,
+    NotSplit,
     AlignMultiLine,
     SortNeedsSelections,
     Surround(SurroundError),
@@ -210,6 +212,8 @@ impl std::fmt::Display for Notice {
             Notice::AlreadyNewest => f.write_str("already at newest change"),
             Notice::NoSyntax => f.write_str("syntax tree is not available in current buffer"),
             Notice::SyntaxFailed => f.write_str("the grammar failed on this text; see the log"),
+            Notice::SyntaxPending => f.write_str("still parsing; try again in a moment"),
+            Notice::NotSplit => f.write_str("the tab is not split; space v splits it"),
             Notice::AlignMultiLine => f.write_str("align cannot work with multi line selections"),
             Notice::SortNeedsSelections => {
                 f.write_str("sorting requires multiple selections; split selection first")

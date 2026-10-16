@@ -7,8 +7,8 @@ use helix_core::textobject::{self, TextObject};
 use helix_core::{Range, RopeSlice, match_brackets, search, visual_offset_from_anchor};
 use helix_stdx::rope::RopeSliceExt;
 use model::command::{
-    Align, CharTarget, Direction, Find, Inclusion, Motion, Object, ObjectScope, ScrollBy,
-    SyntaxObject,
+    Align, CharTarget, Direction, Find, Inclusion, Motion, Object, ObjectScope, PlainObject,
+    ScrollBy, SyntaxObject,
 };
 use model::mode::Mode;
 
@@ -309,29 +309,12 @@ pub fn text_object(state: &mut State, scope: ObjectScope, object: Object) {
         ObjectScope::Inside => TextObject::Inside,
         ObjectScope::Around => TextObject::Around,
     };
-    select(state, |doc, selection, loader| {
-        let text = doc.text.slice(..);
-        selection.clone().transform(|range| match object {
-            Object::Word => textobject::textobject_word(text, range, scope, count, false),
-            Object::LongWord => textobject::textobject_word(text, range, scope, count, true),
-            Object::Paragraph => textobject::textobject_paragraph(text, range, scope, count),
-            Object::ClosestPair => textobject::textobject_pair_surround_closest(
-                doc.highlight.syntax(),
-                text,
-                range,
-                scope,
-                count,
-            ),
-            Object::Pair(ch) => textobject::textobject_pair_surround(
-                doc.highlight.syntax(),
-                text,
-                range,
-                scope,
-                ch,
-                count,
-            ),
-            Object::Syntax(object) => match doc.highlight.syntax() {
-                Some(syntax) => textobject::textobject_treesitter(
+    match object {
+        Object::Syntax(object) => try_select(state, |doc, selection, loader| {
+            let syntax = doc.highlight.tree()?;
+            let text = doc.text.slice(..);
+            Ok(selection.clone().transform(|range| {
+                textobject::textobject_treesitter(
                     text,
                     range,
                     scope,
@@ -339,11 +322,38 @@ pub fn text_object(state: &mut State, scope: ObjectScope, object: Object) {
                     syntax,
                     loader,
                     count,
+                )
+            }))
+        }),
+        // Pairs use the syntax tree when there is one, and plain text otherwise.
+        Object::Plain(object) => select(state, |doc, selection, _| {
+            let text = doc.text.slice(..);
+            selection.clone().transform(|range| match object {
+                PlainObject::Word => textobject::textobject_word(text, range, scope, count, false),
+                PlainObject::LongWord => {
+                    textobject::textobject_word(text, range, scope, count, true)
+                }
+                PlainObject::Paragraph => {
+                    textobject::textobject_paragraph(text, range, scope, count)
+                }
+                PlainObject::ClosestPair => textobject::textobject_pair_surround_closest(
+                    doc.highlight.syntax(),
+                    text,
+                    range,
+                    scope,
+                    count,
                 ),
-                None => range,
-            },
-        })
-    });
+                PlainObject::Pair(ch) => textobject::textobject_pair_surround(
+                    doc.highlight.syntax(),
+                    text,
+                    range,
+                    scope,
+                    ch,
+                    count,
+                ),
+            })
+        }),
+    }
 }
 
 /// `C-b C-f C-u C-d`, page keys and `zj zk`, as helix's `scroll` with and without cursor sync.

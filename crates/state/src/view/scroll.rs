@@ -16,7 +16,8 @@ use crate::git::diffview::{self, RIGHT, Right};
 use crate::text::buffer::{Buffer, BufferId, Content, TextDoc};
 use crate::text::registers::ClipboardUse;
 use crate::view::display::{Fillers, Indent, text_format};
-use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, View, Viewport};
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, Viewport};
+use crate::view::tab::{BesideMut, ShowingMut};
 use crate::{Effect, State};
 
 /// Rows kept between the primary cursor and the viewport edges.
@@ -349,25 +350,30 @@ pub(crate) fn pane_text<'a>(
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
 ) -> Option<Pointed<'a>> {
-    let view = layout.find_pane(pane)?.active_mut()?;
-    let content = &buffers[view.buffer()].content;
+    let tab = layout.find_pane(pane)?.active_mut()?;
+    let content = &buffers[tab.buffer()].content;
     let Content::Text { doc, .. } = content else {
         return None;
     };
-    Some(match view {
-        View::Text(view) => Pointed {
+    Some(match tab.showing_mut() {
+        ShowingMut::Source(view)
+        | ShowingMut::Document(view, _, BesideMut::Source(..))
+        | ShowingMut::Pages(view, _, BesideMut::Source(..)) => Pointed {
             view,
             doc,
             padding: crate::git::conflict::padding(doc),
             right: Right::Live,
         },
-        View::Diff(diff) => Pointed {
-            view: &mut diff.text,
+        ShowingMut::Diff(view, diff) => Pointed {
+            view,
             doc,
             padding: diff.align.sides[RIGHT].padding(),
             right: diffview::right(content),
         },
-        View::Document(_) | View::Pages(_) => return None,
+        ShowingMut::Document(_, _, BesideMut::Alone)
+        | ShowingMut::Pages(_, _, BesideMut::Alone) => {
+            return None;
+        }
     })
 }
 

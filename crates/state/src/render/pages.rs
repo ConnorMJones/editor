@@ -1,38 +1,31 @@
-//! Pages views: typst laid out as fixed pages.
+//! Typst rendered as fixed pages.
 
 use helix_core::SmallVec;
-use model::command::{Direction, PagesCommand, ReadMove, ZoomBy};
+use model::command::{Direction, PagesCommand, ReadMove, Shown, ZoomBy};
 use model::config::OpenAs;
 use model::notice::Notice;
 use model::typeset::{LineColumn, Origin, PagePoint, SourceFile};
 use model::units::Px;
 use slotmap::SecondaryMap;
 
-use crate::git::navigate::Arrive;
 use crate::project::Project;
-use crate::render::source::{Link, Source};
-use crate::render::step;
 use crate::render::typeset::{self, Compiled, Locate, Outcome, Typst};
+use crate::render::{Opening, Rendering, step};
 use crate::text::buffer::{Buffer, BufferId, Position, Target};
-use crate::view::layout::{Pane, PaneId, View};
-use crate::view::panes;
+use crate::view::layout::{Pane, PaneId};
+use crate::view::panes::{self, Arrive};
+use crate::view::tab::{BesideMut, Showing, Tab};
 use crate::{Effect, State};
 
 /// The compile state of every buffer a pages view shows.
 pub type Compiles = SecondaryMap<BufferId, Typst>;
 
+/// Where a rendered typst tab stands, and how its pages scale.
 #[derive(Clone)]
-pub struct PagesView {
-    pub source: Source<PagesSeen>,
+pub struct PagesState {
     pub scroll: PagesScroll,
     pub fit: Fit,
     pub zoom: Zoom,
-}
-
-/// The source cursor the view last went to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PagesSeen {
-    pub cursor: usize,
 }
 
 /// Where a pages view stands, or is asked to move for the host to measure.
@@ -97,11 +90,21 @@ impl Zoom {
     }
 }
 
-impl PagesView {
-    pub(crate) fn new(source: Source<PagesSeen>, scroll: PagesScroll) -> PagesView {
-        PagesView {
-            source,
-            scroll,
+/// The source cursor a split's pages last went to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PagesSeen {
+    pub cursor: usize,
+}
+
+impl Rendering for PagesState {
+    type Seen = PagesSeen;
+
+    fn open(at: Opening) -> PagesState {
+        PagesState {
+            scroll: match at {
+                Opening::Line(line) => PagesScroll::Line(line),
+                Opening::Item(page) => PagesScroll::page(page),
+            },
             fit: Fit::Width,
             zoom: Zoom::FIT,
         }
@@ -137,16 +140,18 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         ..
     } = state;
     compiles.retain(|buffer, _| {
-        (layout.panes().values().flat_map(Pane::items)).any(|item| match &item.view {
-            View::Pages(view) => view.source.text.buffer() == buffer,
-            View::Text(_) | View::Diff(_) | View::Document(_) => false,
+        (layout.panes().values().flat_map(Pane::items)).any(|item| match item.tab.showing() {
+            Showing::Pages(text, ..) => text.buffer() == buffer,
+            Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => false,
         })
     });
     let shown: SmallVec<[(PaneId, BufferId); 4]> = (layout.panes().iter())
-        .filter_map(|(pane, target)| match target.active() {
-            Some(View::Pages(view)) => Some((pane, view.source.text.buffer())),
-            Some(View::Text(_) | View::Diff(_) | View::Document(_)) | None => None,
-        })
+        .filter_map(
+            |(pane, target)| match target.active().map(|tab| tab.showing()) {
+                Some(Showing::Pages(text, ..)) => Some((pane, text.buffer())),
+                Some(Showing::Source(_) | Showing::Diff(..) | Showing::Document(..)) | None => None,
+            },
+        )
         .collect();
     let mut wanted: SmallVec<[BufferId; 4]> = SmallVec::new();
     for &(_, buffer) in &shown {
@@ -163,41 +168,27 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         let Some(doc) = buffers[buffer].doc() else {
             continue;
         };
-        let source = match layout.pages(pane).map(|view| view.source.link) {
-            Some(Link::Follows { pane: source, .. }) => match layout.panes()[source].active() {
-                Some(View::Text(text)) if text.buffer() == buffer => {
-                    let rope = doc.text.slice(..);
-                    let at = text.selection.primary().cursor(rope);
-                    Some((rope.char_to_line(at), rope.char_to_byte(at)))
-                }
-                Some(View::Text(_) | View::Diff(_) | View::Document(_) | View::Pages(_)) | None => {
-                    None
-                }
-            },
-            Some(Link::Standalone) | None => None,
-        };
-        let (Some(view), Some(typst)) = (layout.pages_mut(pane), compiles.get_mut(buffer)) else {
+        let (Some((text, view, beside)), Some(typst)) =
+            (layout.pages_mut(pane), compiles.get_mut(buffer))
+        else {
             continue;
         };
-        // Lines are found on the pages by the typesetter, once there are pages.
-        let wanted = match (&typst.pages, view.scroll, &mut view.source.link, source) {
-            (None, _, _, _) => None,
-            (Some(_), PagesScroll::Line(line), _, _) => {
+        let rope = doc.text.slice(..);
+        let at = text.selection.primary().cursor(rope);
+        let cursor = rope.char_to_line(at);
+        // Lines are found on the pages by the typesetter, once there are pages; beside the source
+        // the pages follow its cursor.
+        let wanted = match (&typst.pages, view.scroll, beside) {
+            (None, _, _) => None,
+            (Some(_), PagesScroll::Line(line), _) => {
                 Some(doc.text.line_to_byte(line.min(doc.text.len_lines() - 1)))
             }
-            (
-                Some(_),
-                _,
-                Link::Follows {
-                    seen: Some(seen), ..
-                },
-                Some((cursor, _)),
-            ) if seen.cursor == cursor => None,
-            (Some(_), _, Link::Follows { seen, .. }, Some((cursor, byte))) => {
+            (Some(_), _, BesideMut::Source(Some(seen), _)) if seen.cursor == cursor => None,
+            (Some(_), _, BesideMut::Source(seen, _)) => {
                 *seen = Some(PagesSeen { cursor });
-                Some(byte)
+                Some(rope.char_to_byte(at))
             }
-            (Some(_), _, Link::Follows { .. } | Link::Standalone, _) => None,
+            (Some(_), _, BesideMut::Alone) => None,
         };
         let main = &buffers[buffer].path;
         match (wanted, typst.locate) {
@@ -220,7 +211,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
 /// The host measured `pane`'s pages view at `to`.
 pub fn scrolled(state: &mut State, pane: PaneId, to: PagesAt) {
     match state.layout.pages_mut(pane) {
-        Some(view) => view.scroll = PagesScroll::At(to),
+        Some((_, view, _)) => view.scroll = PagesScroll::At(to),
         None => {}
     }
 }
@@ -232,7 +223,7 @@ pub fn moved(state: &mut State, motion: ReadMove) {
     let State {
         layout, compiles, ..
     } = state;
-    let Some(view) = layout.pages_mut(focus) else {
+    let Some((text, view, _)) = layout.pages_mut(focus) else {
         return;
     };
     let Some(from) = view.scroll.anchor() else {
@@ -250,7 +241,7 @@ pub fn moved(state: &mut State, motion: ReadMove) {
         }
         ReadMove::Top => PagesScroll::page(0),
         ReadMove::Bottom => {
-            let pages = (compiles.get(view.source.text.buffer()))
+            let pages = (compiles.get(text.buffer()))
                 .and_then(|typst| typst.pages.as_ref())
                 .map_or(0, |compiled| compiled.pages.len());
             PagesScroll::page(pages.saturating_sub(1))
@@ -277,7 +268,7 @@ fn moved_by(scroll: PagesScroll, from: PagesAt, step: PagesMotion) -> PagesScrol
 /// Keys only pages views have.
 pub fn command(state: &mut State, command: PagesCommand) {
     let focus = state.layout.focus();
-    let Some(view) = state.layout.pages_mut(focus) else {
+    let Some((_, view, _)) = state.layout.pages_mut(focus) else {
         return;
     };
     match command {
@@ -311,10 +302,10 @@ pub fn command(state: &mut State, command: PagesCommand) {
 
 /// A click at `at` on a page of `pane`'s pages view; the typesetter says where it leads.
 pub fn click_page(state: &mut State, pane: PaneId, at: PagePoint, out: &mut Vec<Effect>) {
-    let Some(view) = state.layout.pages(pane) else {
+    let Some((text, _)) = state.layout.pages(pane) else {
         return;
     };
-    let Buffer { path, .. } = &state.buffers[view.source.text.buffer()];
+    let Buffer { path, .. } = &state.buffers[text.buffer()];
     out.push(Effect::Typeset(typeset::Request::Click {
         pane,
         main: path.clone(),
@@ -325,10 +316,10 @@ pub fn click_page(state: &mut State, pane: PaneId, at: PagePoint, out: &mut Vec<
 /// A click on the diagnostic strip of `pane`'s pages view: the first error, else the first
 /// warning, opens at its place.
 pub fn goto_diagnostic(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
-    let Some(view) = state.layout.pages(pane) else {
+    let Some((text, _)) = state.layout.pages(pane) else {
         return;
     };
-    let Some(typst) = state.compiles.get(view.source.text.buffer()) else {
+    let Some(typst) = state.compiles.get(text.buffer()) else {
         return;
     };
     let first = match (&typst.outcome, &typst.pages) {
@@ -358,7 +349,7 @@ pub fn goto_diagnostic(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     goto_source(state, pane, path, at, out);
 }
 
-/// Opens `path` as text with the cursor at `at`, in the pane `pane` follows, else in `pane`.
+/// Opens `path` in `pane` with the cursor at `at`: as source, or beside its rendering in a split.
 pub fn goto_source(
     state: &mut State,
     pane: PaneId,
@@ -366,15 +357,21 @@ pub fn goto_source(
     at: LineColumn,
     out: &mut Vec<Effect>,
 ) {
-    let target = match state.layout.pages(pane).map(|view| view.source.link) {
-        Some(Link::Follows { pane: source, .. }) => source,
-        Some(Link::Standalone) | None => pane,
+    let arrive = match state
+        .layout
+        .panes()
+        .get(pane)
+        .and_then(Pane::active)
+        .map(Tab::shown)
+    {
+        Some(Shown::Split) => Arrive::In(Shown::Split),
+        Some(Shown::Source | Shown::Diff | Shown::Render) | None => Arrive::In(Shown::Source),
     };
-    panes::focus_pane(state, target);
+    panes::focus_pane(state, pane);
     crate::apply::open(
         state,
         path,
-        Arrive::Text,
+        arrive,
         Some(Target::Position(Position {
             line: at.line,
             column: at.column,

@@ -21,9 +21,9 @@ use crate::render::document::Documents;
 use crate::render::markdown::FigureKind;
 use crate::render::markdown::{Block, BlockKind, Figure, Format, SpanKind};
 use crate::render::pages::{self, Compiles, PagesScroll};
-use crate::render::source::Link;
 use crate::text::buffer::{Buffer, BufferId, Content};
-use crate::view::layout::{PaneId, View};
+use crate::view::layout::PaneId;
+use crate::view::tab::{BesideMut, ShowingMut, Tab};
 use crate::{Effect, State};
 
 /// Unreferenced figures kept for undo and reopened views; older ones are evicted.
@@ -104,7 +104,7 @@ pub enum Done {
 pub struct Figures {
     pub look: Look,
     pub entries: HashMap<Figure, Entry>,
-    /// Bumped whenever an entry is filled or evicted.
+    /// Bumped whenever an entry is filled; eviction leaves it, as no parse references an evicted entry.
     pub generation: u64,
     /// Bumped by every reference walk; entries seen by the latest walk are live.
     pub clock: u64,
@@ -114,6 +114,8 @@ pub struct Entry {
     pub render: Render,
     /// `Figures::clock` of the last walk that found the figure in a parsed document.
     pub used: u64,
+    /// `Figures::generation` when the render arrived; 0 while pending.
+    pub filled: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -235,7 +237,7 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
         look,
         entries,
         clock,
-        generation,
+        ..
     } = figures;
     for markdown in documents.values().map(|parsed| &parsed.markdown) {
         each_figure(&markdown.blocks, |figure, source| {
@@ -247,6 +249,7 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
                         Entry {
                             render: Render::Pending,
                             used: *clock,
+                            filled: 0,
                         },
                     );
                     out.push(Effect::Typeset(Request::Figure {
@@ -280,7 +283,6 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
                 }
                 (true, 0) | (false, _) => true,
             });
-            *generation += 1;
         }
     }
 }
@@ -381,6 +383,7 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                         }
                     };
                     figures.generation += 1;
+                    entry.filled = figures.generation;
                 }
                 (true, Some(_) | None) | (false, _) => {}
             }
@@ -463,20 +466,17 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                 }
                 Locate::Running | Locate::Idle => Locate::Idle,
             };
-            // Views waiting on a source line, or following their source, go to where it landed.
+            // Pages waiting on a source line, or beside the source, go to where it landed.
             for pane in layout.panes_mut().map(|(_, pane)| pane) {
-                let Some(View::Pages(view)) = pane.active_mut() else {
+                let Some(ShowingMut::Pages(text, view, beside)) =
+                    pane.active_mut().map(Tab::showing_mut)
+                else {
                     continue;
                 };
-                match (
-                    view.source.text.buffer() == buffer,
-                    view.scroll,
-                    view.source.link,
-                    at,
-                ) {
+                match (text.buffer() == buffer, view.scroll, beside, at) {
                     (true, PagesScroll::Line(_), _, None) => view.scroll = PagesScroll::page(0),
                     (true, PagesScroll::Line(_), _, Some(at))
-                    | (true, _, Link::Follows { .. }, Some(at)) => {
+                    | (true, _, BesideMut::Source(..), Some(at)) => {
                         view.scroll = PagesScroll::Point(at)
                     }
                     (true, _, _, _) | (false, _, _, _) => {}
@@ -494,7 +494,7 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
             })) => state.notice = Some(Notice::OutsideProject { file }),
             Ok(Some(Jump::Url(url))) => out.push(Effect::OpenUrl(url)),
             Ok(Some(Jump::Page(at))) => match state.layout.pages_mut(pane) {
-                Some(view) => view.scroll = PagesScroll::Point(at),
+                Some((_, view, _)) => view.scroll = PagesScroll::Point(at),
                 None => {}
             },
             Ok(None) => {}

@@ -5,10 +5,10 @@ use model::config::OpenAs;
 use model::window::{Axis, Side};
 use slotmap::{SlotMap, new_key_type};
 
-use crate::git::diffview::DiffView;
-use crate::render::document::DocumentView;
-use crate::render::pages::PagesView;
+use crate::render::document::{DocumentSeen, DocumentState};
+use crate::render::pages::{PagesSeen, PagesState};
 use crate::text::buffer::BufferId;
+use crate::view::tab::{BesideMut, Showing, ShowingMut, Tab};
 
 new_key_type! {
     pub struct PaneId;
@@ -213,48 +213,60 @@ impl Layout {
     pub fn selection_of(&self, buffer: BufferId) -> Selection {
         (self.panes.values())
             .flat_map(Pane::items)
-            .map(|item| item.view.text())
+            .map(|item| item.tab.text())
             .find(|view| view.buffer() == buffer)
             .map_or_else(|| Selection::point(0), |view| view.selection.clone())
     }
 
-    /// `pane`'s active tab, when it is a document view.
-    pub fn document(&self, pane: PaneId) -> Option<&DocumentView> {
-        match self.panes.get(pane)?.active()? {
-            View::Document(view) => Some(view),
-            View::Text(_) | View::Diff(_) | View::Pages(_) => None,
+    /// `pane`'s active tab with its text, when it shows a rendered document.
+    pub fn document(&self, pane: PaneId) -> Option<(&TextView, &DocumentState)> {
+        match self.panes.get(pane)?.active()?.showing() {
+            Showing::Document(text, state, _) => Some((text, state)),
+            Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..) => None,
         }
     }
 
-    pub fn document_mut(&mut self, pane: PaneId) -> Option<&mut DocumentView> {
-        match self.panes.get_mut(pane)?.active_mut()? {
-            View::Document(view) => Some(view),
-            View::Text(_) | View::Diff(_) | View::Pages(_) => None,
+    /// As `document`, with where the rendering sits.
+    pub fn document_mut(
+        &mut self,
+        pane: PaneId,
+    ) -> Option<(
+        &mut TextView,
+        &mut DocumentState,
+        BesideMut<'_, DocumentSeen>,
+    )> {
+        match self.panes.get_mut(pane)?.active_mut()?.showing_mut() {
+            ShowingMut::Document(text, state, beside) => Some((text, state, beside)),
+            ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Pages(..) => None,
         }
     }
 
-    /// `pane`'s active tab, when it is a pages view.
-    pub fn pages(&self, pane: PaneId) -> Option<&PagesView> {
-        match self.panes.get(pane)?.active()? {
-            View::Pages(view) => Some(view),
-            View::Text(_) | View::Diff(_) | View::Document(_) => None,
+    /// `pane`'s active tab with its text, when it shows rendered pages.
+    pub fn pages(&self, pane: PaneId) -> Option<(&TextView, &PagesState)> {
+        match self.panes.get(pane)?.active()?.showing() {
+            Showing::Pages(text, state, _) => Some((text, state)),
+            Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => None,
         }
     }
 
-    pub fn pages_mut(&mut self, pane: PaneId) -> Option<&mut PagesView> {
-        match self.panes.get_mut(pane)?.active_mut()? {
-            View::Pages(view) => Some(view),
-            View::Text(_) | View::Diff(_) | View::Document(_) => None,
+    /// As `pages`, with where the rendering sits.
+    pub fn pages_mut(
+        &mut self,
+        pane: PaneId,
+    ) -> Option<(&mut TextView, &mut PagesState, BesideMut<'_, PagesSeen>)> {
+        match self.panes.get_mut(pane)?.active_mut()?.showing_mut() {
+            ShowingMut::Pages(text, state, beside) => Some((text, state, beside)),
+            ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Document(..) => None,
         }
     }
 
-    /// Makes every preview tab of `buffer`, text or diff, permanent.
+    /// Makes `buffer`'s preview tab permanent in every pane.
     pub fn keep(&mut self, buffer: BufferId) {
         for pane in self.panes.values_mut() {
             match &mut pane.tabs {
                 Some(tabs)
                     if tabs.preview.is_some_and(|preview| {
-                        tabs.items[preview.index].view.buffer() == buffer
+                        tabs.items[preview.index].tab.buffer() == buffer
                     }) =>
                 {
                     tabs.keep()
@@ -272,8 +284,7 @@ impl Layout {
         id
     }
 
-    /// Removes `pane`, moving focus from it to the pane beside where it was; views following
-    /// it become standalone.
+    /// Removes `pane`, moving focus from it to the pane beside where it was.
     pub fn close(&mut self, pane: PaneId) -> Result<(), CloseError> {
         let beside = match &self.root {
             Node::Pane(_) => return Err(CloseError::LastPane),
@@ -282,7 +293,6 @@ impl Layout {
             }
         };
         self.panes.remove(pane);
-        self.unlink(|followed| followed == pane);
         match self.focus == pane {
             true => self.focus = beside,
             false => {}
@@ -311,20 +321,6 @@ impl Layout {
         let focus = self.focus;
         self.panes.retain(|id, _| id == focus);
         self.root = Node::Pane(focus);
-        self.unlink(|followed| followed != focus);
-    }
-
-    fn unlink(&mut self, gone: impl Fn(PaneId) -> bool) {
-        let views = (self.panes.values_mut())
-            .filter_map(|pane| pane.tabs.as_mut())
-            .flat_map(|tabs| tabs.items.iter_mut());
-        for item in views {
-            match &mut item.view {
-                View::Document(view) => view.source.link.unlink_if(&gone),
-                View::Pages(view) => view.source.link.unlink_if(&gone),
-                View::Text(_) | View::Diff(_) => {}
-            }
-        }
     }
 
     /// Panes in reading order.
@@ -576,14 +572,14 @@ pub struct Pane {
 impl Pane {
     pub const EMPTY: Pane = Pane { tabs: None };
 
-    pub fn active(&self) -> Option<&View> {
-        self.tabs.as_ref().map(|tabs| &tabs.items[tabs.active].view)
+    pub fn active(&self) -> Option<&Tab> {
+        self.tabs.as_ref().map(|tabs| &tabs.items[tabs.active].tab)
     }
 
-    pub fn active_mut(&mut self) -> Option<&mut View> {
+    pub fn active_mut(&mut self) -> Option<&mut Tab> {
         self.tabs
             .as_mut()
-            .map(|tabs| &mut tabs.items[tabs.active].view)
+            .map(|tabs| &mut tabs.items[tabs.active].tab)
     }
 
     pub fn items(&self) -> &[Item] {
@@ -624,73 +620,9 @@ pub enum PreviewKind {
 }
 
 pub struct Item {
-    pub view: View,
+    pub tab: Tab,
     /// Last activation; closing the active tab activates the most recent other one.
     pub used: Tick,
-}
-
-/// What a tab shows.
-#[derive(Clone)]
-pub enum View {
-    Text(TextView),
-    Diff(DiffView),
-    Document(DocumentView),
-    Pages(PagesView),
-}
-
-/// Identifies a tab within its pane, so one pane can hold a file and its diff.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TabKey {
-    Text(BufferId),
-    Diff(BufferId),
-    Document(BufferId),
-    Pages(BufferId),
-}
-
-impl TabKey {
-    pub fn buffer(self) -> BufferId {
-        match self {
-            TabKey::Text(buffer)
-            | TabKey::Diff(buffer)
-            | TabKey::Document(buffer)
-            | TabKey::Pages(buffer) => buffer,
-        }
-    }
-}
-
-impl View {
-    pub fn key(&self) -> TabKey {
-        match self {
-            View::Text(view) => TabKey::Text(view.buffer),
-            View::Diff(diff) => TabKey::Diff(diff.text.buffer),
-            View::Document(view) => TabKey::Document(view.source.text.buffer),
-            View::Pages(view) => TabKey::Pages(view.source.text.buffer),
-        }
-    }
-
-    pub fn buffer(&self) -> BufferId {
-        self.key().buffer()
-    }
-
-    /// The buffer's selection and scroll: the text view, a diff's right side, or the source
-    /// position a document or pages view returns to.
-    pub fn text(&self) -> &TextView {
-        match self {
-            View::Text(view) => view,
-            View::Diff(diff) => &diff.text,
-            View::Document(view) => &view.source.text,
-            View::Pages(view) => &view.source.text,
-        }
-    }
-
-    pub fn text_mut(&mut self) -> &mut TextView {
-        match self {
-            View::Text(view) => view,
-            View::Diff(diff) => &mut diff.text,
-            View::Document(view) => &mut view.source.text,
-            View::Pages(view) => &mut view.source.text,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -732,9 +664,9 @@ pub enum InvalidTabs {
 }
 
 impl Tabs {
-    pub(crate) fn new(view: View, open: OpenAs, now: Tick) -> Tabs {
+    pub(crate) fn new(tab: Tab, open: OpenAs, now: Tick) -> Tabs {
         Tabs {
-            items: vec![Item { view, used: now }],
+            items: vec![Item { tab, used: now }],
             active: 0,
             preview: match open {
                 OpenAs::Preview => Some(Preview {
@@ -746,9 +678,9 @@ impl Tabs {
         }
     }
 
-    pub(crate) fn split_copy(view: View, now: Tick) -> Tabs {
+    pub(crate) fn split_copy(tab: Tab, now: Tick) -> Tabs {
         Tabs {
-            items: vec![Item { view, used: now }],
+            items: vec![Item { tab, used: now }],
             active: 0,
             preview: Some(Preview {
                 index: 0,
@@ -763,10 +695,10 @@ impl Tabs {
         preview: Option<usize>,
     ) -> Result<Tabs, InvalidTabs> {
         let duplicate = items.iter().enumerate().find_map(|(index, item)| {
-            let key = item.view.key();
+            let buffer = item.tab.buffer();
             items[..index]
                 .iter()
-                .any(|earlier| earlier.view.key() == key)
+                .any(|earlier| earlier.tab.buffer() == buffer)
                 .then_some(index)
         });
         match (items.len(), duplicate, preview) {
@@ -801,8 +733,10 @@ impl Tabs {
         self.preview.map(|preview| preview.index)
     }
 
-    pub fn find(&self, key: TabKey) -> Option<usize> {
-        self.items.iter().position(|item| item.view.key() == key)
+    pub fn find(&self, buffer: BufferId) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|item| item.tab.buffer() == buffer)
     }
 
     /// Stale indices are ignored.
@@ -823,9 +757,9 @@ impl Tabs {
 
     /// Zed's rule: activates an open item, replaces an active preview in place, else inserts
     /// after the active tab; returns the displaced preview.
-    pub(crate) fn open(&mut self, view: View, open: OpenAs, now: Tick) -> Option<Item> {
-        let item = Item { view, used: now };
-        match (self.find(item.view.key()), open, self.preview) {
+    pub(crate) fn open(&mut self, tab: Tab, open: OpenAs, now: Tick) -> Option<Item> {
+        let item = Item { tab, used: now };
+        match (self.find(item.tab.buffer()), open, self.preview) {
             (Some(index), OpenAs::Permanent, _) => {
                 match self.preview.map(|preview| preview.index) == Some(index) {
                     true => self.preview = None,
