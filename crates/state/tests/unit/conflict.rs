@@ -2,7 +2,7 @@ use std::path::Path;
 
 use helix_core::{Rope, Selection};
 use model::theme::Background;
-use state::git::conflict::{self, Conflict, Conflicts, Label, Side};
+use state::git::conflict::{self, Conflict, Conflicts, Label, Sections, Side};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, RowKind, Shade};
 use state::view::layout::{Scroll, Viewport};
@@ -17,7 +17,7 @@ fn parse(text: &str) -> Conflicts {
 fn two_way(open: usize, separator: usize, close: usize) -> Conflict {
     Conflict {
         open,
-        base: None,
+        sections: Sections::TwoWay,
         separator,
         close,
     }
@@ -40,7 +40,7 @@ fn parses_a_two_way_conflict_with_sections_and_labels() {
     assert_eq!(conflicts.list, [two_way(1, 4, 6)]);
     let conflict = conflicts.list[0];
     assert_eq!(conflict.ours(), 2..4);
-    assert_eq!(conflict.base_lines(), None);
+    assert_eq!(conflict.sections, Sections::TwoWay);
     assert_eq!(conflict.theirs(), 5..6);
     assert_eq!(conflict.lines(), 1..7);
     assert_eq!(
@@ -86,13 +86,13 @@ fn parses_a_diff3_conflict() {
         conflict,
         Conflict {
             open: 0,
-            base: Some(2),
+            sections: Sections::Diff3 { base: 2 },
             separator: 4,
             close: 6
         }
     );
     assert_eq!(conflict.ours(), 1..2);
-    assert_eq!(conflict.base_lines(), Some(3..4));
+    assert_eq!(conflict.sections, Sections::Diff3 { base: 2 });
     assert_eq!(conflict.theirs(), 5..6);
     assert!(conflicts.shades.contains(&Shade {
         lines: 2..3,

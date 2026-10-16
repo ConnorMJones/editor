@@ -1,7 +1,7 @@
 use std::fs;
 
 use state::project::session::{self, Session, SessionError};
-use state::{Focus, Sidebar};
+use state::{Files, Sidebar};
 
 use crate::harness::Harness;
 
@@ -30,14 +30,17 @@ fn restores_tabs_splits_selections_and_tree() {
     before.keys("l<esc>");
     let saved = session::snapshot(&before.state);
     assert_eq!(saved.panes.len(), 2);
-    assert_eq!(saved.expanded, vec!["src".to_owned()]);
+    assert_eq!(
+        saved.expanded,
+        [state::project::path::RelPath::parse("src").unwrap()]
+    );
 
     let mut after = Harness::new(dir.path());
     after
         .run(|state, out| session::restore(state, round_trip(&saved), out))
         .expect("valid session");
     assert_eq!(session::snapshot(&after.state), saved);
-    assert_eq!(after.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(after.state.sidebar, Sidebar::Files(Files::Editor));
     assert!(
         after
             .state
@@ -96,10 +99,10 @@ fn invalid_layouts_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
     let parse = |text: &str| toml::from_str::<Session>(text).expect("well-formed toml");
-    let header = "focus = 0\nsidebar = \"hidden\"\nexpanded = []\n";
+    let header = "focus = 0\nsidebar = \"hidden\"\nexpanded = []\nsidebar_width = \"default\"\ncollapsed = []\n";
 
     let missing = parse(&format!(
-        "{header}panes = [{{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 3 }}\n"
+        "{header}panes = [{{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 3, flex = 1.0 }}\n"
     ));
     assert!(matches!(
         h.run(|state, out| session::restore(state, missing, out)),
@@ -107,7 +110,7 @@ fn invalid_layouts_are_rejected() {
     ));
 
     let unused = parse(&format!(
-        "{header}panes = [{{ kind = \"empty\" }}, {{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 0 }}\n"
+        "{header}panes = [{{ kind = \"empty\" }}, {{ kind = \"empty\" }}]\nlayout = {{ kind = \"pane\", pane = 0, flex = 1.0 }}\n"
     ));
     assert!(matches!(
         h.run(|state, out| session::restore(state, unused, out)),

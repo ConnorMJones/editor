@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use helix_core::doc_formatter::TextFormat;
+use helix_core::syntax::Loader;
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::textobject::{TextObject, textobject_word};
 use helix_core::{
@@ -15,7 +16,7 @@ use crate::git::diffview::{self, RIGHT, Right};
 use crate::text::buffer::{Buffer, BufferId, Content, TextDoc};
 use crate::text::registers::ClipboardUse;
 use crate::view::display::{Fillers, Indent, text_format};
-use crate::view::layout::{Layout, PaneId, Scroll, TextView, View, Viewport};
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, View, Viewport};
 use crate::{Effect, State};
 
 /// Rows kept between the primary cursor and the viewport edges.
@@ -348,8 +349,8 @@ pub(crate) fn pane_text<'a>(
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
 ) -> Option<Pointed<'a>> {
-    let view = layout.panes.get_mut(pane)?.active_mut()?;
-    let content = &buffers.get(view.buffer())?.content;
+    let view = layout.find_pane(pane)?.active_mut()?;
+    let content = &buffers[view.buffer()].content;
     let Content::Text { doc, .. } = content else {
         return None;
     };
@@ -366,7 +367,7 @@ pub(crate) fn pane_text<'a>(
             padding: diff.align.sides[RIGHT].padding(),
             right: diffview::right(content),
         },
-        View::Rendered(_) => return None,
+        View::Document(_) | View::Pages(_) => return None,
     })
 }
 
@@ -407,15 +408,74 @@ pub fn follow_cursor(state: &mut State, pane: PaneId) {
     diffview::sync_left(state, pane);
 }
 
-/// Records the drawn size of a text view; a changed size re-follows the cursor.
-pub fn set_viewport(state: &mut State, pane: PaneId, viewport: Viewport) {
-    match pane_text(&mut state.layout, &state.buffers, pane) {
-        Some(Pointed { view, .. }) if view.scroll.viewport != viewport => {
-            view.scroll.viewport = viewport;
-            follow_cursor(state, pane);
+/// `scroll` drawn at `viewport`; a new size moves it to keep the cursor inside the scrolloff
+/// band. The host draws a frame with it before `measured` gives the state the same result.
+pub fn fit(
+    doc: &TextDoc,
+    selection: &Selection,
+    scroll: Scroll,
+    viewport: Viewport,
+    padding: Padding,
+    languages: &Loader,
+) -> Scroll {
+    match scroll.viewport == viewport {
+        true => scroll,
+        false => {
+            let text = doc.text.slice(..);
+            let format = text_format(viewport, Indent::of(doc, languages));
+            let (anchor, rows) = follow(
+                text,
+                selection.primary().cursor(text),
+                Scroll { viewport, ..scroll },
+                padding.lead,
+                &format,
+                &annotations(text, padding),
+            );
+            Scroll {
+                anchor,
+                rows,
+                viewport,
+            }
         }
-        Some(_) | None => {}
     }
+}
+
+/// The host drew `pane`'s text area at `viewport`; reported after the frame, so the pane may
+/// have closed since.
+pub fn measured(state: &mut State, pane: PaneId, viewport: Viewport) {
+    let State {
+        layout,
+        buffers,
+        languages,
+        ..
+    } = state;
+    match pane_text(layout, buffers, pane) {
+        Some(Pointed {
+            view,
+            doc,
+            padding,
+            right: Right::Live,
+        }) => {
+            view.scroll = fit(
+                doc,
+                &view.selection,
+                view.scroll,
+                viewport,
+                padding,
+                languages,
+            )
+        }
+        // Nothing to follow on an inert side or in text still loading.
+        Some(Pointed {
+            right: Right::Deleted,
+            ..
+        })
+        | None => match layout.find_pane(pane).and_then(Pane::active_mut) {
+            Some(view) => view.text_mut().scroll.viewport = viewport,
+            None => return,
+        },
+    }
+    diffview::sync_left(state, pane);
 }
 
 /// Wheel scrolling; a diff scrolls both sides, also when its buffer side is inert.
@@ -490,7 +550,7 @@ fn pointed(
 /// Focuses `pane` and selects at a text cell; returns the drag a following move extends.
 pub fn press(state: &mut State, pane: PaneId, row: u16, col: u16, press: Press) -> Option<Gesture> {
     let mode = state.input.mode;
-    state.layout.focus = pane;
+    state.layout.set_focus(pane).ok()?;
     let (view, doc, pos) = pointed(state, pane, row, col)?;
     let text = doc.text.slice(..);
     let (selection, gesture) = match (press, mode) {
@@ -551,7 +611,10 @@ pub fn release(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
 
 /// Pastes the primary clipboard before the char under a text cell, as helix's middle click.
 pub fn middle_click(state: &mut State, pane: PaneId, row: u16, col: u16, out: &mut Vec<Effect>) {
-    state.layout.focus = pane;
+    match state.layout.set_focus(pane) {
+        Ok(()) => {}
+        Err(NotInLayout(_)) => return,
+    }
     match pointed(state, pane, row, col) {
         Some((_, _, pos)) => out.push(Effect::ReadClipboard {
             clipboard: Clipboard::Primary,

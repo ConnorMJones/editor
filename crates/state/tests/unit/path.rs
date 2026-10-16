@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use state::project::files::{self, Changed, Rescan, Walked};
-use state::project::path::{RelPath, RelPathError};
+use state::project::path::{Folder, RelPath, RelPathError};
 
 fn p(path: &str) -> RelPath {
     RelPath::parse(path).unwrap()
@@ -14,7 +14,8 @@ fn relative_to_root() {
         RelPath::new(root, Path::new("/r/a/b")).unwrap().as_str(),
         "a/b"
     );
-    assert!(RelPath::new(root, Path::new("/r")).unwrap().is_root());
+    assert_eq!(RelPath::new(root, Path::new("/r")), Err(RelPathError::Root));
+    assert_eq!(RelPath::parse(""), Err(RelPathError::Root));
     assert!(matches!(
         RelPath::new(root, Path::new("/elsewhere")),
         Err(RelPathError::Outside(_))
@@ -27,12 +28,13 @@ fn relative_to_root() {
 fn components() {
     let path = p("a/b/c.rs");
     assert_eq!(path.name(), "c.rs");
-    assert_eq!(path.parent(), Some("a/b"));
+    assert_eq!(path.folder(), Folder::Sub(p("a/b")));
     assert_eq!(path.ancestors().collect::<Vec<_>>(), ["a/b", "a", ""]);
-    assert_eq!(p("x").parent(), Some(""));
-    assert_eq!(RelPath::ROOT.parent(), None);
-    assert!(path.is_within("a/b"));
-    assert!(!p("ab/c").is_within("a"));
+    assert_eq!(p("x").folder(), Folder::Root);
+    assert_eq!(p("x").folder_path(), "");
+    assert!(path.is_within(&p("a/b")));
+    assert!(!p("ab/c").is_within(&p("a")));
+    assert!(Folder::Root.contains(&path));
     assert_eq!(path.rebase(&p("a"), &p("z")).as_str(), "z/b/c.rs");
     assert_eq!(p("a").rebase(&p("a"), &p("z")).as_str(), "z");
 }
@@ -50,7 +52,7 @@ fn rescan_replaces_direct_children_and_subtrees() {
         Rescan {
             removed: vec![p("b/gone")],
             relisted: vec![(
-                p("a"),
+                Folder::Sub(p("a")),
                 Walked {
                     files: vec![p("a/new.rs")],
                     dirs: vec![p("a/sub")],
@@ -76,7 +78,7 @@ fn rescan_replaces_direct_children_and_subtrees() {
         Rescan {
             removed: Vec::new(),
             relisted: vec![(
-                p("a"),
+                Folder::Sub(p("a")),
                 Walked {
                     files: vec![p("a/new.rs")],
                     dirs: vec![p("a/sub")],

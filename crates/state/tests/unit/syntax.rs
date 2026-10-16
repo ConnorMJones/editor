@@ -1,24 +1,30 @@
 use std::path::Path;
 
-use helix_core::Rope;
 use helix_core::syntax::HighlighterError;
-use state::text::buffer::TextDoc;
+use helix_core::{Rope, Selection, Transaction};
+use model::notice::Notice;
+use state::text::buffer::{Highlight, TextDoc};
 
 /// Top-level node kinds and the root's byte length.
 fn shape(doc: &TextDoc) -> (Vec<String>, u32) {
-    let root = doc.syntax.as_ref().expect("parsed").tree().root_node();
+    let root = doc.highlight.syntax().expect("parsed").tree().root_node();
     let kinds = root.children().map(|node| node.kind().to_owned()).collect();
     (kinds, root.end_byte())
 }
 
 #[test]
-fn failed_update_reparses_from_scratch() {
+fn a_failed_parse_is_retried_on_the_next_edit() {
     let loader = helix_core::config::default_lang_loader();
     let mut doc = TextDoc::new(Rope::from("fn a() {}\n"), Path::new("a.rs"), &loader);
-    assert_eq!(shape(&doc), (vec!["function_item".to_owned()], 10));
-    // A failed incremental update leaves the tree describing older text.
-    doc.text = Rope::from("struct B;\nfn c() {}\n");
-    doc.recover_syntax(Some(Err(HighlighterError::Timeout)), &loader);
+    let language = doc.highlight.language().expect("rust");
+    doc.highlight = Highlight::Failed {
+        language,
+        error: HighlighterError::Timeout,
+    };
+    assert!(matches!(doc.highlight.tree(), Err(Notice::SyntaxFailed)));
+
+    let tx = Transaction::change(&doc.text, [(0, 0, Some("struct B;\n".into()))].into_iter());
+    doc.apply(&tx, &Selection::point(0), &loader);
     assert_eq!(
         shape(&doc),
         (
@@ -29,10 +35,27 @@ fn failed_update_reparses_from_scratch() {
 }
 
 #[test]
-fn successful_updates_are_kept() {
+fn edits_update_the_tree() {
     let loader = helix_core::config::default_lang_loader();
     let mut doc = TextDoc::new(Rope::from("fn a() {}\n"), Path::new("a.rs"), &loader);
-    doc.text = Rope::from("struct B;\n");
-    doc.recover_syntax(Some(Ok(())), &loader);
-    assert_eq!(shape(&doc), (vec!["function_item".to_owned()], 10));
+    let tx = Transaction::change(
+        &doc.text,
+        [(10, 10, Some("struct B;\n".into()))].into_iter(),
+    );
+    doc.apply(&tx, &Selection::point(0), &loader);
+    assert_eq!(
+        shape(&doc),
+        (
+            vec!["function_item".to_owned(), "struct_item".to_owned()],
+            20
+        )
+    );
+}
+
+#[test]
+fn files_without_a_grammar_are_plain() {
+    let loader = helix_core::config::default_lang_loader();
+    let doc = TextDoc::new(Rope::from("text\n"), Path::new("notes.unknownext"), &loader);
+    assert!(matches!(doc.highlight, Highlight::Plain));
+    assert!(matches!(doc.highlight.tree(), Err(Notice::NoSyntax)));
 }

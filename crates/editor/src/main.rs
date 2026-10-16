@@ -1,10 +1,10 @@
+mod fonts;
 mod input;
 mod preview;
 mod prompt;
 mod rendered;
 mod tabs;
 mod text;
-mod theme;
 mod workspace;
 
 use std::path::{Path, PathBuf};
@@ -15,10 +15,11 @@ use gpui::{
     App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowDecorations,
     WindowOptions, font, px, size,
 };
-use model::color::{Base16, Palette};
+use model::color::Palette;
 use model::config::{Config, Restore};
 use model::notice::Notice;
-use model::typeset::{PX_PER_PT, Pt};
+use model::theme::Theme;
+use model::units::{Pt, Px};
 use state::job::JobResult;
 use state::render::typeset::{Look, Request};
 use state::view::panes::{self as commands, Close};
@@ -28,7 +29,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use typeset::{FontSource, Typesetter};
 
-use crate::theme::Theme;
+use crate::fonts::Fonts;
 use crate::workspace::{Drag, SessionFile, Workspace};
 
 fn main() -> anyhow::Result<()> {
@@ -124,10 +125,11 @@ fn main() -> anyhow::Result<()> {
             text_system.ascent(prose, px(1.)) / px(1.),
             text_system.descent(prose, px(1.)).abs() / px(1.),
         ];
-        let theme = Theme::new(&palette, &config, cell, prose_extent);
+        let theme = Theme::new(&palette, &config.theme);
+        let fonts = Fonts::new(&config.font, cell, prose_extent);
         let look = Look {
-            text: palette[Base16::Base05],
-            prose_size: Pt(theme.prose_size / px(1.) / PX_PER_PT),
+            text: theme.text.rgb,
+            prose_size: Pt::from(Px(fonts.prose_size / px(1.))),
             palette,
         };
         let state = match State::new(
@@ -160,6 +162,7 @@ fn main() -> anyhow::Result<()> {
                     Workspace {
                         state,
                         theme,
+                        fonts,
                         title_bar: config.window.title_bar,
                         effects: Vec::new(),
                         focus,

@@ -99,7 +99,7 @@ mod editing {
     fn open(h: &Harness) -> &Prompt {
         match &h.state.overlay {
             Overlay::Prompt(prompt) => prompt,
-            Overlay::None | Overlay::Picker(_) => panic!("no prompt"),
+            Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => panic!("no prompt"),
         }
     }
 
@@ -197,9 +197,9 @@ mod editing {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut h = harness(&dir);
         h.keys(":vsplit<ret>");
-        let panes = h.state.layout.panes.len();
+        let panes = h.state.layout.panes().len();
         h.keys(":<ret>");
-        assert_eq!(h.state.layout.panes.len(), panes + 1);
+        assert_eq!(h.state.layout.panes().len(), panes + 1);
     }
 
     #[test]

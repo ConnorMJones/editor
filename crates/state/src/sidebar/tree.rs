@@ -4,18 +4,17 @@ use std::path::{Path, PathBuf};
 
 use slotmap::SlotMap;
 
-use crate::project::path::RelPath;
+use crate::project::path::{Folder, RelPath};
 use crate::text::buffer::{Buffer, BufferId};
 
 /// File explorer data; directories are listed lazily as they are expanded.
 #[derive(Default)]
 pub struct Tree {
-    /// Directories expanded at least once, keyed by path; the root is `RelPath::ROOT`.
-    pub dirs: HashMap<RelPath, Dir>,
+    /// Folders expanded at least once.
+    pub dirs: HashMap<Folder, Dir>,
     /// Visible rows in display order, rebuilt whenever `dirs` changes.
     pub rows: Vec<Row>,
     pub cursor: usize,
-    pub edit: TreeEdit,
     pub unsaved: Unsaved,
 }
 
@@ -61,10 +60,8 @@ pub enum RowKind {
 }
 
 /// A file operation being typed in the tree's input line.
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeEdit {
-    #[default]
-    None,
     /// Path relative to the root; with `NewEntry::Infer` a trailing `/` creates a directory.
     Create {
         line: String,
@@ -82,8 +79,18 @@ pub enum TreeEdit {
     },
 }
 
+impl TreeEdit {
+    pub fn line_mut(&mut self) -> &mut String {
+        match self {
+            TreeEdit::Create { line, .. }
+            | TreeEdit::Rename { line, .. }
+            | TreeEdit::Delete { line, .. } => line,
+        }
+    }
+}
+
 /// Directory entries sorted directories-first, then case-insensitively; `.git` is skipped.
-pub fn list(root: &Path, dir: &RelPath) -> io::Result<Vec<Entry>> {
+pub fn list(root: &Path, dir: &Folder) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir.to_path(root))? {
         let entry = entry?;
@@ -118,7 +125,7 @@ pub fn list(root: &Path, dir: &RelPath) -> io::Result<Vec<Entry>> {
 pub fn rebuild(tree: &mut Tree) {
     let selected = tree.rows.get(tree.cursor).map(|row| row.path.clone());
     tree.rows.clear();
-    push_rows(&tree.dirs, &RelPath::ROOT, 0, &mut tree.rows);
+    push_rows(&tree.dirs, &Folder::Root, 0, &mut tree.rows);
     tree.cursor = match selected {
         Some(path) => match tree.rows.iter().position(|row| row.path == path) {
             Some(index) => index,
@@ -128,7 +135,7 @@ pub fn rebuild(tree: &mut Tree) {
     };
 }
 
-fn push_rows(dirs: &HashMap<RelPath, Dir>, dir: &RelPath, depth: u16, rows: &mut Vec<Row>) {
+fn push_rows(dirs: &HashMap<Folder, Dir>, dir: &Folder, depth: u16, rows: &mut Vec<Row>) {
     let Some(Dir {
         fold: Fold::Expanded,
         listing: Listing::Loaded(entries),
@@ -145,7 +152,7 @@ fn push_rows(dirs: &HashMap<RelPath, Dir>, dir: &RelPath, depth: u16, rows: &mut
                 kind: RowKind::File,
             }),
             EntryKind::Dir => {
-                let fold = match dirs.get(&path) {
+                let fold = match dirs.get(path.as_str()) {
                     Some(Dir { fold, .. }) => *fold,
                     None => Fold::Collapsed,
                 };
@@ -154,7 +161,7 @@ fn push_rows(dirs: &HashMap<RelPath, Dir>, dir: &RelPath, depth: u16, rows: &mut
                     depth,
                     kind: RowKind::Dir(fold),
                 });
-                push_rows(dirs, &path, depth + 1, rows);
+                push_rows(dirs, &Folder::Sub(path), depth + 1, rows);
             }
         }
     }

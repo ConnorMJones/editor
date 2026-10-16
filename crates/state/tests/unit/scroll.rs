@@ -165,13 +165,13 @@ mod mouse {
 
     fn harness(marked: &str) -> Harness {
         let mut h = Harness::with("m.txt", marked);
-        let focus = h.state.layout.focus;
-        scroll::set_viewport(&mut h.state, focus, Viewport { rows: 10, cols: 40 });
+        let focus = h.state.layout.focus();
+        scroll::measured(&mut h.state, focus, Viewport { rows: 10, cols: 40 });
         h
     }
 
     fn press(h: &mut Harness, row: u16, col: u16, press: Press) -> Option<Gesture> {
-        let focus = h.state.layout.focus;
+        let focus = h.state.layout.focus();
         h.run(|state, _| scroll::press(state, focus, row, col, press))
     }
 
@@ -216,7 +216,7 @@ mod mouse {
         assert_eq!(h.plain(), "foo #[bar|]#\nbaz\n");
         let gesture = press(&mut h, 0, 1, Press::Select(Unit::Line)).expect("text pane");
         assert_eq!(h.plain(), "#[foo bar\n|]#baz\n");
-        let focus = h.state.layout.focus;
+        let focus = h.state.layout.focus();
         h.run(|state, _| scroll::drag(state, focus, 1, 0, gesture));
         assert_eq!(h.plain(), "#[foo bar\nbaz\n|]#");
     }
@@ -232,7 +232,7 @@ mod mouse {
     #[test]
     fn release_copies_wide_selections_to_primary() {
         let mut h = harness("#[f|]#oo bar\n");
-        let focus = h.state.layout.focus;
+        let focus = h.state.layout.focus();
         press(&mut h, 0, 1, Press::Select(Unit::Char));
         h.run(|state, out| scroll::release(state, focus, out));
         assert_eq!(h.clipboard[1], None);
@@ -245,7 +245,7 @@ mod mouse {
     fn middle_click_pastes_primary_at_the_pointer() {
         let mut h = harness("#[f|]#oo bar\nbaz\n");
         h.clipboard[1] = Some("XY".to_owned());
-        let focus = h.state.layout.focus;
+        let focus = h.state.layout.focus();
         h.run(|state, out| scroll::middle_click(state, focus, 1, 1, out));
         assert_eq!(h.plain(), "foo bar\nb#[XY|]#az\n");
     }
@@ -254,7 +254,7 @@ mod mouse {
     fn scroll_to_line_drags_the_cursor_along() {
         let text: String = (0..100).map(|i| format!("{i}\n")).collect();
         let mut h = harness(&format!("#[0|]#{}", &text[1..]));
-        let focus = h.state.layout.focus;
+        let focus = h.state.layout.focus();
         h.run(|state, _| scroll::scroll_to_line(state, focus, 50));
         let view = h.view();
         let text = h.doc().text.slice(..);

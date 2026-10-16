@@ -3,12 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// CSS pixels per typographic point; host logical pixels are CSS pixels.
-pub const PX_PER_PT: f32 = 96.0 / 72.0;
-
-/// Typographic points.
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-pub struct Pt(pub f32);
+use crate::units::Pt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Display {
@@ -19,19 +14,20 @@ pub enum Display {
 #[derive(Clone)]
 pub struct Svg {
     pub bytes: Arc<[u8]>,
-    pub width_pt: f32,
-    pub height_pt: f32,
-    /// Distance from the top edge to the text baseline, known for inline math.
-    pub baseline_pt: Option<f32>,
+    pub width: Pt,
+    pub height: Pt,
+    /// Distance from the top to the line the drawing sits on: the text baseline of inline math,
+    /// the bottom edge of anything else.
+    pub baseline: Pt,
 }
 
 impl std::fmt::Debug for Svg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Svg")
             .field("bytes", &self.bytes.len())
-            .field("width_pt", &self.width_pt)
-            .field("height_pt", &self.height_pt)
-            .field("baseline_pt", &self.baseline_pt)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("baseline", &self.baseline)
             .finish()
     }
 }
@@ -89,6 +85,14 @@ pub enum SourceFile {
     Project(PathBuf),
     /// A file compiled into the typesetter, such as the mitex definitions.
     Embedded(&'static str),
+    Package(Box<PackageFile>),
+}
+
+/// A file of a typst package, such as `@preview/cetz:0.3.0` and `/src/draw.typ`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageFile {
+    pub package: String,
+    pub path: String,
 }
 
 /// Zero-based line, and column counted in characters.
@@ -116,23 +120,20 @@ impl std::fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.origin {
             Origin::Detached => {}
-            Origin::Span {
-                file: SourceFile::Project(path),
-                start,
-                ..
-            } => write!(
-                f,
-                "{}:{}:{}: ",
-                path.display(),
-                start.line + 1,
-                start.column + 1
-            )?,
-            Origin::Span {
-                file: SourceFile::Embedded(path),
-                start,
-                ..
-            } => write!(f, "{path}:{}:{}: ", start.line + 1, start.column + 1)?,
+            Origin::Span { file, start, .. } => {
+                write!(f, "{file}:{}:{}: ", start.line + 1, start.column + 1)?
+            }
         }
         f.write_str(&self.message)
+    }
+}
+
+impl std::fmt::Display for SourceFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceFile::Project(path) => write!(f, "{}", path.display()),
+            SourceFile::Embedded(path) => f.write_str(path),
+            SourceFile::Package(file) => write!(f, "{}{}", file.package, file.path),
+        }
     }
 }

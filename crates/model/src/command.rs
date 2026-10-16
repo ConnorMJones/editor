@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use crate::register::Register;
-use crate::window::{Axis, PickerKind, Side};
+use crate::window::{Axis, Side};
 
 /// Everything the user can ask the editor to do, from keys or the `:` prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,13 +124,11 @@ pub enum Command {
     /// `None` uses the buffer's configured text width.
     Reflow(Option<NonZeroUsize>),
 
-    // Workspace chrome: panes, buffer cycling, file tree, pickers.
     Window(WindowCommand),
     CycleBuffer(Cycle),
     Tree(TreeCommand),
     Picker(PickerCommand),
 
-    // Git: hunks against HEAD, staging and changed files.
     /// Select mode extends to the hunk; past the last or first hunk it opens the next changed file.
     GotoHunk(HunkTarget),
     /// Acts on the hunks touched by any selection.
@@ -144,38 +142,50 @@ pub enum Command {
     ToggleDiff,
     Changes(ChangesCommand),
 
-    // Conflicts: merge markers in the buffer text.
     /// Select mode extends to the conflict.
     GotoConflict(Direction),
     /// Resolves every conflict touched by a selection, as one edit.
     Resolve(Take),
 
-    // Rendered markdown and typst views.
-    /// Opens a rendered view of the focused file in a split to the right that follows it, or
-    /// closes the one already following it.
+    /// Toggles a rendered split to the right that follows the focused file.
     RenderedSplit,
     /// Switches the focused tab between a file's text and its rendered view.
     ToggleRendered,
-    Rendered(RenderedCommand),
+    Read(ReadCommand),
+    Document(DocumentCommand),
+    Pages(PagesCommand),
     /// Compiles the focused typst file to a PDF beside it.
     ExportPdf,
 }
 
-/// Keys of a focused rendered view.
+/// Keys of a focused document or pages view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenderedCommand {
+pub enum ReadCommand {
+    Move(ReadMove),
+    /// Back to the source pane it follows, or to the text of a standalone view.
+    Leave,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadMove {
     Scroll(Direction, ScrollBy),
     Top,
     Bottom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentCommand {
     /// The next or previous top-level heading.
     Heading(Direction),
-    /// Back to the source pane it follows, or to the text of a standalone view.
-    Leave,
-    /// Switches a typst preview between fitting the page width and the whole page.
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagesCommand {
+    /// Switches between fitting the page width and the whole page.
     Fit,
-    /// Scales typst pages relative to their fit.
+    /// Scales pages relative to their fit.
     Zoom(ZoomBy),
-    /// Moves a typst preview sideways, `Backward` being left.
+    /// Moves sideways, `Backward` being left.
     Pan(Direction),
 }
 
@@ -348,7 +358,6 @@ pub enum SurroundPair {
 pub enum WordBounds {
     /// `*`: wrap in `\b` where the selection sits on word edges.
     Detect,
-    /// `A-*`
     Ignore,
 }
 
@@ -519,4 +528,14 @@ pub enum Take {
     Both,
     /// The common ancestor of a diff3 conflict.
     Base,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerKind {
+    Files,
+    Buffers,
+    Grep,
+    Commands,
+    /// Notes linking to the focused note.
+    Backlinks,
 }

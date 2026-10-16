@@ -2,8 +2,9 @@ use std::fs;
 
 use model::notice::Notice;
 use model::typeset::{Origin, SourceFile};
+use state::render::document;
 use state::render::markdown::Figure;
-use state::render::rendered::{self, Preview};
+use state::render::pages::{self, PagesScroll};
 use state::render::typeset::{self, Compile, Outcome, Render, SPARE, Typst};
 use state::text::buffer::Content;
 use state::view::layout::{PaneId, View};
@@ -45,7 +46,7 @@ fn figures(h: &Harness) -> Vec<(String, Figure)> {
     let Content::Text { doc, .. } = &h.state.buffers[h.view().buffer()].content else {
         panic!("loading");
     };
-    let parsed = rendered::markdown(&h.state.previews, h.view().buffer(), doc).expect("parsed");
+    let parsed = document::markdown(&h.state.documents, h.view().buffer(), doc).expect("parsed");
     let mut found = Vec::new();
     typeset::each_figure(&parsed.blocks, |figure, source| {
         found.push((source.to_owned(), figure))
@@ -64,10 +65,10 @@ fn render<'a>(h: &'a Harness, source: &str) -> &'a Render {
 
 fn typst(h: &Harness) -> (u64, &Typst) {
     let buffer = h.view().buffer();
-    let doc = state::text::buffer::doc(&h.state.buffers, buffer).expect("loaded");
-    match h.state.previews.get(buffer) {
-        Some(Preview::Typst(typst)) => (doc.version, typst),
-        Some(Preview::Markdown(_)) | None => panic!("no typst preview"),
+    let doc = h.state.buffers[buffer].doc().expect("loaded");
+    match h.state.compiles.get(buffer) {
+        Some(typst) => (doc.version, typst),
+        None => panic!("no typst preview"),
     }
 }
 
@@ -78,8 +79,8 @@ fn preview(h: &Harness) -> PaneId {
         .iter()
         .find(|pane| {
             matches!(
-                h.state.layout.panes[**pane].active(),
-                Some(View::Rendered(_))
+                h.state.layout.panes()[**pane].active(),
+                Some(View::Pages(_))
             )
         })
         .expect("a preview pane")
@@ -102,13 +103,13 @@ fn figures_go_from_pending_to_ready_and_bad_tex_fails() {
     }
     match render(&h, "a^2") {
         Render::Ready(svg) => {
-            let baseline = svg.baseline_pt.expect("inline math has a baseline");
-            assert!(baseline > 0.0 && baseline < svg.height_pt, "{svg:?}");
+            let baseline = svg.baseline.0;
+            assert!(baseline > 0.0 && baseline < svg.height.0, "{svg:?}");
         }
         other => panic!("inline math: {other:?}"),
     }
     match render(&h, "pmatrix") {
-        Render::Ready(svg) => assert!(svg.baseline_pt.is_none() && svg.height_pt > 20.0),
+        Render::Ready(svg) => assert!(svg.baseline == svg.height && svg.height.0 > 20.0),
         other => panic!("block math: {other:?}"),
     }
     match render(&h, "A --> B") {
@@ -214,7 +215,7 @@ fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     // Clicking the error strip puts the source cursor on it.
     h.keys("gg");
     let pane = preview(&h);
-    h.run(|state, out| rendered::goto_diagnostic(state, pane, out));
+    h.run(|state, out| pages::goto_diagnostic(state, pane, out));
     let text = h.doc().text.slice(..);
     assert_eq!(h.view().selection.primary().cursor_line(text), line);
 
@@ -269,11 +270,11 @@ fn a_following_preview_goes_to_the_page_under_the_cursor() {
     let pane = preview(&h);
     // Line 4 is "= Two", on the second page; the cursor sits before its text.
     h.keys("4gg");
-    match h.state.layout.panes[pane].active() {
-        Some(View::Rendered(view)) => match view.scroll {
-            rendered::Scroll::Point(at) => assert_eq!(at.page, 1),
+    match h.state.layout.panes()[pane].active() {
+        Some(View::Pages(view)) => match view.scroll {
+            PagesScroll::Point(at) => assert_eq!(at.page, 1),
             other => panic!("not located: {other:?}"),
         },
-        Some(View::Text(_) | View::Diff(_)) | None => panic!("not rendered"),
+        Some(View::Text(_) | View::Diff(_) | View::Document(_)) | None => panic!("not rendered"),
     }
 }

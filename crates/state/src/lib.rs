@@ -23,20 +23,24 @@ use model::key::{Key, KeySeq};
 use model::mode::Mode;
 use model::notice::Notice;
 use model::register::{Clipboard, Register};
+use model::units::Px;
 use slotmap::SlotMap;
 
-use crate::git::changes;
+use crate::git::stage;
 use crate::input::prompt;
-use crate::project::{backlinks, links};
-use crate::render::{rendered, typeset};
+use crate::render::document::Documents;
+use crate::render::pages::Compiles;
+use crate::render::typeset;
 
 use crate::git::GitSnapshot;
 use crate::input::keymap::{Keymap, KeymapError};
 use crate::input::picker::Picker;
 use crate::job::Job;
-use crate::project::files::Files;
-use crate::project::path::RelPath;
-use crate::sidebar::tree::{Dir, Fold, Listing, Tree};
+use crate::project::Project;
+use crate::project::files::{FileIndex, OnIndexed};
+use crate::project::path::{Folder, RelPath};
+use crate::sidebar::changes::ChangesList;
+use crate::sidebar::tree::{Dir, Fold, Listing, Tree, TreeEdit};
 use crate::text::buffer::{Buffer, BufferId};
 use crate::text::registers::{ClipboardUse, Registers};
 use crate::view::layout::Layout;
@@ -71,7 +75,7 @@ impl Root {
 }
 
 pub struct State {
-    pub root: Root,
+    pub project: Project,
     /// Shared with jobs that parse off the UI thread.
     pub languages: Arc<Loader>,
     pub keymap: Keymap,
@@ -88,19 +92,16 @@ pub struct State {
     pub sidebar_width: SidebarWidth,
     /// Kept while the sidebar is hidden so expansion survives toggling.
     pub tree: Tree,
-    pub files: Files,
-    pub git: Git,
+    pub changes: ChangesList,
     pub matcher: nucleo::Matcher,
     /// Generation of the newest grep; older grep jobs stop when it moves on.
     pub grep: Arc<AtomicU64>,
     /// Typeset math and diagrams of the parsed documents.
     pub figures: typeset::Figures,
-    /// What the rendered tabs of each buffer show, while any is open.
-    pub previews: rendered::Previews,
-    pub vault: links::Vault,
-    pub backlinks: backlinks::Backlinks,
-    /// An action waiting for `Command::Confirm`; the status line asks.
-    pub confirm: Option<Confirm>,
+    /// Parses of the buffers document views show, while any is open.
+    pub documents: Documents,
+    /// Compiles of the buffers pages views show, while any is open.
+    pub compiles: Compiles,
 }
 
 impl State {
@@ -117,7 +118,14 @@ impl State {
                 .collect(),
         );
         Ok(State {
-            root,
+            project: Project {
+                root,
+                index: FileIndex::Loading {
+                    then: OnIndexed::Nothing,
+                },
+                git: Repo::Unknown,
+                refresh: Refresh::Idle,
+            },
             languages: Arc::new(languages),
             keymap: Keymap::helix()?,
             buffers: SlotMap::with_key(),
@@ -142,31 +150,26 @@ impl State {
             exit: Exit::Running,
             tab_config,
             sidebar: Sidebar::Hidden,
-            sidebar_width: SidebarWidth::DEFAULT,
+            sidebar_width: SidebarWidth::Default,
             tree: Tree::default(),
-            files: Files::Loading,
-            git: Git {
-                repo: Repo::Unknown,
-                refresh: Refresh::Idle,
+            changes: ChangesList {
                 cursor: None,
                 folds: [Fold::Expanded; Group::COUNT],
             },
             matcher: nucleo::Matcher::default(),
             grep: Arc::new(AtomicU64::new(0)),
             figures: typeset::Figures::new(look),
-            previews: rendered::Previews::new(),
-            vault: links::Vault::new(),
-            backlinks: backlinks::Backlinks::default(),
-            confirm: None,
+            documents: Documents::new(),
+            compiles: Compiles::new(),
         })
     }
 }
 
 /// Starts the file index, the tree's root listing and the first git status.
 pub fn boot(state: &mut State, out: &mut Vec<Effect>) {
-    let root = state.root.path().to_owned();
+    let root = state.project.root.path().to_owned();
     state.tree.dirs.insert(
-        RelPath::ROOT,
+        Folder::Root,
         Dir {
             fold: Fold::Expanded,
             listing: Listing::Loading,
@@ -175,17 +178,17 @@ pub fn boot(state: &mut State, out: &mut Vec<Effect>) {
     out.push(Effect::Job(Job::Index { root: root.clone() }));
     out.push(Effect::Job(Job::ListDir {
         root,
-        dir: RelPath::ROOT,
+        dir: Folder::Root,
     }));
     request_git(state, out);
 }
 
 /// Coalesces refreshes: at most one status job runs, with one more queued behind it.
 pub fn request_git(state: &mut State, out: &mut Vec<Effect>) {
-    state.git.refresh = match state.git.refresh {
+    state.project.refresh = match state.project.refresh {
         Refresh::Idle => {
             out.push(Effect::Job(Job::GitStatus {
-                root: state.root.path().to_owned(),
+                root: state.project.root.path().to_owned(),
             }));
             Refresh::Running
         }
@@ -197,6 +200,8 @@ pub enum Overlay {
     None,
     Prompt(Prompt),
     Picker(Picker),
+    /// An action such as a discard waits for `Command::Confirm`; the status line asks.
+    Confirm(Confirm),
 }
 
 pub struct Prompt {
@@ -292,35 +297,65 @@ pub enum Exit {
     AfterWrite { buffers: Vec<BufferId> },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sidebar {
     Hidden,
-    Files(Focus),
+    Files(Files),
     Changes(Focus),
 }
 
-/// Sidebar width in logical pixels, kept within `MIN..=MAX`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SidebarWidth(f32);
+/// Where keys go while the file tree is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Files {
+    Editor,
+    Tree,
+    /// A tree line being typed; focusing the editor drops it.
+    Edit(TreeEdit),
+}
 
-impl SidebarWidth {
-    pub const MIN: f32 = 120.0;
-    pub const MAX: f32 = 800.0;
-    pub const DEFAULT: SidebarWidth = SidebarWidth(280.0);
+/// The width the user chose; the host draws it narrower when the window lacks room.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarWidth {
+    /// Sized by the host from the interface font.
+    Default,
+    Dragged(Dragged),
+}
 
-    /// Clamps into range; a non-finite width falls back to the default.
-    pub fn new(width: f32) -> SidebarWidth {
-        match width.is_finite() {
-            true => SidebarWidth(width.clamp(Self::MIN, Self::MAX)),
-            false => Self::DEFAULT,
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Px", into = "Px")]
+pub struct Dragged(Px);
+
+#[derive(Debug, thiserror::Error)]
+#[error("sidebar width {0:?} is not a finite positive width")]
+pub struct InvalidWidth(Px);
+
+impl Dragged {
+    pub fn new(width: Px) -> Result<Dragged, InvalidWidth> {
+        match width.0.is_finite() && width.0 > 0.0 {
+            true => Ok(Dragged(width)),
+            false => Err(InvalidWidth(width)),
         }
     }
 
-    pub fn get(self) -> f32 {
+    pub fn get(self) -> Px {
         self.0
     }
 }
 
+impl TryFrom<Px> for Dragged {
+    type Error = InvalidWidth;
+
+    fn try_from(width: Px) -> Result<Dragged, InvalidWidth> {
+        Dragged::new(width)
+    }
+}
+
+impl From<Dragged> for Px {
+    fn from(width: Dragged) -> Px {
+        width.0
+    }
+}
 /// Which side of the window receives keys while the sidebar is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -331,21 +366,9 @@ pub enum Focus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Confirm {
     /// Discards a file's changes, as `how` says.
-    Discard {
-        path: PathBuf,
-        how: changes::Discard,
-    },
+    Discard { path: PathBuf, how: stage::Discard },
     /// Creates the empty note an unresolved link names, and opens it.
     Create(RelPath),
-}
-
-pub struct Git {
-    pub repo: Repo,
-    pub refresh: Refresh,
-    /// Row selected in the Changes sidebar, kept by value so it survives refreshes.
-    pub cursor: Option<changes::ListCursor>,
-    /// Per `Group`, whether the sidebar shows its entries.
-    pub folds: [Fold; Group::COUNT],
 }
 
 pub enum Repo {
@@ -387,4 +410,12 @@ pub enum Effect {
     OpenUrl(String),
     /// The host answers with `JobResult::Typeset`.
     Typeset(typeset::Request),
+}
+
+/// Brings everything derived from buffer text up to date; runs once after every event.
+pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
+    git::conflict::sync(state);
+    render::sync(state, out);
+    git::track::sync(state, out);
+    git::diffview::refresh(state, out);
 }

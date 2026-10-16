@@ -1,6 +1,6 @@
 use std::fs;
 
-use state::project::path::RelPath;
+use state::project::path::{Folder, RelPath};
 use state::sidebar::tree::{self, Dir, Entry, EntryKind, Fold, Listing, RowKind, Tree};
 
 fn entry(name: &str, kind: EntryKind) -> Entry {
@@ -19,7 +19,7 @@ fn list_sorts_dirs_first_case_insensitively_and_skips_git() {
     for name in ["zdir", "Adir", ".git"] {
         fs::create_dir(dir.path().join(name)).unwrap();
     }
-    let entries = tree::list(dir.path(), &RelPath::ROOT).unwrap();
+    let entries = tree::list(dir.path(), &Folder::Root).unwrap();
     assert_eq!(
         entries,
         [
@@ -36,7 +36,7 @@ fn list_sorts_dirs_first_case_insensitively_and_skips_git() {
 fn rebuild_walks_expanded_dirs_and_keeps_cursor() {
     let mut t = Tree::default();
     t.dirs.insert(
-        RelPath::ROOT,
+        Folder::Root,
         Dir {
             fold: Fold::Expanded,
             listing: Listing::Loaded(vec![
@@ -47,7 +47,7 @@ fn rebuild_walks_expanded_dirs_and_keeps_cursor() {
         },
     );
     t.dirs.insert(
-        RelPath::parse("src").unwrap(),
+        Folder::Sub(RelPath::parse("src").unwrap()),
         Dir {
             fold: Fold::Expanded,
             listing: Listing::Loaded(vec![entry("lib.rs", EntryKind::File)]),
@@ -70,10 +70,7 @@ fn rebuild_walks_expanded_dirs_and_keeps_cursor() {
     );
 
     t.cursor = 3;
-    t.dirs
-        .get_mut(&RelPath::parse("src").unwrap())
-        .unwrap()
-        .fold = Fold::Collapsed;
+    t.dirs.get_mut("src").unwrap().fold = Fold::Collapsed;
     tree::rebuild(&mut t);
     assert_eq!(t.rows.len(), 3);
     assert_eq!(t.rows[t.cursor].path.as_str(), "main.rs");
@@ -83,14 +80,14 @@ fn rebuild_walks_expanded_dirs_and_keeps_cursor() {
 fn loading_dir_shows_no_children() {
     let mut t = Tree::default();
     t.dirs.insert(
-        RelPath::ROOT,
+        Folder::Root,
         Dir {
             fold: Fold::Expanded,
             listing: Listing::Loaded(vec![entry("src", EntryKind::Dir)]),
         },
     );
     t.dirs.insert(
-        RelPath::parse("src").unwrap(),
+        Folder::Sub(RelPath::parse("src").unwrap()),
         Dir {
             fold: Fold::Expanded,
             listing: Listing::Loading,

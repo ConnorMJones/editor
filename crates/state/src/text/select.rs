@@ -183,7 +183,9 @@ pub fn search_next(state: &mut State, direction: Direction) {
 
 pub fn search_selection(state: &mut State, bounds: WordBounds, out: &mut Vec<Effect>) {
     let register = state.input.register.unwrap_or(Register::SEARCH);
-    let Some((view, doc)) = crate::apply::focused(&mut state.layout, &mut state.buffers) else {
+    let Some((view, doc)) =
+        crate::apply::focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
+    else {
         return;
     };
     let text = doc.text.slice(..);
@@ -246,7 +248,8 @@ pub fn preview_regex(state: &mut State) {
             ..
         })
         | Overlay::None
-        | Overlay::Picker(_) => return,
+        | Overlay::Picker(_)
+        | Overlay::Confirm(_) => return,
     };
     select(state, |_, _, _| snapshot);
     match line.is_empty() {

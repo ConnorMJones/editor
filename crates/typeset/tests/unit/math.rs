@@ -39,14 +39,14 @@ fn formulas_render_to_valid_svg() {
         assert_valid(&svg);
         match display {
             Display::Inline => {
-                let baseline = svg.baseline_pt.expect("inline math has a baseline");
+                let baseline = svg.baseline.0;
                 assert!(
-                    baseline > 0.0 && baseline <= svg.height_pt,
+                    baseline > 0.0 && baseline <= svg.height.0,
                     "{tex}: baseline {baseline} outside 0..{}",
-                    svg.height_pt
+                    svg.height.0
                 );
             }
-            Display::Block => assert_eq!(svg.baseline_pt, None),
+            Display::Block => assert_eq!(svg.baseline, svg.height),
         }
     }
 }
@@ -60,9 +60,9 @@ fn fraction_baseline_sits_between_numerator_and_denominator() {
     let fraction = typesetter
         .math(r"\frac{1}{2}", Display::Inline, WHITE, Pt(16.0))
         .expect("fraction");
-    let baseline = fraction.baseline_pt.expect("inline baseline");
-    assert!(fraction.height_pt > plain.height_pt);
-    assert!(baseline > fraction.height_pt * 0.3 && baseline < fraction.height_pt * 0.8);
+    let baseline = fraction.baseline.0;
+    assert!(fraction.height.0 > plain.height.0);
+    assert!(baseline > fraction.height.0 * 0.3 && baseline < fraction.height.0 * 0.8);
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn size_and_colour_reach_the_output() {
     let large = typesetter
         .math("x+y", Display::Inline, WHITE, Pt(20.0))
         .expect("large");
-    assert!((large.width_pt / small.width_pt - 2.0).abs() < 0.05);
+    assert!((large.width.0 / small.width.0 - 2.0).abs() < 0.05);
     let red = typesetter
         .math(
             "x",

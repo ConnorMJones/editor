@@ -8,12 +8,12 @@ use helix_core::text_annotations::TextAnnotations;
 use helix_core::{RopeSlice, Tendril, Transaction};
 use helix_stdx::rope::RopeSliceExt;
 use model::command::{Command, Direction, Take};
-use model::mode::Mode;
 use model::notice::Notice;
 use model::theme::{self, Background};
 
 use crate::State;
 use crate::apply::{count_of, edit, exit_select_mode};
+use crate::git::navigate::step;
 use crate::input::keymap::{self, Context};
 use crate::text::buffer::{Content, TextDoc};
 use crate::view::display::{Frame, LineMark, Row, RowKind, Run, Shade};
@@ -28,21 +28,29 @@ const MARKER: usize = 7;
 pub struct Conflict {
     /// `<<<<<<<` line; the rest of it labels ours.
     pub open: usize,
-    /// `|||||||` line of a diff3 conflict; the rest of it labels the base.
-    pub base: Option<usize>,
+    pub sections: Sections,
     /// `=======` line.
     pub separator: usize,
     /// `>>>>>>>` line; the rest of it labels theirs.
     pub close: usize,
 }
 
+/// Whether a conflict carries the common ancestor between ours and theirs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sections {
+    TwoWay,
+    /// `|||||||` line of a diff3 conflict; the rest of it labels the base.
+    Diff3 {
+        base: usize,
+    },
+}
+
 impl Conflict {
     pub fn ours(&self) -> Range<usize> {
-        self.open + 1..self.base.unwrap_or(self.separator)
-    }
-
-    pub fn base_lines(&self) -> Option<Range<usize>> {
-        self.base.map(|base| base + 1..self.separator)
+        self.open + 1..match self.sections {
+            Sections::TwoWay => self.separator,
+            Sections::Diff3 { base } => base,
+        }
     }
 
     pub fn theirs(&self) -> Range<usize> {
@@ -116,7 +124,7 @@ enum Open {
     },
     Theirs {
         open: usize,
-        base: Option<usize>,
+        sections: Sections,
         separator: usize,
     },
 }
@@ -187,25 +195,25 @@ pub fn parse(text: RopeSlice, version: u64, conflicts: &mut Conflicts) {
                         }
                         (Open::Ours { open }, Some(Marker::Separator)) => Open::Theirs {
                             open,
-                            base: None,
+                            sections: Sections::TwoWay,
                             separator: line,
                         },
                         (Open::Base { open, base }, Some(Marker::Separator)) => Open::Theirs {
                             open,
-                            base: Some(base),
+                            sections: Sections::Diff3 { base },
                             separator: line,
                         },
                         (
                             Open::Theirs {
                                 open,
-                                base,
+                                sections,
                                 separator,
                             },
                             Some(Marker::Close),
                         ) => {
                             list.push(Conflict {
                                 open,
-                                base,
+                                sections,
                                 separator,
                                 close: line,
                             });
@@ -237,12 +245,12 @@ pub fn parse(text: RopeSlice, version: u64, conflicts: &mut Conflicts) {
         };
         shade(conflict.open..conflict.open + 1, Background::OursMarker);
         shade(conflict.ours(), Background::Ours);
-        match (conflict.base, conflict.base_lines()) {
-            (Some(base), Some(lines)) => {
+        match conflict.sections {
+            Sections::Diff3 { base } => {
                 shade(base..base + 1, Background::BaseMarker);
-                shade(lines, Background::Base);
+                shade(base + 1..conflict.separator, Background::Base);
             }
-            (_, _) => {}
+            Sections::TwoWay => {}
         }
         shade(
             conflict.separator..conflict.separator + 1,
@@ -396,22 +404,17 @@ pub fn label(frame: &mut Frame, text: RopeSlice, conflicts: &Conflicts, height: 
 
 /// The focused text view and its document with conflicts parsed for the current text.
 fn focused(state: &mut State) -> Option<(&mut TextView, &TextDoc)> {
-    let view = state
-        .layout
-        .panes
-        .get_mut(state.layout.focus)?
-        .active_mut()?
-        .text_mut();
-    match state.buffers.get_mut(view.buffer()).map(|b| &mut b.content) {
-        Some(Content::Text { doc, .. }) => {
+    let view = state.layout.focused_mut().active_mut()?.text_mut();
+    match &mut state.buffers[view.buffer()].content {
+        Content::Text { doc, .. } => {
             refresh(doc);
             Some((view, doc))
         }
-        Some(Content::Loading { .. }) | None => None,
+        Content::Loading { .. } => None,
     }
 }
 
-/// `]m [m`, after `]g`: each selection moves to (select mode: extends to) the count-th conflict.
+/// `]m [m`, after `]g`: each selection steps to the count-th conflict.
 pub fn goto(state: &mut State, direction: Direction) {
     let count = count_of(state);
     let mode = state.input.mode;
@@ -421,44 +424,32 @@ pub fn goto(state: &mut State, direction: Direction) {
     };
     let text = doc.text.slice(..);
     let list = &doc.conflicts.list;
-    let pick = |line: usize| match direction {
-        Direction::Forward => {
-            let next = list.partition_point(|conflict| conflict.open <= line);
-            (next < list.len()).then(|| (next + count - 1).min(list.len() - 1))
+    let nearest = |range: &helix_core::Range| {
+        let line = range.cursor_line(text);
+        match direction {
+            Direction::Forward => Some(list.partition_point(|conflict| conflict.open <= line))
+                .filter(|next| *next < list.len()),
+            Direction::Backward => list
+                .partition_point(|conflict| conflict.close < line)
+                .checked_sub(1),
         }
-        Direction::Backward => list
-            .partition_point(|conflict| conflict.close < line)
-            .checked_sub(1)
-            .map(|previous| previous.saturating_sub(count - 1)),
     };
-    let primary = view.selection.primary().cursor_line(text);
-    match pick(primary) {
-        Some(_) => {}
-        None => {
-            state.notice = Some(Notice::NoConflicts);
-            return;
-        }
+    let range = |conflict: &Conflict| {
+        let lines = conflict.lines();
+        helix_core::Range::new(text.line_to_char(lines.start), text.line_to_char(lines.end))
+    };
+    match step(
+        &view.selection,
+        mode,
+        direction,
+        count,
+        list,
+        nearest,
+        range,
+    ) {
+        Some(selection) => view.selection = selection,
+        None => state.notice = Some(Notice::NoConflicts),
     }
-    view.selection = view.selection.clone().transform(|range| {
-        let Some(index) = pick(range.cursor_line(text)) else {
-            return range;
-        };
-        let lines = list[index].lines();
-        let (start, end) = (text.line_to_char(lines.start), text.line_to_char(lines.end));
-        match (mode, direction) {
-            (Mode::Select, _) => helix_core::Range::new(
-                range.anchor,
-                match end <= range.anchor {
-                    true => start,
-                    false => end,
-                },
-            ),
-            (Mode::Normal | Mode::Insert, Direction::Forward) => helix_core::Range::new(start, end),
-            (Mode::Normal | Mode::Insert, Direction::Backward) => {
-                helix_core::Range::new(end, start)
-            }
-        }
-    });
 }
 
 /// Replaces every conflict a selection touches with the sections `take` keeps, as one edit.
@@ -479,15 +470,17 @@ pub fn resolve(state: &mut State, take: Take) {
             next += list[next..].partition_point(|conflict| conflict.close < start);
             while let Some(conflict) = list.get(next).filter(|conflict| conflict.open <= end) {
                 next += 1;
-                let mut kept: Tendril = match (take, conflict.base_lines()) {
+                let mut kept: Tendril = match (take, conflict.sections) {
                     (Take::Ours, _) => section(conflict.ours()).chunks().collect(),
                     (Take::Theirs, _) => section(conflict.theirs()).chunks().collect(),
                     (Take::Both, _) => section(conflict.ours())
                         .chunks()
                         .chain(section(conflict.theirs()).chunks())
                         .collect(),
-                    (Take::Base, Some(base)) => section(base).chunks().collect(),
-                    (Take::Base, None) => {
+                    (Take::Base, Sections::Diff3 { base }) => {
+                        section(base + 1..conflict.separator).chunks().collect()
+                    }
+                    (Take::Base, Sections::TwoWay) => {
                         state.notice = Some(Notice::NoConflictBase);
                         return;
                     }

@@ -11,7 +11,7 @@ use gpui::{
 };
 use helix_core::Selection;
 use model::mode::Mode;
-use model::theme::{self as roles, Modifiers, Tone};
+use model::theme::{Modifiers, Theme, Tone};
 use slotmap::Key as _;
 use state::git::conflict;
 use state::git::diff::{self, Bases, Diff, Stage};
@@ -23,7 +23,7 @@ use state::view::display::{
 use state::view::layout::{Pane, PaneId, View, Viewport};
 use state::view::scroll::{self, Gesture, Press, Scrollbar, Unit};
 
-use crate::theme::{Colors, RowColors, Theme};
+use crate::fonts::{Fonts, hsla};
 use crate::workspace::Workspace;
 
 /// Right-edge strip for the scrollbar; a minimap would widen the strip and sit left of the bar.
@@ -138,17 +138,20 @@ enum Glyphs {
 }
 
 /// Byte lengths per font; runs that differ only in colour shape the same glyphs.
-fn fonts(runs: &[display::Run]) -> impl Iterator<Item = (usize, Modifiers)> + '_ {
+fn font_spans(runs: &[display::Run]) -> impl Iterator<Item = (usize, Modifiers)> + '_ {
     let font = |run: &display::Run| run.style.modifiers & (Modifiers::BOLD | Modifiers::ITALIC);
     runs.chunk_by(move |a, b| font(a) == font(b))
         .map(move |chunk| (chunk.iter().map(|run| run.len).sum(), font(&chunk[0])))
 }
 
-pub fn text_run(theme: &Theme, run: &display::Run) -> TextRun {
-    let fg = run.style.fg.map_or(theme.text, |slot| theme.colors[slot]);
+pub fn text_run(theme: &Theme, fonts: &Fonts, run: &display::Run) -> TextRun {
+    let fg = run
+        .style
+        .fg
+        .map_or(hsla(theme.text), |slot| hsla(theme.syntax[slot]));
     TextRun {
         len: run.len,
-        font: theme.mono_font(run.style.modifiers).clone(),
+        font: fonts.mono_font(run.style.modifiers).clone(),
         color: fg,
         background_color: None,
         underline: run
@@ -208,9 +211,9 @@ impl Element for TextElement {
     ) -> Prepaint {
         let pane = self.pane;
         let workspace = self.workspace.read(cx);
-        let cell = workspace.theme.cell;
+        let cell = workspace.fonts.cell;
         let state = &workspace.state;
-        let active = state.layout.panes.get(pane).and_then(Pane::active);
+        let active = state.layout.panes().get(pane).and_then(Pane::active);
         let len_lines = match active.map(|view| &state.buffers[view.buffer()].content) {
             Some(Content::Text { doc, .. }) => doc.text.len_lines(),
             Some(Content::Loading { .. }) | None => 1,
@@ -221,7 +224,9 @@ impl Element for TextElement {
                 left: Left::Head { doc, .. },
                 ..
             })) => len_lines.max(doc.text.len_lines()),
-            Some(View::Diff(_) | View::Text(_) | View::Rendered(_)) | None => len_lines,
+            Some(View::Diff(_) | View::Text(_) | View::Document(_) | View::Pages(_)) | None => {
+                len_lines
+            }
         };
         let gutter = Gutter::new(gutter_lines);
         let text_origin = point(
@@ -234,13 +239,20 @@ impl Element for TextElement {
             cols: ((text_width / cell.width).floor().max(0.0) as u16).saturating_sub(gutter.cols),
         };
         let part = self.part;
-        self.workspace.update(cx, |workspace, cx| match part {
-            Part::Text => scroll::set_viewport(&mut workspace.state, pane, viewport),
-            Part::Head | Part::Buffer => {
-                diffview::prepare(&mut workspace.state, pane, viewport, &mut workspace.effects);
-                workspace.flush(cx);
+        // This frame draws at the new size through `scroll::fit`; the state hears of it after.
+        match (part, active.map(|view| view.text().scroll.viewport)) {
+            (Part::Text | Part::Buffer, Some(drawn)) if drawn != viewport => {
+                let workspace = self.workspace.clone();
+                window.defer(cx, move |_, cx| {
+                    workspace.update(cx, |workspace, cx| {
+                        scroll::measured(&mut workspace.state, pane, viewport);
+                        workspace.flush(cx);
+                        cx.notify();
+                    })
+                });
             }
-        });
+            (Part::Text | Part::Buffer | Part::Head, _) => {}
+        }
         let hitbox = window.insert_hitbox(
             Bounds::new(bounds.origin, size(text_width, bounds.size.height)),
             HitboxBehavior::Normal,
@@ -255,8 +267,9 @@ impl Element for TextElement {
             let mut cache = cache.unwrap_or_default();
             let workspace = self.workspace.read(cx);
             let theme = &workspace.theme;
+            let fonts = &workspace.fonts;
             let state = &workspace.state;
-            let focus = match (part, state.layout.focus == pane) {
+            let focus = match (part, state.layout.focus() == pane) {
                 (Part::Head, _) => Focus::ReadOnly,
                 (Part::Text | Part::Buffer, true) => Focus::Focused(state.input.mode),
                 (Part::Text | Part::Buffer, false) => Focus::Unfocused,
@@ -265,28 +278,31 @@ impl Element for TextElement {
             cache.lines.swap(0, 1);
             cache.numbers.swap(0, 1);
             let [frame, previous] = &mut cache.frames;
-            let active = state.layout.panes.get(pane).and_then(Pane::active);
+            let active = state.layout.panes().get(pane).and_then(Pane::active);
             match (part, active) {
                 (Part::Text, Some(View::Text(view))) => match &state.buffers[view.buffer()].content
                 {
                     Content::Text { doc, .. } => {
                         let conflicts = conflict::current(doc);
+                        let drawn = scroll::fit(
+                            doc,
+                            &view.selection,
+                            view.scroll,
+                            viewport,
+                            conflict::padding(doc),
+                            &state.languages,
+                        );
                         display::layout(
                             frame,
                             doc,
                             &view.selection,
-                            view.scroll,
+                            drawn,
                             &state.languages,
                             focus,
                             &conflict::annotations(doc),
                             &conflicts.shades,
                         );
-                        conflict::label(
-                            frame,
-                            doc.text.slice(..),
-                            conflicts,
-                            view.scroll.viewport.rows,
-                        );
+                        conflict::label(frame, doc.text.slice(..), conflicts, viewport.rows);
                     }
                     Content::Loading { .. } => display::blank(frame, 0),
                 },
@@ -295,11 +311,19 @@ impl Element for TextElement {
                     match (content, diffview::right(content)) {
                         (Content::Text { doc, .. }, Right::Live) => {
                             let side = &diff.align.sides[RIGHT];
+                            let drawn = scroll::fit(
+                                doc,
+                                &diff.text.selection,
+                                diff.text.scroll,
+                                viewport,
+                                side.padding(),
+                                &state.languages,
+                            );
                             display::layout(
                                 frame,
                                 doc,
                                 &diff.text.selection,
-                                diff.text.scroll,
+                                drawn,
                                 &state.languages,
                                 focus,
                                 &scroll::annotations(doc.text.slice(..), side.padding()),
@@ -334,7 +358,7 @@ impl Element for TextElement {
                 },
                 (Part::Text, Some(View::Diff(_)))
                 | (Part::Head | Part::Buffer, Some(View::Text(_)))
-                | (_, Some(View::Rendered(_)))
+                | (_, Some(View::Document(_) | View::Pages(_)))
                 | (_, None) => display::blank(frame, 0),
             }
 
@@ -353,7 +377,7 @@ impl Element for TextElement {
                 };
                 let same_glyphs = |old: &display::Row| {
                     &previous.text[old.text.clone()] == text
-                        && fonts(&previous.runs[old.runs.clone()]).eq(fonts(runs))
+                        && font_spans(&previous.runs[old.runs.clone()]).eq(font_spans(runs))
                 };
                 let reuse = match previous.rows.get(hint) {
                     Some(old) if same(old) => Reuse::Same(hint),
@@ -377,7 +401,7 @@ impl Element for TextElement {
                         cache.runs.clear();
                         cache
                             .runs
-                            .extend(runs.iter().map(|run| text_run(theme, run)));
+                            .extend(runs.iter().map(|run| text_run(theme, fonts, run)));
                         match glyphs {
                             Glyphs::Kept(at) => {
                                 hint = at + 1;
@@ -385,7 +409,7 @@ impl Element for TextElement {
                             }
                             Glyphs::Shape => Rc::new(text_system.shape_line(
                                 SharedString::from(text.to_owned()),
-                                theme.mono_size,
+                                fonts.mono_size,
                                 &cache.runs,
                                 None,
                             )),
@@ -421,21 +445,21 @@ impl Element for TextElement {
                                     "{label:>width$}",
                                     width = gutter.digits as usize
                                 );
-                                let slot = match row.mark {
-                                    LineMark::Cursor => roles::LINENR_SELECTED,
-                                    LineMark::Plain => roles::LINENR,
+                                let number = match row.mark {
+                                    LineMark::Cursor => theme.editor.line_number_cursor,
+                                    LineMark::Plain => theme.editor.line_number,
                                 };
                                 let run = TextRun {
                                     len: cache.label.len(),
-                                    font: theme.mono[0].clone(),
-                                    color: theme.colors[slot],
+                                    font: fonts.mono[0].clone(),
+                                    color: hsla(number),
                                     background_color: None,
                                     underline: None,
                                     strikethrough: None,
                                 };
                                 Rc::new(text_system.shape_line(
                                     SharedString::from(cache.label.clone()),
-                                    theme.mono_size,
+                                    fonts.mono_size,
                                     &[run],
                                     None,
                                 ))
@@ -508,11 +532,11 @@ impl Element for TextElement {
                 (Focus::Focused(_), false, Some(cursor)) => {
                     let run = TextRun {
                         len: workspace.preedit.len(),
-                        font: theme.mono[0].clone(),
-                        color: theme.text,
-                        background_color: Some(theme.background),
+                        font: fonts.mono[0].clone(),
+                        color: hsla(theme.text),
+                        background_color: Some(hsla(theme.background)),
                         underline: Some(UnderlineStyle {
-                            color: Some(theme.text),
+                            color: Some(hsla(theme.text)),
                             thickness: px(1.),
                             wavy: false,
                         }),
@@ -520,7 +544,7 @@ impl Element for TextElement {
                     };
                     let line = text_system.shape_line(
                         SharedString::from(workspace.preedit.clone()),
-                        theme.mono_size,
+                        fonts.mono_size,
                         &[run],
                         None,
                     );
@@ -568,7 +592,7 @@ impl Element for TextElement {
         } = prepaint;
         let (origin, cell, gutter, focus) = (*text_origin, *cell, *gutter, *focus);
         let theme = &self.workspace.read(cx).theme;
-        let (colors, rows, tones) = (Colors(theme.colors.0), RowColors(theme.rows.0), theme.tones);
+        let (editor, rows, tones, staged) = (theme.editor, theme.rows, theme.tones, theme.staged);
         let pane = self.pane;
         let id = id.expect("text element has an id");
         let pointer = window.with_element_state(id, |cache: Option<Cache>, window| {
@@ -588,7 +612,7 @@ impl Element for TextElement {
                                     point(origin.x, y(index as u16)),
                                     size(text_width, cell.height),
                                 ),
-                                colors[roles::CURSORLINE],
+                                hsla(editor.cursorline),
                             )),
                         }
                     }
@@ -602,7 +626,7 @@ impl Element for TextElement {
                             point(origin.x, y(index as u16)),
                             size(text_width, cell.height),
                         ),
-                        rows[role],
+                        hsla(rows[role]),
                     )),
                     None => {}
                 }
@@ -616,12 +640,12 @@ impl Element for TextElement {
                             cell.height,
                         ),
                     ),
-                    colors[roles::SELECTION],
+                    hsla(editor.selection),
                 ));
             }
             let cursor_bg = |rank: Rank| match rank {
-                Rank::Primary => colors[roles::CURSOR_PRIMARY.bg],
-                Rank::Secondary => colors[roles::CURSOR_SECONDARY.bg],
+                Rank::Primary => hsla(editor.cursor_primary),
+                Rank::Secondary => hsla(editor.cursor_secondary),
             };
             for cursor in &frame.cursors {
                 match cursor.shape {
@@ -683,12 +707,11 @@ impl Element for TextElement {
                     DiffSign::Modified => (Tone::Modified, size(cell.width / 4., cell.height)),
                     DiffSign::Removed => (Tone::Removed, size(cell.width, px(2.))),
                 };
-                let tone = tones[tone as usize];
                 // Staged changes are dimmed; partly staged ones still need attention.
-                let color = match stage {
-                    Stage::Staged => tone.opacity(roles::STAGED_SIGN_ALPHA as f32 / 100.),
-                    Stage::Unstaged | Stage::Partial => tone,
-                };
+                let color = hsla(match stage {
+                    Stage::Staged => staged[tone],
+                    Stage::Unstaged | Stage::Partial => tones[tone],
+                });
                 window.paint_quad(fill(Bounds::new(point(diff_x, top), extent), color));
             }
 
@@ -696,17 +719,17 @@ impl Element for TextElement {
             match bar.scrollbar {
                 Scrollbar::Hidden => {}
                 Scrollbar::Shown(thumb) => {
-                    window.paint_quad(fill(track, colors[roles::SCROLLBAR_TRACK]));
-                    let slot = match cache.pointer.drag.get() {
-                        Drag::Thumb { .. } => roles::SCROLLBAR_THUMB_ACTIVE,
-                        Drag::Idle | Drag::Selecting(_) => roles::SCROLLBAR_THUMB,
+                    window.paint_quad(fill(track, hsla(editor.scrollbar_track)));
+                    let thumb_color = match cache.pointer.drag.get() {
+                        Drag::Thumb { .. } => editor.scrollbar_thumb_dragged,
+                        Drag::Idle | Drag::Selecting(_) => editor.scrollbar_thumb,
                     };
                     window.paint_quad(fill(
                         Bounds::new(
                             point(track.origin.x, track.origin.y + px(thumb.top)),
                             size(track.size.width, px(thumb.height)),
                         ),
-                        colors[slot],
+                        hsla(thumb_color),
                     ));
                 }
             }

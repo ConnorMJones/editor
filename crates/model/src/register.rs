@@ -1,22 +1,17 @@
 /// Which system clipboard a register maps to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Clipboard {
-    /// `+`
     System,
-    /// `*`, the X11/Wayland primary selection.
+    /// The X11/Wayland primary selection.
     Primary,
 }
 
 /// Helix registers; special registers compute their values on read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Register {
-    /// `_` discards writes and reads empty.
     BlackHole,
-    /// `#` reads the 1-based index of each selection.
     SelectionIndices,
-    /// `.` reads the selected text.
     SelectionContents,
-    /// `%` reads the buffer path.
     DocumentPath,
     Clipboard(Clipboard),
     Stored(Stored),

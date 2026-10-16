@@ -9,15 +9,16 @@ use serde::{Deserialize, Serialize};
 use crate::apply;
 use crate::git::diffview::DiffView;
 use crate::job::Job;
-use crate::project::path::RelPath;
-use crate::render::rendered::{Link, RenderedView, Scroll};
+use crate::project::path::{Folder, RelPath};
+use crate::render::document::{DocumentScroll, DocumentView};
+use crate::render::pages::{PagesScroll, PagesView};
+use crate::render::source::{Link, Source};
 use crate::sidebar::tree::{self, Dir, Fold, Listing};
-use crate::text::buffer::{BufferId, Content};
+use crate::text::buffer::Content;
 use crate::view::layout::{
-    Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, TabKey, Tabs, TextView,
-    View,
+    Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs, TextView, View,
 };
-use crate::{Effect, Focus, Sidebar, SidebarWidth, State};
+use crate::{Effect, Files, Focus, Sidebar, SidebarWidth, State};
 use model::git::Group;
 
 /// Workspace layout saved on exit and restored with `session.restore = "last"`.
@@ -29,39 +30,26 @@ pub struct Session {
     pub layout: SessionNode,
     pub focus: usize,
     pub sidebar: SessionSidebar,
-    /// Logical pixels; sessions saved before it existed use the default.
-    #[serde(default = "default_sidebar_width")]
-    pub sidebar_width: f32,
+    pub sidebar_width: SidebarWidth,
     /// Expanded tree directories relative to the root.
-    pub expanded: Vec<String>,
+    pub expanded: Vec<RelPath>,
     /// Collapsed groups of the Changes sidebar.
-    #[serde(default)]
     pub collapsed: Vec<Group>,
 }
 
-/// `flex` is the node's weight within its parent split; older sessions split evenly.
+/// `flex` is the node's weight within its parent split.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionNode {
     Pane {
         pane: usize,
-        #[serde(default = "even")]
-        flex: f32,
+        flex: Flex,
     },
     Split {
         axis: Axis,
         children: Vec<SessionNode>,
-        #[serde(default = "even")]
-        flex: f32,
+        flex: Flex,
     },
-}
-
-fn even() -> f32 {
-    Flex::EVEN.get()
-}
-
-fn default_sidebar_width() -> f32 {
-    SidebarWidth::DEFAULT.get()
 }
 
 /// `active` and `preview` index into `tabs`.
@@ -94,14 +82,24 @@ pub enum SessionItem {
         primary: usize,
         scroll: usize,
     },
-    /// A rendered view; the selection and scroll are the source position it toggles back to.
-    Rendered {
+    /// A document view; the selection and scroll are the source position it toggles back to.
+    Document {
         path: PathBuf,
         ranges: Vec<[usize; 2]>,
         primary: usize,
         scroll: usize,
         top: Top,
         /// Reading-order index of the pane it follows; standalone when absent.
+        #[serde(default)]
+        follows: Option<usize>,
+    },
+    /// A pages view, saved as a document view is; `top` counts pages.
+    Pages {
+        path: PathBuf,
+        ranges: Vec<[usize; 2]>,
+        primary: usize,
+        scroll: usize,
+        top: Top,
         #[serde(default)]
         follows: Option<usize>,
     },
@@ -120,7 +118,8 @@ pub enum Top {
 enum Saved {
     Text,
     Diff,
-    Rendered { top: Top, follows: Option<usize> },
+    Document { top: Top, follows: Option<usize> },
+    Pages { top: Top, follows: Option<usize> },
 }
 
 impl SessionItem {
@@ -128,7 +127,8 @@ impl SessionItem {
         match self {
             SessionItem::Text { path, .. }
             | SessionItem::Diff { path, .. }
-            | SessionItem::Rendered { path, .. } => (std::mem::discriminant(self), path),
+            | SessionItem::Document { path, .. }
+            | SessionItem::Pages { path, .. } => (std::mem::discriminant(self), path),
         }
     }
 }
@@ -156,8 +156,14 @@ pub enum SessionError {
     EmptySplit,
     #[error("pane {0} is not placed in the layout")]
     UnusedPane(usize),
-    #[error("split weight {0} is not a positive number")]
-    InvalidFlex(f32),
+    #[error("pane {pane}, tab {tab}: follows pane {follows}, which is not a pane with tabs")]
+    InvalidFollows {
+        pane: usize,
+        tab: usize,
+        follows: usize,
+    },
+    #[error("focus names pane {0}, which does not exist")]
+    MissingFocus(usize),
     #[error("pane {pane}: {reason}")]
     Tabs { pane: usize, reason: InvalidTabs },
 }
@@ -194,7 +200,7 @@ pub fn snapshot(state: &State) -> Session {
     let index: HashMap<PaneId, usize> = leaves.iter().enumerate().map(|(i, &p)| (p, i)).collect();
     let panes = leaves
         .iter()
-        .map(|&pane| match &state.layout.panes[pane].tabs {
+        .map(|&pane| match &state.layout.panes()[pane].tabs {
             None => SessionPane::Empty,
             Some(tabs) => SessionPane::Tabs {
                 tabs: tabs
@@ -224,22 +230,31 @@ pub fn snapshot(state: &State) -> Session {
                                 primary,
                                 scroll,
                             },
-                            View::Rendered(rendered) => SessionItem::Rendered {
+                            View::Document(view) => SessionItem::Document {
                                 path,
                                 ranges,
                                 primary,
                                 scroll,
-                                top: match rendered.scroll {
-                                    Scroll::Line(line) => Top::Line(line),
-                                    Scroll::Point(at) => Top::Item(at.page),
-                                    Scroll::At(at) | Scroll::Moved { from: at, .. } => {
-                                        Top::Item(at.item)
+                                top: match view.scroll {
+                                    DocumentScroll::Line(line) => Top::Line(line),
+                                    DocumentScroll::At(at)
+                                    | DocumentScroll::Moved { from: at, .. } => Top::Item(at.item),
+                                },
+                                follows: followed(&view.source.link, &index),
+                            },
+                            View::Pages(view) => SessionItem::Pages {
+                                path,
+                                ranges,
+                                primary,
+                                scroll,
+                                top: match view.scroll {
+                                    PagesScroll::Line(line) => Top::Line(line),
+                                    PagesScroll::Point(at) => Top::Item(at.page),
+                                    PagesScroll::At(at) | PagesScroll::Moved { from: at, .. } => {
+                                        Top::Item(at.page)
                                     }
                                 },
-                                follows: match rendered.link {
-                                    Link::Follows { pane, .. } => index.get(&pane).copied(),
-                                    Link::Standalone => None,
-                                },
+                                follows: followed(&view.source.link, &index),
                             },
                         }
                     })
@@ -249,28 +264,27 @@ pub fn snapshot(state: &State) -> Session {
             },
         })
         .collect();
-    let mut expanded: Vec<String> = state
-        .tree
-        .dirs
-        .iter()
-        .filter(|(path, dir)| !path.is_root() && dir.fold == Fold::Expanded)
-        .map(|(path, _)| path.as_str().to_owned())
+    let mut expanded: Vec<RelPath> = (state.tree.dirs.iter())
+        .filter_map(|(folder, dir)| match (folder, dir.fold) {
+            (Folder::Sub(path), Fold::Expanded) => Some(path.clone()),
+            (Folder::Root, _) | (Folder::Sub(_), Fold::Collapsed) => None,
+        })
         .collect();
     expanded.sort_unstable();
     Session {
         panes,
-        layout: snapshot_node(&state.layout.root, Flex::EVEN, &index),
-        focus: index[&state.layout.focus],
-        sidebar: match state.sidebar {
+        layout: snapshot_node(&state.layout.root(), Flex::EVEN, &index),
+        focus: index[&state.layout.focus()],
+        sidebar: match &state.sidebar {
             Sidebar::Hidden => SessionSidebar::Hidden,
             Sidebar::Files(_) => SessionSidebar::Shown,
             Sidebar::Changes(_) => SessionSidebar::Changes,
         },
-        sidebar_width: state.sidebar_width.get(),
+        sidebar_width: state.sidebar_width,
         expanded,
         collapsed: Group::ALL
             .into_iter()
-            .filter(|group| state.git.folds[*group as usize] == Fold::Collapsed)
+            .filter(|group| state.changes.folds[*group as usize] == Fold::Collapsed)
             .collect(),
     }
 }
@@ -279,7 +293,7 @@ fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> Ses
     match node {
         Node::Pane(pane) => SessionNode::Pane {
             pane: index[pane],
-            flex: flex.get(),
+            flex,
         },
         Node::Split { axis, children } => SessionNode::Split {
             axis: *axis,
@@ -287,7 +301,7 @@ fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> Ses
                 .iter()
                 .map(|c| snapshot_node(&c.node, c.flex, index))
                 .collect(),
-            flex: flex.get(),
+            flex,
         },
     }
 }
@@ -299,12 +313,17 @@ pub fn restore(
     session: Session,
     out: &mut Vec<Effect>,
 ) -> Result<(), SessionError> {
-    let mut used = vec![false; session.panes.len()];
-    check_node(&session.layout, &mut used)?;
-    match used.iter().position(|placed| !placed) {
+    let mut panes = slotmap::SlotMap::with_key();
+    let ids: Vec<PaneId> = (session.panes.iter())
+        .map(|_| panes.insert(Pane::EMPTY))
+        .collect();
+    let mut slots: Vec<Option<PaneId>> = ids.iter().copied().map(Some).collect();
+    let root = parse_node(session.layout, &mut slots)?.node;
+    match slots.iter().position(Option::is_some) {
         Some(pane) => return Err(SessionError::UnusedPane(pane)),
         None => {}
     }
+    let focus = *(ids.get(session.focus)).ok_or(SessionError::MissingFocus(session.focus))?;
     for (pane, saved) in session.panes.iter().enumerate() {
         let SessionPane::Tabs {
             tabs,
@@ -314,6 +333,29 @@ pub fn restore(
         else {
             continue;
         };
+        let follows = tabs.iter().enumerate().find_map(|(tab, item)| match item {
+            SessionItem::Document {
+                follows: Some(follows),
+                ..
+            }
+            | SessionItem::Pages {
+                follows: Some(follows),
+                ..
+            } => match session.panes.get(*follows) {
+                Some(SessionPane::Tabs { .. }) => None,
+                Some(SessionPane::Empty) | None => Some((tab, *follows)),
+            },
+            SessionItem::Document { follows: None, .. }
+            | SessionItem::Pages { follows: None, .. }
+            | SessionItem::Text { .. }
+            | SessionItem::Diff { .. } => None,
+        });
+        match follows {
+            Some((tab, follows)) => {
+                return Err(SessionError::InvalidFollows { pane, tab, follows });
+            }
+            None => {}
+        }
         let duplicate = tabs.iter().enumerate().position(|(index, item)| {
             tabs[..index]
                 .iter()
@@ -328,12 +370,7 @@ pub fn restore(
         };
         return Err(SessionError::Tabs { pane, reason });
     }
-    let focus_slot = session.focus.min(session.panes.len().saturating_sub(1));
 
-    let mut panes = slotmap::SlotMap::with_key();
-    let mut ids: Vec<PaneId> = Vec::with_capacity(session.panes.len());
-    // Rendered views and the pane slot each follows, linked once every pane exists.
-    let mut follows: Vec<(usize, BufferId, usize)> = Vec::new();
     for (pane, saved) in session.panes.into_iter().enumerate() {
         let SessionPane::Tabs {
             tabs,
@@ -341,7 +378,6 @@ pub fn restore(
             preview,
         } = saved
         else {
-            ids.push(panes.insert(Pane::EMPTY));
             continue;
         };
         // Saved index of each kept item; files deleted since are dropped, not recreated.
@@ -361,7 +397,7 @@ pub fn restore(
                     primary,
                     scroll,
                 } => (Saved::Diff, path, ranges, primary, scroll),
-                SessionItem::Rendered {
+                SessionItem::Document {
                     path,
                     ranges,
                     primary,
@@ -369,19 +405,26 @@ pub fn restore(
                     top,
                     follows,
                 } => (
-                    Saved::Rendered { top, follows },
+                    Saved::Document { top, follows },
                     path,
                     ranges,
                     primary,
                     scroll,
                 ),
+                SessionItem::Pages {
+                    path,
+                    ranges,
+                    primary,
+                    scroll,
+                    top,
+                    follows,
+                } => (Saved::Pages { top, follows }, path, ranges, primary, scroll),
             };
             // A diff also shows a file deleted from the worktree.
             let buffer = match (saved, path.is_file(), path.exists()) {
                 (_, true, _) | (Saved::Diff, false, false) => apply::load(state, path, out),
-                (Saved::Text | Saved::Rendered { .. }, false, _) | (Saved::Diff, false, true) => {
-                    None
-                }
+                (Saved::Text | Saved::Document { .. } | Saved::Pages { .. }, false, _)
+                | (Saved::Diff, false, true) => None,
             };
             let Some(buffer) = buffer else {
                 continue;
@@ -410,20 +453,26 @@ pub fn restore(
                     text: view,
                     ..DiffView::new(buffer)
                 }),
-                Saved::Rendered { top, follows: link } => {
-                    match link {
-                        Some(slot) => follows.push((pane, buffer, slot)),
-                        None => {}
-                    }
-                    let scroll = match top {
-                        Top::Item(item) => Scroll::item(item),
-                        Top::Line(line) => Scroll::Line(line),
-                    };
-                    View::Rendered(RenderedView {
+                Saved::Document { top, follows } => View::Document(DocumentView::new(
+                    Source {
                         text: view,
-                        ..RenderedView::new(buffer, Link::Standalone, scroll)
-                    })
-                }
+                        link: link(follows, &ids),
+                    },
+                    match top {
+                        Top::Item(item) => DocumentScroll::item(item),
+                        Top::Line(line) => DocumentScroll::Line(line),
+                    },
+                )),
+                Saved::Pages { top, follows } => View::Pages(PagesView::new(
+                    Source {
+                        text: view,
+                        link: link(follows, &ids),
+                    },
+                    match top {
+                        Top::Item(page) => PagesScroll::page(page),
+                        Top::Line(line) => PagesScroll::Line(line),
+                    },
+                )),
             };
             items.push(Item {
                 view,
@@ -445,37 +494,11 @@ pub fn restore(
                 Some(tabs)
             }
         };
-        ids.push(panes.insert(Pane { tabs }));
+        panes[ids[pane]].tabs = tabs;
     }
-    for (slot, buffer, source) in follows {
-        let Some(&source) = ids.get(source).filter(|id| panes[**id].tabs.is_some()) else {
-            continue;
-        };
-        let tabs = panes[ids[slot]].tabs.as_mut();
-        match tabs.and_then(|tabs| {
-            let index = tabs.find(TabKey::Rendered(buffer))?;
-            Some(&mut tabs.items_mut()[index].view)
-        }) {
-            Some(View::Rendered(view)) => {
-                view.link = Link::Follows {
-                    pane: source,
-                    seen: None,
-                }
-            }
-            Some(View::Text(_) | View::Diff(_)) | None => {}
-        }
-    }
-    state.layout = match ids.get(focus_slot) {
-        Some(&focus) => Layout {
-            root: restore_node(session.layout, &ids).node,
-            panes,
-            focus,
-            clock: state.layout.clock,
-        },
-        None => Layout::new(),
-    };
+    state.layout = Layout::restored(panes, root, focus, state.layout.clock);
     // Panes whose files were all deleted close, as an emptied pane does.
-    let empty: SmallVec<[PaneId; 4]> = (state.layout.panes.iter())
+    let empty: SmallVec<[PaneId; 4]> = (state.layout.panes().iter())
         .filter(|(_, pane)| pane.tabs.is_none())
         .map(|(id, _)| id)
         .collect();
@@ -488,82 +511,76 @@ pub fn restore(
 
     state.sidebar = match session.sidebar {
         SessionSidebar::Hidden => Sidebar::Hidden,
-        SessionSidebar::Shown => Sidebar::Files(Focus::Editor),
+        SessionSidebar::Shown => Sidebar::Files(Files::Editor),
         SessionSidebar::Changes => Sidebar::Changes(Focus::Editor),
     };
-    state.sidebar_width = SidebarWidth::new(session.sidebar_width);
+    state.sidebar_width = session.sidebar_width;
     for group in session.collapsed {
-        state.git.folds[group as usize] = Fold::Collapsed;
+        state.changes.folds[group as usize] = Fold::Collapsed;
     }
-    for dir in session.expanded {
-        match RelPath::parse(&dir) {
-            Ok(path) if !path.is_root() => {
-                state.tree.dirs.insert(
-                    path.clone(),
-                    Dir {
-                        fold: Fold::Expanded,
-                        listing: Listing::Loading,
-                    },
-                );
-                out.push(Effect::Job(Job::ListDir {
-                    root: state.root.path().to_owned(),
-                    dir: path,
-                }));
-            }
-            Ok(_) | Err(_) => {}
-        }
+    for path in session.expanded {
+        let dir = Dir {
+            fold: Fold::Expanded,
+            listing: Listing::Loading,
+        };
+        state.tree.dirs.insert(Folder::Sub(path.clone()), dir);
+        out.push(Effect::Job(Job::ListDir {
+            root: state.project.root.path().to_owned(),
+            dir: Folder::Sub(path),
+        }));
     }
     tree::rebuild(&mut state.tree);
     Ok(())
 }
 
-/// Every pane index must exist and appear exactly once; splits need two or more children and
-/// every weight must be positive.
-fn check_node(node: &SessionNode, used: &mut [bool]) -> Result<(), SessionError> {
+/// Builds the layout tree, taking each pane's id from `slots` as the tree places it.
+fn parse_node(node: SessionNode, slots: &mut [Option<PaneId>]) -> Result<Child, SessionError> {
     match node {
-        SessionNode::Pane { flex, .. } | SessionNode::Split { flex, .. }
-            if Flex::new(*flex).is_none() =>
-        {
-            Err(SessionError::InvalidFlex(*flex))
-        }
-        SessionNode::Pane { pane, .. } => match used.get_mut(*pane) {
-            None => Err(SessionError::MissingPane(*pane)),
-            Some(true) => Err(SessionError::DuplicatePane(*pane)),
-            Some(slot) => {
-                *slot = true;
-                Ok(())
-            }
+        SessionNode::Pane { pane, flex } => match slots.get_mut(pane) {
+            None => Err(SessionError::MissingPane(pane)),
+            Some(slot) => match slot.take() {
+                Some(id) => Ok(Child {
+                    flex,
+                    node: Node::Pane(id),
+                }),
+                None => Err(SessionError::DuplicatePane(pane)),
+            },
         },
-        SessionNode::Split { children, .. } => match children.len() {
-            0 | 1 => Err(SessionError::EmptySplit),
-            _ => children
-                .iter()
-                .try_for_each(|child| check_node(child, used)),
-        },
-    }
-}
-
-/// Builds the layout tree from a node that passed `check_node`.
-fn restore_node(node: SessionNode, ids: &[PaneId]) -> Child {
-    let (flex, node) = match node {
-        SessionNode::Pane { pane, flex } => (flex, Node::Pane(ids[pane])),
         SessionNode::Split {
             axis,
             children,
             flex,
-        } => (
-            flex,
-            Node::Split {
-                axis,
-                children: children
-                    .into_iter()
-                    .map(|child| restore_node(child, ids))
-                    .collect(),
-            },
-        ),
-    };
-    Child {
-        flex: Flex::new(flex).expect("checked by check_node"),
-        node,
+        } => match children.len() {
+            0 | 1 => Err(SessionError::EmptySplit),
+            _ => Ok(Child {
+                flex,
+                node: Node::Split {
+                    axis,
+                    children: (children.into_iter())
+                        .map(|child| parse_node(child, slots))
+                        .collect::<Result<_, _>>()?,
+                },
+            }),
+        },
+    }
+}
+
+/// The link to the pane in reading-order slot `follows`, which restore checked exists.
+fn link<S>(follows: Option<usize>, ids: &[PaneId]) -> Link<S> {
+    // A followed pane left without files closes after restore, unlinking this.
+    match follows {
+        Some(slot) => Link::Follows {
+            pane: ids[slot],
+            seen: None,
+        },
+        None => Link::Standalone,
+    }
+}
+
+/// The reading-order slot of the pane `link` follows.
+fn followed<S>(link: &Link<S>, index: &HashMap<PaneId, usize>) -> Option<usize> {
+    match link {
+        Link::Follows { pane, .. } => index.get(pane).copied(),
+        Link::Standalone => None,
     }
 }

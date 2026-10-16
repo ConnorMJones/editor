@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
@@ -8,21 +8,21 @@ use std::time::SystemTime;
 use git2::Oid;
 use helix_core::regex::bytes::Regex;
 use helix_core::syntax::Loader;
-use helix_core::{Range, Rope, Selection};
+use helix_core::{Range, Rope};
 use model::command::{Command, Dirs};
 use model::notice::Notice;
 
 use crate::apply::map_views;
 use crate::git::diff::{Base, BaseRead, Diff, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
-use crate::project::files::{self, Changed, Files, Rescan, Walked};
+use crate::project::files::{self, Changed, FileIndex, Indexed, OnIndexed, Rescan, Walked};
 use crate::text::buffer::{BufferId, Content, Disk, Jump, TextDoc};
 
 use crate::input::picker::{self, Hit, Items, Preview, Search};
-use crate::project::path::RelPath;
+use crate::project::path::{Folder, RelPath};
 use crate::sidebar::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
 use crate::{
-    Effect, Exit, Overlay, Refresh, Repo, State, git::changes, project::backlinks, project::links,
+    Effect, Exit, Overlay, Refresh, Repo, State, git::stage, git::track, project::backlinks,
     project::watch, render::typeset, request_git,
 };
 
@@ -53,7 +53,7 @@ pub enum Job {
     },
     ListDir {
         root: PathBuf,
-        dir: RelPath,
+        dir: Folder,
     },
     Rescan {
         root: PathBuf,
@@ -62,11 +62,10 @@ pub enum Job {
     GitStatus {
         root: PathBuf,
     },
-    /// Re-reads a buffer's file unless its mtime still matches.
     Reload {
         buffer: BufferId,
         path: PathBuf,
-        mtime: Option<SystemTime>,
+        when: ReloadIf,
         policy: ReloadPolicy,
     },
     Fs {
@@ -152,8 +151,7 @@ pub enum JobResult {
         buffer: BufferId,
         path: PathBuf,
         revision: usize,
-        result: io::Result<usize>,
-        mtime: Option<SystemTime>,
+        result: io::Result<Written>,
     },
     Exported {
         path: PathBuf,
@@ -163,7 +161,7 @@ pub enum JobResult {
 
     Indexed(Walked),
     Listed {
-        dir: RelPath,
+        dir: Folder,
         result: io::Result<Vec<Entry>>,
     },
     Rescanned(Rescan),
@@ -213,12 +211,21 @@ pub enum JobResult {
     },
 }
 
+/// When a reload reads the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadIf {
+    ChangedSince(SystemTime),
+    Always,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Written {
+    pub bytes: usize,
+    pub mtime: SystemTime,
+}
+
 pub enum OpenRead {
-    Text {
-        doc: TextDoc,
-        disk: Disk,
-        mtime: Option<SystemTime>,
-    },
+    Text { doc: TextDoc, disk: Disk },
     NotUtf8,
     NotAFile,
     Failed(io::Error),
@@ -226,13 +233,14 @@ pub enum OpenRead {
 
 pub enum DiskRead {
     Unchanged,
-    Changed {
-        text: Rope,
-        mtime: Option<SystemTime>,
-    },
+    Changed { text: Rope, mtime: SystemTime },
     Missing,
     NotUtf8,
     Failed(io::Error),
+}
+
+fn modified(path: &Path) -> io::Result<SystemTime> {
+    std::fs::metadata(path)?.modified()
 }
 
 pub fn run(job: Job) -> JobResult {
@@ -243,18 +251,17 @@ pub fn run(job: Job) -> JobResult {
             languages,
         } => {
             let read = match std::fs::read(&path) {
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => OpenRead::Text {
+                Ok(bytes) => match (String::from_utf8(bytes), modified(&path)) {
+                    (Ok(text), Ok(mtime)) => OpenRead::Text {
                         doc: TextDoc::new(Rope::from(text), &path, &languages),
-                        disk: Disk::Synced,
-                        mtime: std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+                        disk: Disk::Synced { mtime },
                     },
-                    Err(_) => OpenRead::NotUtf8,
+                    (Err(_), _) => OpenRead::NotUtf8,
+                    (Ok(_), Err(error)) => OpenRead::Failed(error),
                 },
                 Err(error) if error.kind() == io::ErrorKind::NotFound => OpenRead::Text {
                     doc: TextDoc::new(Rope::new(), &path, &languages),
                     disk: Disk::New,
-                    mtime: None,
                 },
                 Err(error) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
                 Err(error) => OpenRead::Failed(error),
@@ -278,26 +285,23 @@ pub fn run(job: Job) -> JobResult {
                     writer.write_all(chunk.as_bytes())?;
                 }
                 writer.flush()?;
-                Ok(text.len_bytes())
+                Ok(Written {
+                    bytes: text.len_bytes(),
+                    mtime: modified(&path)?,
+                })
             });
-            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             JobResult::Written {
                 buffer,
                 path,
                 revision,
                 result,
-                mtime,
             }
         }
         Job::Export { path, bytes } => JobResult::Exported {
             result: std::fs::write(&path, &bytes).map(|()| bytes.len()),
             path,
         },
-        Job::Index { root } => {
-            let mut walked = files::walk(&root, &RelPath::ROOT, None);
-            walked.dirs.push(RelPath::ROOT);
-            JobResult::Indexed(walked)
-        }
+        Job::Index { root } => JobResult::Indexed(files::walk(&root, &Folder::Root, None)),
         Job::ListDir { root, dir } => {
             let result = tree::list(&root, &dir);
             JobResult::Listed { dir, result }
@@ -307,15 +311,17 @@ pub fn run(job: Job) -> JobResult {
         Job::Reload {
             buffer,
             path,
-            mtime,
+            when,
             policy,
         } => {
-            let read = match std::fs::metadata(&path) {
+            let read = match modified(&path) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => DiskRead::Missing,
                 Err(error) => DiskRead::Failed(error),
-                Ok(meta) => match (meta.modified().ok(), mtime) {
-                    (Some(now), Some(known)) if now == known => DiskRead::Unchanged,
-                    (now, _) => match std::fs::read(&path).map(String::from_utf8) {
+                Ok(now) => match when {
+                    ReloadIf::ChangedSince(known) if now == known => DiskRead::Unchanged,
+                    ReloadIf::ChangedSince(_) | ReloadIf::Always => match std::fs::read(&path)
+                        .map(String::from_utf8)
+                    {
                         Ok(Ok(text)) => DiskRead::Changed {
                             text: Rope::from(text),
                             mtime: now,
@@ -476,17 +482,16 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 Content::Text { .. } => return,
             };
             let notice = match read {
-                OpenRead::Text { doc, disk, mtime } => {
+                OpenRead::Text { doc, disk } => {
                     let len = doc.text.len_chars();
                     entry.content = Content::Text {
                         doc,
                         disk,
-                        mtime,
                         diff: Diff::LOADING,
                     };
-                    changes::request_bases(state, buffer, out);
+                    track::request_bases(state, buffer, out);
                     // Views restored from a session were placed before the length was known.
-                    for pane in state.layout.panes.values_mut() {
+                    for pane in state.layout.panes_mut().map(|(_, pane)| pane) {
                         for item in pane.items_mut() {
                             let view = item.view.text_mut();
                             match view.buffer() == buffer {
@@ -533,29 +538,22 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     None => {}
                 }
             }
-            Overlay::None | Overlay::Prompt(_) => {}
+            Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
         },
         JobResult::Written {
             buffer,
             path,
             revision,
-            result: Ok(bytes),
-            mtime,
+            result: Ok(Written { bytes, mtime }),
         } => {
             match state
                 .buffers
                 .get_mut(buffer)
                 .map(|entry| &mut entry.content)
             {
-                Some(Content::Text {
-                    doc,
-                    disk,
-                    mtime: known,
-                    ..
-                }) => {
+                Some(Content::Text { doc, disk, .. }) => {
                     doc.saved_revision = revision;
-                    *disk = Disk::Synced;
-                    *known = mtime;
+                    *disk = Disk::Synced { mtime };
                 }
                 Some(Content::Loading { .. }) | None => {}
             }
@@ -586,9 +584,10 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         }
 
         JobResult::Indexed(walked) => {
-            let root = state.root.path();
+            let root = state.project.root.path();
+            let dirs = walked.dirs.iter().map(|dir| dir.to_path(root));
             out.push(Effect::Watch(
-                walked.dirs.iter().map(|dir| dir.to_path(root)).collect(),
+                std::iter::once(root.to_owned()).chain(dirs).collect(),
             ));
             let files = Arc::new(walked.files);
             match &mut state.overlay {
@@ -599,11 +598,25 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     }
                     Items::Buffers(_) | Items::Commands | Items::Grep(_) | Items::Backlinks(_) => {}
                 },
-                Overlay::None | Overlay::Prompt(_) => {}
+                Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
             }
-            state.files = Files::Ready(files);
-            links::invalidate(&mut state.vault);
-            backlinks::reconcile(state, out);
+            let then = match &mut state.project.index {
+                FileIndex::Loading { then } => {
+                    let then = *then;
+                    state.project.index = FileIndex::Ready(Indexed::new(files));
+                    then
+                }
+                // A second walk keeps what the first built and resolves links again.
+                FileIndex::Ready(indexed) => {
+                    indexed.files = files;
+                    indexed.changed();
+                    OnIndexed::Nothing
+                }
+            };
+            match then {
+                OnIndexed::Nothing => backlinks::reconcile(state, out),
+                OnIndexed::BuildBacklinks => backlinks::ensure(state, out),
+            }
             crate::view::panes::request_preview(state, out);
         }
         JobResult::Listed { dir, result } => {
@@ -616,13 +629,13 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     return;
                 }
             };
-            out.push(Effect::Watch(vec![dir.to_path(state.root.path())]));
+            out.push(Effect::Watch(vec![dir.to_path(state.project.root.path())]));
             // Forget expansion state of subdirectories that disappeared.
-            state.tree.dirs.retain(|path, _| match path.parent() {
-                Some(parent) if parent == dir.as_str() => entries
+            state.tree.dirs.retain(|folder, _| match folder {
+                Folder::Sub(path) if path.folder_path() == dir.as_str() => entries
                     .iter()
                     .any(|e| e.kind == EntryKind::Dir && e.name == path.name()),
-                Some(_) | None => true,
+                Folder::Sub(_) | Folder::Root => true,
             });
             match state.tree.dirs.get_mut(&dir) {
                 Some(existing) => existing.listing = Listing::Loaded(entries),
@@ -639,7 +652,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             tree::rebuild(&mut state.tree);
         }
         JobResult::Rescanned(rescan) => {
-            let root = state.root.path();
+            let root = state.project.root.path();
             let new_dirs: Vec<PathBuf> = rescan
                 .subtrees
                 .iter()
@@ -650,13 +663,13 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 true => {}
                 false => out.push(Effect::Watch(new_dirs)),
             }
-            let changed = match &mut state.files {
-                Files::Ready(files) => files::apply_rescan(Arc::make_mut(files), rescan),
-                Files::Loading => Changed::No,
+            // Before the first walk ends, the walk itself sees these changes.
+            let FileIndex::Ready(indexed) = &mut state.project.index else {
+                return;
             };
-            match changed {
+            match files::apply_rescan(Arc::make_mut(&mut indexed.files), rescan) {
                 Changed::Yes => {
-                    links::invalidate(&mut state.vault);
+                    indexed.changed();
                     backlinks::reconcile(state, out);
                 }
                 Changed::No => {}
@@ -669,7 +682,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     workdir,
                     snapshot,
                 })) => {
-                    match &state.git.repo {
+                    match &state.project.git {
                         Repo::Found { git_dir: known, .. } if *known == git_dir => {}
                         // Commits move refs and the reflog without touching the git dir itself.
                         Repo::Found { .. } | Repo::None | Repo::Unknown => out.push(Effect::Watch(
@@ -683,25 +696,25 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                             .collect(),
                         )),
                     }
-                    state.git.repo = Repo::Found {
+                    state.project.git = Repo::Found {
                         git_dir,
                         workdir,
                         snapshot,
                     };
-                    changes::request_all_bases(state, out);
+                    track::request_all_bases(state, out);
                 }
                 Ok(None) => {
-                    state.git.repo = Repo::None;
-                    changes::request_all_bases(state, out);
+                    state.project.git = Repo::None;
+                    track::request_all_bases(state, out);
                 }
                 Err(error) => tracing::warn!(%error, "git status failed"),
             }
-            match state.git.refresh {
+            match state.project.refresh {
                 Refresh::Queued => {
-                    state.git.refresh = Refresh::Idle;
+                    state.project.refresh = Refresh::Idle;
                     request_git(state, out);
                 }
-                Refresh::Running | Refresh::Idle => state.git.refresh = Refresh::Idle,
+                Refresh::Running | Refresh::Idle => state.project.refresh = Refresh::Idle,
             }
         }
         JobResult::Reloaded {
@@ -720,13 +733,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 return;
             };
             // The pending open reads the file itself.
-            let Content::Text {
-                doc,
-                disk,
-                mtime: known,
-                ..
-            } = &mut entry.content
-            else {
+            let Content::Text { doc, disk, .. } = &mut entry.content else {
                 return;
             };
             let keep = match (doc.is_modified(), policy) {
@@ -753,31 +760,22 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         error,
                     });
                 }
-                (DiskRead::Changed { .. }, true) => {
-                    *disk = Disk::ChangedExternally;
+                (DiskRead::Changed { mtime, .. }, true) => {
+                    *disk = Disk::ChangedExternally { mtime };
                     *notice = Some(Notice::ChangedOnDisk {
                         path: entry.path.clone(),
                     });
                 }
                 (DiskRead::Changed { text, mtime }, false) => {
                     let tx = helix_core::diff::compare_ropes(&doc.text, &text);
-                    let selection = layout
-                        .panes
-                        .values()
-                        .flat_map(|pane| pane.items())
-                        .find_map(|item| {
-                            let view = item.view.text();
-                            (view.buffer() == buffer).then(|| view.selection.clone())
-                        })
-                        .unwrap_or_else(|| Selection::point(0));
+                    let selection = layout.selection_of(buffer);
                     // Unsaved edits stay their own undo step below the reload.
                     doc.commit(&selection);
                     doc.apply(&tx, &selection, languages);
                     map_views(layout, buffer, tx.changes(), doc.text.slice(..));
                     doc.commit(&selection.map(tx.changes()));
                     doc.saved_revision = doc.history.current_revision();
-                    *disk = Disk::Synced;
-                    *known = mtime;
+                    *disk = Disk::Synced { mtime };
                 }
             }
         }
@@ -790,12 +788,12 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                 FsOp::Rename { from, .. } => from,
             };
             state.notice = Some(Notice::FileOpFailed {
-                path: path.to_path(state.root.path()),
+                path: path.to_path(state.project.root.path()),
                 error,
             });
         }
         JobResult::Fs { op, result: Ok(()) } => {
-            let root = state.root.path().to_owned();
+            let root = state.project.root.path().to_owned();
             let changed = match op {
                 FsOp::Create { path, kind } => {
                     let changed = vec![path.to_path(&root)];
@@ -813,30 +811,29 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                         let Ok(rel) = RelPath::new(&root, &buffer.path) else {
                             continue;
                         };
-                        match rel.is_within(from.as_str()) {
+                        match rel.is_within(&from) {
                             true => buffer.path = rel.rebase(&from, &to).to_path(&root),
                             false => {}
                         }
                     }
-                    let moved: Vec<RelPath> = state
-                        .tree
-                        .dirs
-                        .keys()
-                        .filter(|dir| dir.is_within(from.as_str()))
-                        .cloned()
+                    let moved: Vec<(RelPath, Dir)> = (state.tree.dirs)
+                        .extract_if(
+                            |folder, _| matches!(folder, Folder::Sub(dir) if dir.is_within(&from)),
+                        )
+                        .filter_map(|(folder, entry)| match folder {
+                            Folder::Sub(dir) => Some((dir.rebase(&from, &to), entry)),
+                            Folder::Root => None,
+                        })
                         .collect();
-                    for dir in moved {
-                        if let Some(entry) = state.tree.dirs.remove(&dir) {
-                            state.tree.dirs.insert(dir.rebase(&from, &to), entry);
-                        }
+                    for (dir, entry) in moved {
+                        state.tree.dirs.insert(Folder::Sub(dir), entry);
                     }
                     vec![from.to_path(&root), to.to_path(&root)]
                 }
                 FsOp::Remove { path, .. } => {
-                    state
-                        .tree
-                        .dirs
-                        .retain(|dir, _| !dir.is_within(path.as_str()));
+                    state.tree.dirs.retain(
+                        |folder, _| !matches!(folder, Folder::Sub(dir) if dir.is_within(&path)),
+                    );
                     vec![path.to_path(&root)]
                 }
             };
@@ -856,16 +853,14 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             tracing::warn!(?path, %error, "export failed");
             state.notice = Some(Notice::WriteFailed { path, error });
         }
-        JobResult::Bases { buffer, result } => changes::bases_read(state, buffer, result, out),
+        JobResult::Bases { buffer, result } => track::bases_read(state, buffer, result, out),
         JobResult::Diffed {
             buffer,
             stamp,
             lines,
             outcome,
-        } => changes::diffed(state, buffer, stamp, lines, outcome),
-        JobResult::GitIndexed { path, op, result } => {
-            changes::indexed(state, path, op, result, out)
-        }
+        } => track::diffed(state, buffer, stamp, lines, outcome),
+        JobResult::GitIndexed { path, op, result } => stage::indexed(state, path, op, result, out),
         JobResult::HeadParsed { buffer, oid, doc } => {
             crate::git::diffview::head_parsed(state, buffer, oid, doc)
         }
@@ -889,7 +884,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
                     | Items::Commands
                     | Items::Backlinks(_) => {}
                 },
-                Overlay::None | Overlay::Prompt(_) => {}
+                Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
             }
             crate::view::panes::request_preview(state, out);
         }

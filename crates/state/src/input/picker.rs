@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::regex::bytes::{Regex, RegexBuilder};
 use model::command::{
-    Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, Take, TreeCommand, WindowCommand,
+    Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, PickerKind, Take, TreeCommand,
+    WindowCommand,
 };
-use model::window::{Axis, PickerKind, Side};
+use model::window::{Axis, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 

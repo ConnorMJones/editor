@@ -1,14 +1,18 @@
 use std::fs;
 
-use model::command::RenderedCommand;
+use model::command::{ReadCommand, ReadMove};
 use model::notice::Notice;
-use model::window::Px;
+use model::units::Px;
 use state::input::keymap::Context;
 use state::project::links::{self, Origin};
 use state::project::path::RelPath;
 use state::project::session;
+use state::render;
+use state::render::document::{
+    self, BlockClick, DocumentAt, DocumentMotion, DocumentScroll, DocumentView,
+};
 use state::render::markdown::{LinkTarget, WikiLink};
-use state::render::rendered::{self, BlockScroll, Link, Motion, Preview, RenderedView, Scroll};
+use state::render::source::Link;
 use state::text::buffer::Content;
 use state::view::layout::{PaneId, View};
 use state::{Confirm, input};
@@ -39,16 +43,18 @@ fn harness() -> (tempfile::TempDir, Harness) {
     (dir, h)
 }
 
-fn rendered_in(h: &Harness, pane: PaneId) -> &RenderedView {
-    match h.state.layout.panes[pane].active() {
-        Some(View::Rendered(view)) => view,
-        Some(View::Text(_) | View::Diff(_)) | None => panic!("pane shows no rendered view"),
+fn rendered_in(h: &Harness, pane: PaneId) -> &DocumentView {
+    match h.state.layout.panes()[pane].active() {
+        Some(View::Document(view)) => view,
+        Some(View::Text(_) | View::Diff(_) | View::Pages(_)) | None => {
+            panic!("pane shows no rendered view")
+        }
     }
 }
 
 /// The other pane of a two-pane layout.
 fn other(h: &Harness) -> PaneId {
-    let focus = h.state.layout.focus;
+    let focus = h.state.layout.focus();
     *h.state
         .layout
         .leaves()
@@ -63,7 +69,7 @@ fn cursor_line(h: &Harness) -> usize {
 }
 
 fn top_line(h: &Harness, pane: PaneId) -> usize {
-    let view = h.state.layout.panes[pane].active().unwrap().text();
+    let view = h.state.layout.panes()[pane].active().unwrap().text();
     let doc = match &h.state.buffers[view.buffer()].content {
         Content::Text { doc, .. } => doc,
         Content::Loading { .. } => panic!("loading"),
@@ -74,10 +80,10 @@ fn top_line(h: &Harness, pane: PaneId) -> usize {
 #[test]
 fn space_v_opens_and_closes_a_following_split() {
     let (_dir, mut h) = harness();
-    let source = h.state.layout.focus;
+    let source = h.state.layout.focus();
     h.keys("<space>v");
     assert_eq!(h.state.layout.leaves().len(), 2);
-    assert_eq!(h.state.layout.focus, source, "focus stays in the text");
+    assert_eq!(h.state.layout.focus(), source, "focus stays in the text");
     let preview = other(&h);
     assert_eq!(
         h.state.layout.leaves(),
@@ -86,15 +92,13 @@ fn space_v_opens_and_closes_a_following_split() {
     );
     assert_eq!(h.tabs(preview), ["◉note.md"]);
     assert!(matches!(
-        rendered_in(&h, preview).link,
+        rendered_in(&h, preview).source.link,
         Link::Follows { pane, .. } if pane == source
     ));
     let buffer = h.view().buffer();
-    match h.state.previews.get(buffer) {
-        Some(Preview::Markdown(parsed)) => {
-            assert_eq!(parsed.version, h.doc().version, "parsed for the view")
-        }
-        Some(Preview::Typst(_)) | None => panic!("no parse while shown"),
+    match h.state.documents.get(buffer) {
+        Some(parsed) => assert_eq!(parsed.version, h.doc().version, "parsed for the view"),
+        None => panic!("no parse while shown"),
     }
 
     // Again from the text closes it, and the buffer stays.
@@ -102,16 +106,16 @@ fn space_v_opens_and_closes_a_following_split() {
     assert_eq!(h.state.layout.leaves(), [source]);
     assert_eq!(h.focused_tabs(), ["note.md"]);
     assert!(
-        h.state.previews.get(buffer).is_none(),
+        h.state.documents.get(buffer).is_none(),
         "the parse goes with the view"
     );
 
     // From the rendered side it closes too, returning focus to the text.
     h.keys("<space>v<C-w>l");
-    assert_eq!(input::context(&h.state), Context::Rendered);
+    assert_eq!(input::context(&h.state), Context::Document);
     h.keys("<space>v");
     assert_eq!(h.state.layout.leaves(), [source]);
-    assert_eq!(h.state.layout.focus, source);
+    assert_eq!(h.state.layout.focus(), source);
 }
 
 #[test]
@@ -127,27 +131,27 @@ fn space_capital_v_toggles_in_place_keeping_the_position() {
     let (_dir, mut h) = harness();
     h.keys("11gg<space>V");
     assert_eq!(h.focused_tabs(), ["note.md", "◉note.md"]);
-    let focus = h.state.layout.focus;
-    assert_eq!(rendered_in(&h, focus).link, Link::Standalone);
-    assert_eq!(input::context(&h.state), Context::Rendered);
+    let focus = h.state.layout.focus();
+    assert_eq!(rendered_in(&h, focus).source.link, Link::Standalone);
+    assert_eq!(input::context(&h.state), Context::Document);
     // `]]` and `[[` move between top-level headings; `gg` and `ge` go to the ends.
-    assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(5));
+    assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(5));
     h.keys("]]");
-    assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(6));
+    assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(6));
     h.keys("[[[[");
-    assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(0));
+    assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(0));
     h.keys("ge");
-    assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(9));
+    assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(9));
     h.keys("]]");
     assert!(matches!(h.state.notice, Some(Notice::NoHeading)));
     h.keys("[[");
-    assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(6));
+    assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(6));
 
     // Back to text at the heading the view showed, cursor moved there since it was out of view.
     h.keys("<space>V");
     assert_eq!(h.focused_tabs(), ["note.md", "◉note.md"]);
     assert!(matches!(
-        h.state.layout.panes[focus].active(),
+        h.state.layout.panes()[focus].active(),
         Some(View::Text(_))
     ));
     assert_eq!(top_line(&h, focus), 12);
@@ -156,7 +160,7 @@ fn space_capital_v_toggles_in_place_keeping_the_position() {
     // `esc` in a standalone view toggles back too.
     h.keys("<space>V<esc>");
     assert!(matches!(
-        h.state.layout.panes[focus].active(),
+        h.state.layout.panes()[focus].active(),
         Some(View::Text(_))
     ));
 }
@@ -164,36 +168,35 @@ fn space_capital_v_toggles_in_place_keeping_the_position() {
 #[test]
 fn source_cursor_and_scroll_move_the_rendered_view() {
     let (_dir, mut h) = harness();
-    let source = h.state.layout.focus;
+    let source = h.state.layout.focus();
     h.keys("<space>v");
     let preview = other(&h);
-    assert_eq!(rendered_in(&h, preview).scroll, Scroll::item(0));
+    assert_eq!(rendered_in(&h, preview).scroll, DocumentScroll::item(0));
     // Line 10 is "para four", block 5.
     h.keys("11gg");
-    assert_eq!(rendered_in(&h, preview).scroll, Scroll::item(5));
+    assert_eq!(rendered_in(&h, preview).scroll, DocumentScroll::item(5));
     // Within the same block nothing moves.
     h.keys("l");
-    assert_eq!(rendered_in(&h, preview).scroll, Scroll::item(5));
+    assert_eq!(rendered_in(&h, preview).scroll, DocumentScroll::item(5));
     // A scroll of the source with the cursor in place follows the top line.
     h.run(|state, _| state::view::scroll::scroll_to_line(state, source, 6));
-    assert_eq!(rendered_in(&h, preview).scroll, Scroll::item(3));
+    assert_eq!(rendered_in(&h, preview).scroll, DocumentScroll::item(3));
 }
 
 #[test]
 fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
     let (_dir, mut h) = harness();
-    let source = h.state.layout.focus;
+    let source = h.state.layout.focus();
     h.keys("<space>v");
     let preview = other(&h);
     // The host reports the list now shows item 8 ("para six", line 16).
     h.run(|state, _| {
-        rendered::scrolled(
+        document::scrolled(
             state,
             preview,
-            BlockScroll {
+            DocumentAt {
                 item: 8,
                 offset: Px(3.0),
-                left: Px(0.0),
             },
         )
     });
@@ -202,33 +205,30 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
     // The sync that follows does not bounce the view back to the cursor.
     assert_eq!(
         rendered_in(&h, preview).scroll,
-        Scroll::At(BlockScroll {
+        DocumentScroll::At(DocumentAt {
             item: 8,
             offset: Px(3.0),
-            left: Px(0.0),
         })
     );
     // Within the same item the source is left alone.
     h.run(|state, _| state::view::scroll::scroll_to_line(state, source, 0));
     h.run(|state, _| {
-        rendered::scrolled(
+        document::scrolled(
             state,
             preview,
-            BlockScroll {
+            DocumentAt {
                 item: 0,
                 offset: Px(0.0),
-                left: Px(0.0),
             },
         )
     });
     h.run(|state, _| {
-        rendered::scrolled(
+        document::scrolled(
             state,
             preview,
-            BlockScroll {
+            DocumentAt {
                 item: 0,
                 offset: Px(20.0),
-                left: Px(0.0),
             },
         )
     });
@@ -238,62 +238,67 @@ fn scrolling_the_rendered_view_scrolls_the_source_not_its_cursor() {
 #[test]
 fn clicking_a_block_moves_the_source_cursor_and_focus() {
     let (_dir, mut h) = harness();
-    let source = h.state.layout.focus;
+    let source = h.state.layout.focus();
     h.keys("<space>v<C-w>l");
-    let preview = h.state.layout.focus;
-    let block = {
-        let buffer = rendered_in(&h, preview).text.buffer();
-        let doc = state::text::buffer::doc(&h.state.buffers, buffer).expect("loaded");
-        rendered::markdown(&h.state.previews, buffer, doc)
-            .unwrap()
-            .roots[6]
+    let preview = h.state.layout.focus();
+    // As the host draws it: the block's first line at the parsed version.
+    let click = {
+        let buffer = rendered_in(&h, preview).source.text.buffer();
+        let doc = h.state.buffers[buffer].doc().expect("loaded");
+        let markdown = document::markdown(&h.state.documents, buffer, doc).unwrap();
+        BlockClick {
+            line: markdown.blocks[markdown.roots[6]].lines.start,
+            version: doc.version,
+        }
     };
-    h.run(|state, _| rendered::click(state, preview, block));
-    assert_eq!(h.state.layout.focus, source);
+    h.run(|state, _| document::click(state, preview, click));
+    assert_eq!(h.state.layout.focus(), source);
     assert_eq!(cursor_line(&h), 12);
+
+    // A click drawn before an edit is ignored.
+    h.keys("ggOx<esc><C-w>l");
+    h.run(|state, _| document::click(state, preview, click));
+    assert_eq!(h.state.layout.focus(), preview);
 }
 
 #[test]
 fn rendered_keys_scroll_by_motions_for_the_host_to_measure() {
     let (_dir, mut h) = harness();
     h.keys("<space>v<C-w>l");
-    let preview = h.state.layout.focus;
-    let from = BlockScroll {
+    let preview = h.state.layout.focus();
+    let from = DocumentAt {
         item: 0,
         offset: Px(0.0),
-        left: Px(0.0),
     };
     h.keys("jj");
     assert_eq!(
         rendered_in(&h, preview).scroll,
-        Scroll::Moved {
+        DocumentScroll::Moved {
             from,
-            by: Motion {
+            by: DocumentMotion {
                 lines: 2,
                 half_pages: 0,
-                columns: 0
             }
         }
     );
     h.keys("k<C-d>");
     assert_eq!(
         rendered_in(&h, preview).scroll,
-        Scroll::Moved {
+        DocumentScroll::Moved {
             from,
-            by: Motion {
+            by: DocumentMotion {
                 lines: 1,
                 half_pages: 1,
-                columns: 0
             }
         }
     );
     // The host reports where the move landed.
-    h.run(|state, _| rendered::scrolled(state, preview, from));
-    assert_eq!(rendered_in(&h, preview).scroll, Scroll::At(from));
+    h.run(|state, _| document::scrolled(state, preview, from));
+    assert_eq!(rendered_in(&h, preview).scroll, DocumentScroll::At(from));
     // `esc` returns to the source pane.
     h.keys("<esc>");
-    assert_ne!(h.state.layout.focus, preview);
-    h.run(|state, _| rendered::command(state, RenderedCommand::Top));
+    assert_ne!(h.state.layout.focus(), preview);
+    h.run(|state, _| render::read(state, ReadCommand::Move(ReadMove::Top)));
 }
 
 #[test]
@@ -303,16 +308,16 @@ fn checkbox_toggles_the_source_as_one_undo_step() {
     let buffer = h.view().buffer();
     let version = h.doc().version;
     let marker = NOTE.find("[ ]").unwrap();
-    h.run(|state, _| rendered::toggle_task(state, buffer, version, marker));
+    h.run(|state, _| document::toggle_task(state, buffer, version, marker));
     assert!(h.doc().text.to_string().contains("- [x] task"));
     // A stale version is ignored.
-    h.run(|state, _| rendered::toggle_task(state, buffer, version, marker));
+    h.run(|state, _| document::toggle_task(state, buffer, version, marker));
     assert!(h.doc().text.to_string().contains("- [x] task"));
     let version = h.doc().version;
-    h.run(|state, _| rendered::toggle_task(state, buffer, version, marker));
+    h.run(|state, _| document::toggle_task(state, buffer, version, marker));
     assert!(h.doc().text.to_string().contains("- [ ] task"));
     let version = h.doc().version;
-    h.run(|state, _| rendered::toggle_task(state, buffer, version, marker));
+    h.run(|state, _| document::toggle_task(state, buffer, version, marker));
     // Undo in the source steps back one toggle at a time.
     h.keys("u");
     assert!(h.doc().text.to_string().contains("- [ ] task"));
@@ -327,9 +332,9 @@ fn callout_folds_are_view_state() {
     let (_dir, mut h) = harness();
     h.keys("<space>v");
     let preview = other(&h);
-    h.run(|state, _| rendered::toggle_fold(state, preview, 2));
+    h.run(|state, _| document::toggle_fold(state, preview, 2));
     assert_eq!(rendered_in(&h, preview).toggled, [2]);
-    h.run(|state, _| rendered::toggle_fold(state, preview, 2));
+    h.run(|state, _| document::toggle_fold(state, preview, 2));
     assert!(rendered_in(&h, preview).toggled.is_empty());
     assert_eq!(h.doc().text, NOTE);
 }
@@ -339,7 +344,7 @@ fn links_follow_urls_headings_and_notes() {
     let (_dir, mut h) = harness();
     h.keys("<space>V");
     let buffer = h.view().buffer();
-    let origin = Origin::Rendered(h.state.layout.focus);
+    let origin = Origin::Document(h.state.layout.focus());
     h.run(|state, out| {
         links::follow(
             state,
@@ -352,8 +357,8 @@ fn links_follow_urls_headings_and_notes() {
     assert_eq!(h.urls, ["https://a.org"]);
     let heading = LinkTarget::Heading("three".into());
     h.run(|state, out| links::follow(state, buffer, &heading, origin, out));
-    let focus = h.state.layout.focus;
-    assert_eq!(rendered_in(&h, focus).scroll, Scroll::item(6));
+    let focus = h.state.layout.focus();
+    assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(6));
     let wiki = LinkTarget::Wiki(WikiLink {
         target: "other".into(),
         heading: None,
@@ -367,12 +372,12 @@ fn links_follow_urls_headings_and_notes() {
     };
     h.run(|state, out| links::follow(state, buffer, &missing, origin, out));
     assert_eq!(
-        h.state.confirm,
-        Some(Confirm::Create(RelPath::parse("nope.md").unwrap()))
+        h.confirm(),
+        Some(&Confirm::Create(RelPath::parse("nope.md").unwrap()))
     );
     assert_eq!(input::context(&h.state), Context::Confirm);
     h.keys("n");
-    assert_eq!(h.state.confirm, None);
+    assert_eq!(h.confirm(), None);
     assert!(matches!(h.state.notice, Some(Notice::CreateNotConfirmed)));
 }
 
@@ -380,8 +385,16 @@ fn links_follow_urls_headings_and_notes() {
 fn closing_the_source_pane_leaves_a_standalone_view() {
     let (_dir, mut h) = harness();
     h.keys("<space>v<C-w>q");
-    let pane = h.state.layout.focus;
-    assert_eq!(rendered_in(&h, pane).link, Link::Standalone);
+    let pane = h.state.layout.focus();
+    assert_eq!(rendered_in(&h, pane).source.link, Link::Standalone);
+}
+
+#[test]
+fn keeping_only_the_rendered_pane_leaves_it_standalone() {
+    let (_dir, mut h) = harness();
+    h.keys("<space>v<C-w>l<C-w>o");
+    let pane = h.state.layout.focus();
+    assert_eq!(rendered_in(&h, pane).source.link, Link::Standalone);
 }
 
 #[test]
@@ -390,20 +403,19 @@ fn sessions_keep_rendered_tabs_and_their_link() {
     h.keys("<space>v");
     let preview = other(&h);
     h.run(|state, _| {
-        rendered::scrolled(
+        document::scrolled(
             state,
             preview,
-            BlockScroll {
+            DocumentAt {
                 item: 4,
                 offset: Px(0.0),
-                left: Px(0.0),
             },
         )
     });
     let saved = session::snapshot(&h.state);
     let text = toml::to_string(&saved).unwrap();
     let saved: session::Session = toml::from_str(&text).unwrap();
-    let mut after = Harness::new(h.state.root.path());
+    let mut after = Harness::new(h.state.project.root.path());
     after
         .run(|state, out| session::restore(state, saved, out))
         .expect("valid session");
@@ -411,10 +423,10 @@ fn sessions_keep_rendered_tabs_and_their_link() {
     assert_eq!(leaves.len(), 2);
     assert_eq!(after.tabs(leaves[1]), ["◉note.md"]);
     let view = rendered_in(&after, leaves[1]);
-    assert!(matches!(view.link, Link::Follows { pane, .. } if pane == leaves[0]));
+    assert!(matches!(view.source.link, Link::Follows { pane, .. } if pane == leaves[0]));
     assert_eq!(
         view.scroll,
-        Scroll::item(4),
+        DocumentScroll::item(4),
         "the restored source cursor does not override it"
     );
 }
@@ -430,4 +442,19 @@ fn toggling_a_split_preview_restores_the_pane_widths() {
         h.keys("<space>v");
         assert_eq!(h.state.layout.rects(), before);
     }
+}
+
+#[test]
+fn sessions_following_a_missing_pane_are_rejected() {
+    let (_dir, mut h) = harness();
+    h.keys("<space>v");
+    let text = toml::to_string(&session::snapshot(&h.state))
+        .unwrap()
+        .replace("follows = 0", "follows = 7");
+    let saved: session::Session = toml::from_str(&text).unwrap();
+    let mut after = Harness::new(h.state.project.root.path());
+    assert!(matches!(
+        after.run(|state, out| session::restore(state, saved, out)),
+        Err(session::SessionError::InvalidFollows { follows: 7, .. })
+    ));
 }

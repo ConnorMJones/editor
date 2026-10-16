@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::typeset::Diagnostic;
+use crate::typeset::{Diagnostic, SourceFile};
 
 /// Status-line feedback produced by commands and finished jobs.
 #[derive(Debug)]
@@ -31,11 +31,11 @@ pub enum Notice {
     UnsavedBuffers {
         count: usize,
     },
-    /// The buffer's file is still being read.
     StillLoading {
         path: PathBuf,
     },
     NoBuffer,
+    ReadOnly,
     UnknownCommand {
         input: String,
     },
@@ -73,11 +73,11 @@ pub enum Notice {
     AlreadyOldest,
     AlreadyNewest,
     NoSyntax,
+    SyntaxFailed,
     AlignMultiLine,
     SortNeedsSelections,
     Surround(SurroundError),
 
-    // Workspace: disk sync and file operations.
     ChangedOnDisk {
         path: PathBuf,
     },
@@ -88,33 +88,26 @@ pub enum Notice {
         path: PathBuf,
         error: io::Error,
     },
+    MoveIntoItself,
     DeleteNotConfirmed,
     InvalidPath {
         input: String,
     },
-    /// The saved session could not be read; the editor started fresh.
     SessionInvalid {
         path: PathBuf,
         reason: String,
     },
 
-    // Git: hunks, staging and changed-file navigation.
-    /// The buffer is outside a repository or not tracked.
     NotTracked {
         path: PathBuf,
     },
-    /// The buffer changed since its diff; the command can run once the diff catches up.
     DiffPending,
     NoHunks,
     NoChangedFiles,
-    /// A folder cannot move into itself or one of its folders.
-    MoveIntoItself,
-    /// Discard works on one file at a time.
     DiscardGroup,
     Unchanged {
         path: PathBuf,
     },
-    /// The index entry moved since the diff was computed.
     IndexChanged {
         path: PathBuf,
     },
@@ -124,18 +117,13 @@ pub enum Notice {
     },
     DiscardNotConfirmed,
 
-    // Conflicts: merge markers in the buffer text.
     NoConflicts,
     NoConflictUnderSelection,
-    /// A selected conflict has no `|||||||` section to take.
     NoConflictBase,
 
-    // Rendered markdown and typst views.
-    /// Only markdown and typst files have a rendered view.
     NotRenderable {
         path: PathBuf,
     },
-    /// A followed link or path names no file and none can be created for it.
     LinkNotFound {
         target: String,
     },
@@ -143,14 +131,13 @@ pub enum Notice {
     HeadingNotFound {
         heading: String,
     },
-    /// `gf` found no link, URL or path under the cursor.
     NothingToFollow,
-    /// Backlinks are for markdown notes in the vault.
     NotANote {
         path: PathBuf,
     },
+    /// The first walk of the project's files has not finished.
+    IndexLoading,
     CreateNotConfirmed,
-    /// Typst reported errors; `first` is the first of `count`.
     TypstErrors {
         first: Diagnostic,
         count: usize,
@@ -160,10 +147,14 @@ pub enum Notice {
         bytes: usize,
     },
     MarkdownExport,
-    /// Only typst files export to PDF.
     NotTypst {
         path: PathBuf,
     },
+    OutsideProject {
+        file: SourceFile,
+    },
+    /// The details are in the log.
+    JumpFailed,
 }
 
 /// Mirrors `helix_core::surround::Error`.
@@ -193,6 +184,7 @@ impl std::fmt::Display for Notice {
             Notice::UnsavedBuffers { count } => write!(f, "{count} buffer(s) have unsaved changes"),
             Notice::StillLoading { path } => write!(f, "{} is still loading", path.display()),
             Notice::NoBuffer => f.write_str("no buffer open"),
+            Notice::ReadOnly => f.write_str("this view cannot be edited"),
             Notice::UnknownCommand { input } => write!(f, "unknown command: {input}"),
             Notice::MissingArgument { command } => write!(f, "{command}: missing argument"),
             Notice::UnexpectedArgument { command } => write!(f, "{command}: takes no argument"),
@@ -217,6 +209,7 @@ impl std::fmt::Display for Notice {
             Notice::AlreadyOldest => f.write_str("already at oldest change"),
             Notice::AlreadyNewest => f.write_str("already at newest change"),
             Notice::NoSyntax => f.write_str("syntax tree is not available in current buffer"),
+            Notice::SyntaxFailed => f.write_str("the grammar failed on this text; see the log"),
             Notice::AlignMultiLine => f.write_str("align cannot work with multi line selections"),
             Notice::SortNeedsSelections => {
                 f.write_str("sorting requires multiple selections; split selection first")
@@ -285,6 +278,7 @@ impl std::fmt::Display for Notice {
                 write!(f, "{} is not a markdown note in the vault", path.display())
             }
             Notice::CreateNotConfirmed => f.write_str("note not created"),
+            Notice::IndexLoading => f.write_str("the file index is still loading"),
             Notice::TypstErrors { first, count } => match count {
                 1 => write!(f, "typst: {first}"),
                 count => write!(f, "typst: {first} (+{} more)", count - 1),
@@ -296,6 +290,8 @@ impl std::fmt::Display for Notice {
             Notice::NotTypst { path } => {
                 write!(f, "export-pdf: {} is not a typst file", path.display())
             }
+            Notice::OutsideProject { file } => write!(f, "defined in {file}, outside the project"),
+            Notice::JumpFailed => f.write_str("typst could not resolve that point"),
         }
     }
 }

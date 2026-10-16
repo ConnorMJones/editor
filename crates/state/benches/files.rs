@@ -5,7 +5,7 @@ use std::sync::Arc;
 use criterion::{Criterion, criterion_group, criterion_main};
 use state::input::picker::{self, Items, Narrowing, Picker};
 use state::project::files;
-use state::project::path::RelPath;
+use state::project::path::{Folder, RelPath};
 use state::sidebar::tree;
 
 /// Synthetic repo-shaped paths: 100 top dirs x 10 subdirs x 100 files.
@@ -54,10 +54,10 @@ fn listing(c: &mut Criterion) {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let vendor = workspace.join("vendor").canonicalize().unwrap();
     c.bench_function("index walk vendor/", |b| {
-        b.iter(|| black_box(files::walk(&vendor, &RelPath::ROOT, None).files.len()))
+        b.iter(|| black_box(files::walk(&vendor, &Folder::Root, None).files.len()))
     });
     c.bench_function("tree list vendor/ root", |b| {
-        b.iter(|| black_box(tree::list(&vendor, &RelPath::ROOT).unwrap().len()))
+        b.iter(|| black_box(tree::list(&vendor, &Folder::Root).unwrap().len()))
     });
     // A large real tree when the gitignored references are checked out.
     let zed = workspace.join("../../../refs/zed");
@@ -66,7 +66,7 @@ fn listing(c: &mut Criterion) {
             let mut group = c.benchmark_group("large");
             group.sample_size(10);
             group.bench_function("index walk refs/zed", |b| {
-                b.iter(|| black_box(files::walk(&zed, &RelPath::ROOT, None).files.len()))
+                b.iter(|| black_box(files::walk(&zed, &Folder::Root, None).files.len()))
             });
             group.finish();
         }

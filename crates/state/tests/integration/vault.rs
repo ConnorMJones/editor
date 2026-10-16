@@ -6,12 +6,13 @@ use model::notice::Notice;
 use state::input::keymap::Context;
 use state::input::picker::{Hit, Items, Search};
 use state::project::backlinks::Build;
+use state::project::files::{FileIndex, Indexed, OnIndexed};
 use state::project::path::RelPath;
+use state::render::document::{self, DocumentScroll};
 use state::render::markdown::{BlockKind, EmbedKind, ImageFile};
-use state::render::rendered::Scroll;
 use state::text::buffer::Content;
 use state::view::layout::View;
-use state::{Confirm, Overlay, input, render::rendered};
+use state::{Confirm, Overlay, input};
 
 use crate::harness::Harness;
 
@@ -53,9 +54,16 @@ fn open_at(h: &mut Harness, name: &str, needle: &str) {
     h.view_mut().selection = Selection::point(char);
 }
 
+fn indexed(state: &state::State) -> &Indexed {
+    match &state.project.index {
+        FileIndex::Ready(indexed) => indexed,
+        FileIndex::Loading { .. } => panic!("the file index is still loading"),
+    }
+}
+
 fn focused(h: &Harness) -> String {
     let path = h.focused_path().unwrap();
-    path.strip_prefix(h.state.root.path())
+    path.strip_prefix(h.state.project.root.path())
         .unwrap()
         .to_string_lossy()
         .into_owned()
@@ -84,7 +92,7 @@ fn backlinks(h: &Harness) -> Vec<(String, u32)> {
                 panic!("wrong picker")
             }
         },
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     }
 }
 
@@ -139,16 +147,16 @@ fn unresolved_links_create_notes_on_yes() {
     open_at(&mut h, "notes/a.md", "New note");
     h.keys("gf");
     let path = RelPath::parse("notes/New note.md").unwrap();
-    assert_eq!(h.state.confirm, Some(Confirm::Create(path.clone())));
+    assert_eq!(h.confirm(), Some(&Confirm::Create(path.clone())));
     assert_eq!(input::context(&h.state), Context::Confirm);
     h.keys("n");
-    assert_eq!(h.state.confirm, None);
+    assert_eq!(h.confirm(), None);
     assert!(matches!(h.state.notice, Some(Notice::CreateNotConfirmed)));
     assert!(!dir.path().join("notes/New note.md").exists());
     h.keys("gf");
-    assert_eq!(h.state.confirm, Some(Confirm::Create(path)));
+    assert_eq!(h.confirm(), Some(&Confirm::Create(path)));
     h.keys("y");
-    assert_eq!(h.state.confirm, None);
+    assert_eq!(h.confirm(), None);
     assert_eq!(
         fs::read_to_string(dir.path().join("notes/New note.md")).unwrap(),
         ""
@@ -162,7 +170,7 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
     open_at(&mut h, "notes/a.md", "[[b]]");
     h.keys("<space>V");
     let buffer = h.view().buffer();
-    let pane = h.state.layout.focus;
+    let pane = h.state.layout.focus();
     let target = state::render::markdown::LinkTarget::Path {
         path: "sub/c.md".into(),
         heading: Some("Part".into()),
@@ -172,21 +180,21 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
             state,
             buffer,
             &target,
-            state::project::links::Origin::Rendered(pane),
+            state::project::links::Origin::Document(pane),
             out,
         )
     });
     assert_eq!(focused(&h), "notes/sub/c.md");
-    match h.state.layout.panes[pane].active() {
-        Some(View::Rendered(view)) => {
+    match h.state.layout.panes()[pane].active() {
+        Some(View::Document(view)) => {
             assert_eq!(
                 view.scroll,
-                Scroll::item(2),
+                DocumentScroll::item(2),
                 "the Part heading is the third block"
             );
             assert_eq!(cursor_line(&h), 4);
         }
-        Some(View::Text(_) | View::Diff(_)) | None => panic!("not rendered"),
+        Some(View::Text(_) | View::Diff(_) | View::Pages(_)) | None => panic!("not rendered"),
     }
 }
 
@@ -203,13 +211,15 @@ fn embedded_images_resolve_from_other_folders() {
     let Content::Text { doc, .. } = &h.state.buffers[h.view().buffer()].content else {
         panic!("loading");
     };
-    let parsed = rendered::markdown(&h.state.previews, h.view().buffer(), doc).expect("parsed");
+    let parsed = document::markdown(&h.state.documents, h.view().buffer(), doc).expect("parsed");
     let kinds: Vec<&BlockKind> = parsed.blocks.iter().map(|block| &block.kind).collect();
     match kinds.as_slice() {
         [BlockKind::Embed(image), BlockKind::Embed(note)] => {
             assert_eq!(
                 image.kind,
-                EmbedKind::Image(ImageFile::Local(h.state.root.path().join("assets/pic.png")))
+                EmbedKind::Image(ImageFile::Local(
+                    h.state.project.root.path().join("assets/pic.png")
+                ))
             );
             assert_eq!(
                 note.kind,
@@ -274,19 +284,19 @@ fn backlinks_follow_external_changes_without_rereading_on_their_own() {
     fs::write(root.join("notes/a.md"), "[[b]]\n").unwrap();
     let mut h = Harness::watched(root);
     h.keys(":o notes/b.md<ret><space>l");
-    assert!(matches!(h.state.backlinks.build, Build::Ready));
+    assert!(matches!(indexed(&h.state).backlinks.build, Build::Ready));
     assert_eq!(backlinks(&h), [("notes/a.md".to_owned(), 0)]);
     h.keys("<esc>");
     // Reading every note is not a change the watcher reports.
     assert!(!h.events_arrive(), "the index read woke the watcher");
-    let canonical = h.state.root.path().to_owned();
+    let canonical = h.state.project.root.path().to_owned();
     fs::write(canonical.join("notes/e.md"), "x\ny [[b]]\n").unwrap();
     fs::write(canonical.join("notes/a.md"), "no links now\n").unwrap();
     let key = RelPath::parse("notes/e.md").unwrap();
     let a = RelPath::parse("notes/a.md").unwrap();
     assert!(h.wait_for_events(|state| {
-        state.backlinks.notes.contains_key(&key)
-            && state
+        indexed(state).backlinks.notes.contains_key(&key)
+            && indexed(state)
                 .backlinks
                 .notes
                 .get(&a)
@@ -296,7 +306,7 @@ fn backlinks_follow_external_changes_without_rereading_on_their_own() {
     assert_eq!(backlinks(&h), [("notes/e.md".to_owned(), 1)]);
     h.keys("<esc>");
     fs::remove_file(canonical.join("notes/e.md")).unwrap();
-    assert!(h.wait_for_events(|state| !state.backlinks.notes.contains_key(&key)));
+    assert!(h.wait_for_events(|state| !indexed(state).backlinks.notes.contains_key(&key)));
     h.keys("<space>l");
     assert!(backlinks(&h).is_empty());
     assert!(Path::new(&canonical).exists());
@@ -306,9 +316,16 @@ fn backlinks_follow_external_changes_without_rereading_on_their_own() {
 fn backlinks_asked_for_before_the_file_index_fill_once_it_arrives() {
     let (_dir, mut h) = vault();
     h.keys(":o notes/b.md<ret>");
-    h.state.files = state::project::files::Files::Loading;
+    h.state.project.index = FileIndex::Loading {
+        then: OnIndexed::Nothing,
+    };
     h.keys("<space>l");
-    assert!(matches!(h.state.backlinks.build, Build::Waiting));
+    assert!(matches!(
+        h.state.project.index,
+        FileIndex::Loading {
+            then: OnIndexed::BuildBacklinks
+        }
+    ));
     match &h.state.overlay {
         Overlay::Picker(picker) => match &picker.items {
             Items::Backlinks(referrers) => assert_eq!(referrers.search, Search::Running),
@@ -316,12 +333,24 @@ fn backlinks_asked_for_before_the_file_index_fill_once_it_arrives() {
                 panic!("wrong picker")
             }
         },
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     }
-    let root = h.state.root.path().to_owned();
+    let root = h.state.project.root.path().to_owned();
     h.run(|_, out| out.push(state::Effect::Job(state::job::Job::Index { root })));
     assert_eq!(
         backlinks(&h),
         [("notes/a.md".to_owned(), 1), ("notes/a.md".to_owned(), 2)]
     );
+}
+
+#[test]
+fn links_followed_before_the_file_index_arrives_do_not_offer_to_create_notes() {
+    let (_dir, mut h) = vault();
+    open_at(&mut h, "notes/a.md", "New note");
+    h.state.project.index = FileIndex::Loading {
+        then: OnIndexed::Nothing,
+    };
+    h.keys("gf");
+    assert_eq!(h.confirm(), None);
+    assert!(matches!(h.state.notice, Some(Notice::IndexLoading)));
 }

@@ -105,6 +105,111 @@ its text is loaded and its format known, so the check returns the text:
 let Some(doc) = renderable(state, buffer) else { return };
 ```
 
+## Functions as transformations
+
+A function takes values that carry what is known and builds the next value. It doesn't
+interrogate the state to find out what it was given. Four habits keep it that way.
+
+- **An operation returns what it produced.** Showing a tab returns the view it showed;
+  closing a pane returns what it removed. The caller continues from that value instead of
+  looking it up again and checking that the operation did what it just did.
+- **Inputs carry their evidence.** An event or command carries what its producer knew: a
+  click on a drawn block carries the line the block was drawn from, not a bare index that
+  the receiver has to resolve again. The one case that can really go stale, such as a pane
+  closed since the last frame, is checked once, at the entry point, and named there.
+- **A repeated check means a missing owner.** When several call sites guard the same
+  condition, the condition is an invariant nobody owns. Give it an owner that keeps it true
+  (closing a pane unlinks the views following it), and the guards have nothing left to check.
+- **Change code from its owner outward.** When touching existing code, start from the type
+  or function that owns the data, change it, and let the compiler list the callers. Starting
+  from the call site in front of you leads to patching that site's control flow.
+
+### Example: clicking a rendered block
+
+Before, the function rediscovers everything the host already knew, and re-checks what it
+had just made true:
+
+```rust
+pub fn click(state: &mut State, pane: PaneId, block: usize) {
+    let Some(view) = state.layout.rendered(pane) else { return };
+    let Some(item) = view.scroll.anchor().map(|at| at.item) else { return };
+    let Some(doc) = state.buffers[buffer].doc() else { return };
+    let Some(line) = markdown(..).and_then(|m| m.blocks.get(block)).map(..) else { return };
+    let at = rope.line_to_char(line.min(rope.len_lines() - 1));
+    match link {
+        Link::Follows { pane: source, seen } if state.layout.panes().contains_key(source) => {
+            panes::show(state, source, TabKey::Text(buffer), OpenAs::Permanent);
+            match state.layout.pane_mut(source).and_then(Pane::active_mut) {
+                Some(View::Text(text)) if text.buffer() == buffer => text.selection = ..,
+                Some(_) | None => {}
+            }
+            state.layout.set_focus(source).expect("the source pane was just shown");
+            // ... looks the pane and the document up again, then the rendered view again
+        }
+        Link::Follows { .. } | Link::Standalone => { .. }
+    }
+}
+```
+
+Each guard answers a question the types could have answered:
+
+- The block, the document and the parse exist because the host drew the block from them,
+  so the click carries the block's line.
+- `contains_key(source)` holds once closing a pane unlinks its followers.
+- The view lookup after `show` goes away once `show` returns the view.
+- The clamp covers a parse that doesn't match the text, which `markdown()` already rules out.
+
+After, there is one boundary check and one match on the state that matters:
+
+```rust
+pub fn click(state: &mut State, pane: PaneId, line: usize) {
+    let Some(view) = state.layout.rendered(pane) else { return }; // closed since drawn
+    let (buffer, link) = (view.text.buffer(), view.link);
+    match link {
+        Link::Follows { pane: source, seen } => {
+            let text = panes::show_text(state, source, buffer);
+            text.selection = Selection::point(..);
+            state.layout.focus(source);
+            scroll::follow_cursor(state, source);
+        }
+        Link::Standalone => { .. }
+    }
+}
+```
+
+### When you catch yourself writing
+
+Each of these means a design question was skipped. Go back and answer it; the code that
+follows is usually shorter.
+
+| You're about to write | Ask |
+|---|---|
+| `let … else { return }` on something you just established | Should the operation that established it return it? |
+| `.expect()` right after an operation | Should the owner do both steps as one operation? |
+| `None => {}` or `_ => {}` for a case that can't happen | Which type makes the case unrepresentable? |
+| `match (bool, bool)`, or `match cond { true => .., false => .. }` | Which enum is this? |
+| A clamp, a default or `.ok()` so the code can keep going | Where should this fail, when the value is built? |
+| The same guard at several call sites | Which owner keeps this true? |
+| A function returning `()` that callers follow with a lookup | What should it return? |
+
+## Changing many call sites
+
+Cleanups touch many sites at once, and a mechanical rewrite keeps whatever shape the old
+code had. So:
+
+- **Rename mechanically, redesign by hand.** Scripts are for changes whose point is to keep
+  the shape: moving files, renaming paths. A change in meaning goes through the owner, and
+  the compiler errors become the list of sites to revisit.
+- **Do one site by hand first.** Write the first caller in the new shape and look at it.
+  If it is no shorter than before, the owner's change isn't finished yet.
+- **Sort the sites before editing them.** List the call sites and group them by what they
+  actually need. Each group gets one answer (delete the check, use the returned value,
+  check at the boundary). Sites aren't edited one by one in the order they appear.
+- **Expect deletions.** A cleanup that moves facts into types removes guards. A diff where
+  every site keeps its branches, rewritten, has moved the problem rather than solved it.
+- **One invariant per change.** Each change is small enough to read whole before the next
+  one starts.
+
 ## Agents and handoffs
 
 - A brief gives the agent the type skeleton (enums, signatures, the owner of each

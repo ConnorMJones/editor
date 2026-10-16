@@ -5,8 +5,8 @@ use model::command::Paste;
 use model::notice::Notice;
 use model::register::{Clipboard, Register};
 
-use crate::apply::{exit_select_mode, focused};
-use crate::view::layout::{Pane, PaneId};
+use crate::apply::{exit_select_mode, focused_text};
+use crate::view::layout::{NotInLayout, PaneId};
 use crate::{Effect, State, text::edit};
 
 /// What to do with clipboard contents once the host has read them.
@@ -102,28 +102,30 @@ impl Registers {
 pub fn read(state: &mut State, register: Register) -> Values {
     match register {
         Register::BlackHole => Values::Ready(Vec::new()),
-        Register::SelectionIndices => {
-            Values::Ready(match focused(&mut state.layout, &mut state.buffers) {
+        Register::SelectionIndices => Values::Ready(
+            match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
                 Some((view, _)) => (1..=view.selection.len()).map(|i| i.to_string()).collect(),
                 None => Vec::new(),
-            })
-        }
-        Register::SelectionContents => {
-            Values::Ready(match focused(&mut state.layout, &mut state.buffers) {
+            },
+        ),
+        Register::SelectionContents => Values::Ready(
+            match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
                 Some((view, doc)) => view
                     .selection
                     .fragments(doc.text.slice(..))
                     .map(|fragment| fragment.into_owned())
                     .collect(),
                 None => Vec::new(),
-            })
-        }
+            },
+        ),
         Register::DocumentPath => {
-            let path = (state.layout.panes.get(state.layout.focus))
-                .and_then(Pane::active)
-                .and_then(|view| state.buffers.get(view.buffer()))
+            let path = state
+                .layout
+                .focused()
+                .active()
+                .map(|view| &state.buffers[view.buffer()])
                 .map(|buffer| {
-                    let path = buffer.path.strip_prefix(state.root.path());
+                    let path = buffer.path.strip_prefix(state.project.root.path());
                     path.unwrap_or(&buffer.path).display().to_string()
                 });
             Values::Ready(path.into_iter().collect())
@@ -172,8 +174,11 @@ pub fn clipboard_contents(
         ClipboardUse::Paste { at, count } => edit::paste(state, &values, at, count),
         ClipboardUse::Replace { count } => edit::replace_with(state, &values, count),
         ClipboardUse::PasteAt { pane, pos } => {
-            state.layout.focus = pane;
-            match focused(&mut state.layout, &mut state.buffers) {
+            match state.layout.set_focus(pane) {
+                Ok(()) => {}
+                Err(NotInLayout(_)) => return,
+            }
+            match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
                 Some((view, doc)) => {
                     view.selection = Selection::point(pos.min(doc.text.len_chars()));
                     edit::paste(state, &values, Paste::Before, 1);

@@ -1,4 +1,11 @@
+use std::ops::Index;
+
 use crate::color::Base16::{self, *};
+use crate::color::{Palette, Rgb};
+use crate::config::ThemeConfig;
+use crate::git::GitStatus;
+use crate::markdown::CalloutKind;
+use crate::mode::Mode;
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -103,38 +110,7 @@ pub const SCOPES: [(&str, Style); 44] = [
 pub const TEXT: Style = Style::fg(Base05);
 pub const WHITESPACE: Style = Style::fg(Base02);
 pub const INDENT_GUIDE: Style = Style::fg(Base02);
-
-/// Background colours of the text area.
-pub const SELECTION: Base16 = Base02;
-pub const CURSORLINE: Base16 = Base01;
-
-pub const LINENR: Base16 = Base03;
-pub const LINENR_SELECTED: Base16 = Base05;
-
-pub struct CursorColors {
-    pub fg: Base16,
-    pub bg: Base16,
-}
-
-pub const CURSOR_PRIMARY: CursorColors = CursorColors {
-    fg: Base00,
-    bg: Base06,
-};
-pub const CURSOR_SECONDARY: CursorColors = CursorColors {
-    fg: Base00,
-    bg: Base05,
-};
-
-pub const SCROLLBAR_TRACK: Base16 = Base01;
-pub const SCROLLBAR_THUMB: Base16 = Base03;
-/// Thumb colour while dragged.
-pub const SCROLLBAR_THUMB_ACTIVE: Base16 = Base04;
-
-/// Prompt completion menu, as helix's `ui.menu` and `ui.menu.selected`.
-pub const MENU: Base16 = Base01;
-pub const MENU_SELECTED: Base16 = Base02;
-pub const MENU_TEXT: Base16 = Base05;
-pub const MENU_DIR: Base16 = Base0D;
+pub const CURSOR_TEXT: Base16 = Base00;
 
 /// Row background roles of diff and conflict views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -193,80 +169,271 @@ impl Tone {
         Tone::Theirs,
         Tone::Base,
     ];
-
-    /// Palette slot used when the config sets no colour.
-    pub const fn slot(self) -> Base16 {
-        match self {
-            Tone::Added => Base0B,
-            Tone::Removed => Base08,
-            Tone::Modified => Base09,
-            Tone::Ours => Base0B,
-            Tone::Theirs => Base09,
-            Tone::Base => Base0E,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TintColor {
-    Slot(Base16),
-    Tone(Tone),
-}
-
-/// A colour blended over the editor background at `alpha` percent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Tint {
-    pub color: TintColor,
-    pub alpha: u8,
-}
-
-pub const fn background(role: Background) -> Tint {
-    match role {
-        Background::Added => Tint {
-            color: TintColor::Tone(Tone::Added),
-            alpha: 14,
-        },
-        Background::Removed => Tint {
-            color: TintColor::Tone(Tone::Removed),
-            alpha: 14,
-        },
-        Background::Modified => Tint {
-            color: TintColor::Tone(Tone::Modified),
-            alpha: 14,
-        },
-        Background::Filler => Tint {
-            color: TintColor::Slot(Base01),
-            alpha: 100,
-        },
-        Background::Ours => Tint {
-            color: TintColor::Tone(Tone::Ours),
-            alpha: 16,
-        },
-        Background::Theirs => Tint {
-            color: TintColor::Tone(Tone::Theirs),
-            alpha: 16,
-        },
-        Background::Base => Tint {
-            color: TintColor::Tone(Tone::Base),
-            alpha: 16,
-        },
-        Background::OursMarker => Tint {
-            color: TintColor::Tone(Tone::Ours),
-            alpha: 8,
-        },
-        Background::TheirsMarker => Tint {
-            color: TintColor::Tone(Tone::Theirs),
-            alpha: 8,
-        },
-        Background::BaseMarker => Tint {
-            color: TintColor::Tone(Tone::Base),
-            alpha: 8,
-        },
-    }
 }
 
 /// Text of the label rows around a conflict.
 pub const CONFLICT_LABEL: Style = Style::fg(Base04).with(Modifiers::ITALIC);
 
-/// Opacity of gutter signs for hunks that are already staged, in percent.
-pub const STAGED_SIGN_ALPHA: u8 = 40;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Alpha(u8);
+
+impl Alpha {
+    pub const OPAQUE: Alpha = Alpha(100);
+
+    pub const fn percent(percent: u8) -> Alpha {
+        assert!(percent <= 100, "alpha is a percentage");
+        Alpha(percent)
+    }
+
+    pub fn fraction(self) -> f32 {
+        f32::from(self.0) / 100.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Color {
+    pub rgb: Rgb,
+    pub alpha: Alpha,
+}
+
+impl Color {
+    pub const fn opaque(rgb: Rgb) -> Color {
+        Color {
+            rgb,
+            alpha: Alpha::OPAQUE,
+        }
+    }
+}
+
+pub struct Theme {
+    pub background: Color,
+    pub surface: Color,
+    pub text: Color,
+    pub muted: Color,
+    /// Colours of syntax `Style` slots.
+    pub syntax: Slots,
+    pub mode: ModeColors,
+    pub editor: EditorColors,
+    pub completion: Completion,
+    pub chrome: Chrome,
+    pub tones: Tones,
+    pub staged: Tones,
+    pub rows: Rows,
+    pub prose: Prose,
+}
+
+pub struct Slots(pub [Color; 16]);
+
+pub struct ModeColors {
+    pub fg: Color,
+    pub bg: [Color; Mode::COUNT],
+}
+
+#[derive(Clone, Copy)]
+pub struct EditorColors {
+    pub selection: Color,
+    pub cursorline: Color,
+    pub cursor_text: Color,
+    pub cursor_primary: Color,
+    pub cursor_secondary: Color,
+    pub line_number: Color,
+    pub line_number_cursor: Color,
+    pub scrollbar_track: Color,
+    pub scrollbar_thumb: Color,
+    pub scrollbar_thumb_dragged: Color,
+}
+
+pub struct Completion {
+    pub background: Color,
+    pub selected: Color,
+    pub text: Color,
+    pub dir: Color,
+}
+
+pub struct Chrome {
+    pub border: Color,
+    pub selection: Color,
+    pub unsaved: Color,
+    pub accent: Color,
+    pub title: Color,
+    pub title_text: Color,
+    pub hover: Color,
+    pub close_hover: Color,
+    pub vcs: [Color; GitStatus::COUNT],
+}
+
+#[derive(Clone, Copy)]
+pub struct Tones(pub [Color; Tone::COUNT]);
+
+#[derive(Clone, Copy)]
+pub struct Rows(pub [Color; Background::COUNT]);
+
+pub struct Prose {
+    pub link: Color,
+    pub missing_link: Color,
+    pub code: Color,
+    pub math: Color,
+    pub marker: Color,
+    pub quote_border: Color,
+    pub quote_text: Color,
+    pub checkbox: Color,
+    pub error: Color,
+    pub warning: Color,
+    pub callouts: [Color; CalloutKind::COUNT],
+}
+
+impl Theme {
+    pub fn new(palette: &Palette, config: &ThemeConfig) -> Theme {
+        let slot = |slot: Base16| Color::opaque(palette[slot]);
+        let tint = |color: Color, percent: u8| Color {
+            alpha: Alpha::percent(percent),
+            ..color
+        };
+        let diff = &config.diff;
+        let tones = Tones(Tone::ALL.map(|tone| {
+            let (set, default) = match tone {
+                Tone::Added => (diff.added, Base0B),
+                Tone::Removed => (diff.removed, Base08),
+                Tone::Modified => (diff.modified, Base09),
+                Tone::Ours => (diff.ours, Base0B),
+                Tone::Theirs => (diff.theirs, Base09),
+                Tone::Base => (diff.base, Base0E),
+            };
+            set.map_or(slot(default), Color::opaque)
+        }));
+        let background = config.background.map_or(slot(Base00), Color::opaque);
+        Theme {
+            background,
+            surface: slot(Base01),
+            text: slot(Base05),
+            muted: slot(Base03),
+            syntax: Slots(palette.0.map(Color::opaque)),
+            mode: ModeColors {
+                fg: slot(Base00),
+                bg: [slot(Base0D), slot(Base0B), slot(Base0E)],
+            },
+            editor: EditorColors {
+                selection: slot(Base02),
+                cursorline: slot(Base01),
+                cursor_text: slot(CURSOR_TEXT),
+                cursor_primary: slot(Base06),
+                cursor_secondary: slot(Base05),
+                line_number: slot(Base03),
+                line_number_cursor: slot(Base05),
+                scrollbar_track: slot(Base01),
+                scrollbar_thumb: slot(Base03),
+                scrollbar_thumb_dragged: slot(Base04),
+            },
+            completion: Completion {
+                background: slot(Base01),
+                selected: slot(Base02),
+                text: slot(Base05),
+                dir: slot(Base0D),
+            },
+            chrome: Chrome {
+                border: slot(Base02),
+                selection: slot(Base02),
+                unsaved: slot(Base0A),
+                accent: slot(Base0D),
+                title: slot(Base01),
+                title_text: slot(Base04),
+                hover: tint(slot(Base02), 50),
+                close_hover: slot(Base08),
+                vcs: [
+                    slot(Base03),
+                    slot(Base0C),
+                    slot(Base0B),
+                    slot(Base08),
+                    slot(Base0A),
+                    slot(Base0E),
+                ],
+            },
+            staged: Tones(tones.0.map(|tone| tint(tone, 40))),
+            rows: Rows(Background::ALL.map(|role| match role {
+                Background::Added => tint(tones[Tone::Added], 14),
+                Background::Removed => tint(tones[Tone::Removed], 14),
+                Background::Modified => tint(tones[Tone::Modified], 14),
+                Background::Filler => slot(Base01),
+                Background::Ours => tint(tones[Tone::Ours], 16),
+                Background::Theirs => tint(tones[Tone::Theirs], 16),
+                Background::Base => tint(tones[Tone::Base], 16),
+                Background::OursMarker => tint(tones[Tone::Ours], 8),
+                Background::TheirsMarker => tint(tones[Tone::Theirs], 8),
+                Background::BaseMarker => tint(tones[Tone::Base], 8),
+            })),
+            tones,
+            prose: Prose {
+                link: slot(Base0D),
+                missing_link: slot(Base03),
+                code: slot(Base09),
+                math: slot(Base0E),
+                marker: slot(Base03),
+                quote_border: slot(Base03),
+                quote_text: slot(Base04),
+                checkbox: slot(Base03),
+                error: slot(Base08),
+                warning: slot(Base0A),
+                callouts: CalloutKind::ALL.map(|kind| {
+                    slot(match kind {
+                        CalloutKind::Note | CalloutKind::Info | CalloutKind::Todo => Base0D,
+                        CalloutKind::Abstract | CalloutKind::Tip => Base0C,
+                        CalloutKind::Success => Base0B,
+                        CalloutKind::Question => Base0A,
+                        CalloutKind::Warning => Base09,
+                        CalloutKind::Failure | CalloutKind::Danger | CalloutKind::Bug => Base08,
+                        CalloutKind::Example => Base0E,
+                        CalloutKind::Quote => Base04,
+                    })
+                }),
+            },
+        }
+    }
+}
+
+impl Index<Base16> for Slots {
+    type Output = Color;
+
+    fn index(&self, slot: Base16) -> &Color {
+        &self.0[slot as usize]
+    }
+}
+
+impl Index<Mode> for ModeColors {
+    type Output = Color;
+
+    fn index(&self, mode: Mode) -> &Color {
+        &self.bg[mode as usize]
+    }
+}
+
+impl Index<GitStatus> for Chrome {
+    type Output = Color;
+
+    fn index(&self, status: GitStatus) -> &Color {
+        &self.vcs[status as usize]
+    }
+}
+
+impl Index<Tone> for Tones {
+    type Output = Color;
+
+    fn index(&self, tone: Tone) -> &Color {
+        &self.0[tone as usize]
+    }
+}
+
+impl Index<Background> for Rows {
+    type Output = Color;
+
+    fn index(&self, role: Background) -> &Color {
+        &self.0[role as usize]
+    }
+}
+
+impl Index<CalloutKind> for Prose {
+    type Output = Color;
+
+    fn index(&self, kind: CalloutKind) -> &Color {
+        &self.callouts[kind as usize]
+    }
+}

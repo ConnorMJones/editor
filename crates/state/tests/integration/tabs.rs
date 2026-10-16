@@ -28,12 +28,7 @@ fn tree_click(h: &mut Harness, path: &str, click: Click) {
     for (end, _) in path.match_indices('/') {
         let dir = &path[..end];
         let row = row(&h.state, dir);
-        match h
-            .state
-            .tree
-            .dirs
-            .get(&state::project::path::RelPath::parse(dir).unwrap())
-        {
+        match h.state.tree.dirs.get(dir) {
             Some(listing) if listing.fold == state::sidebar::tree::Fold::Expanded => {}
             Some(_) | None => h.run(|state, out| panes::click_tree(state, row, Click::Single, out)),
         }
@@ -119,7 +114,7 @@ fn modified_previews_are_kept_and_never_replaced() {
 fn edits_from_another_pane_keep_the_preview() {
     let (_dir, mut h) = files(&["a.txt"]);
     tree_click(&mut h, "a.txt", Click::Single);
-    let first = h.state.layout.focus;
+    let first = h.state.layout.focus();
     h.keys("<C-w>v");
     assert_eq!(h.tabs(first), ["a.txt*"]);
     h.keys("ix<esc>");
@@ -146,7 +141,7 @@ fn saving_and_double_clicks_keep_the_preview() {
 
     tree_click(&mut h, "b.txt", Click::Single);
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
-    let pane = h.state.layout.focus;
+    let pane = h.state.layout.focus();
     panes::click_tab(&mut h.state, pane, 1, Click::Single);
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
     panes::click_tab(&mut h.state, pane, 1, Click::Double);
@@ -198,10 +193,10 @@ fn closing_the_last_view_drops_the_buffer() {
     assert_eq!(open_names(&h), ["a.txt", "b.txt"]);
 
     h.keys(":bc<ret>:bc<ret>");
-    let focus = h.state.layout.focus;
-    assert!(h.state.layout.panes[focus].tabs.is_none());
+    let focus = h.state.layout.focus();
+    assert!(h.state.layout.panes()[focus].tabs.is_none());
     assert!(h.state.buffers.is_empty());
-    assert_eq!(h.state.layout.panes.len(), 1, "the empty pane stays");
+    assert_eq!(h.state.layout.panes().len(), 1, "the empty pane stays");
     h.keys(":bc<ret>");
     assert!(matches!(h.state.notice, Some(Notice::NoBuffer)));
 }
@@ -211,7 +206,7 @@ fn closing_a_modified_buffers_last_view_is_refused_unless_forced() {
     let (_dir, mut h) = files(&["a.txt"]);
     h.keys(":o a.txt<ret>ix<esc><C-w>v:bc<ret>");
     assert!(h.state.notice.is_none(), "another pane still shows it");
-    assert_eq!(h.state.layout.panes.len(), 1, "the emptied pane closes");
+    assert_eq!(h.state.layout.panes().len(), 1, "the emptied pane closes");
 
     h.keys(":bc<ret>");
     assert!(matches!(
@@ -220,7 +215,7 @@ fn closing_a_modified_buffers_last_view_is_refused_unless_forced() {
     ));
     assert_eq!(h.focused_tabs(), ["a.txt"]);
 
-    let pane = h.state.layout.focus;
+    let pane = h.state.layout.focus();
     h.run(|state, _| panes::close_tab(state, pane, 0, Force::No));
     assert_eq!(h.focused_tabs(), ["a.txt"]);
     h.keys(":bc!<ret>");
@@ -234,12 +229,12 @@ fn one_buffer_in_two_panes_maps_every_tab_through_edits() {
     fs::write(dir.path().join("b.txt"), "b\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>");
-    let first = h.state.layout.focus;
+    let first = h.state.layout.focus();
     // Opened permanently, the split's copy stays when b.txt opens beside it.
     h.keys("<C-w>vj:o a.txt<ret>");
-    let second = h.state.layout.focus;
+    let second = h.state.layout.focus();
     let selection = |h: &Harness, pane, index: usize| {
-        h.state.layout.panes[pane].items()[index]
+        h.state.layout.panes()[pane].items()[index]
             .view
             .text()
             .selection
@@ -251,7 +246,7 @@ fn one_buffer_in_two_panes_maps_every_tab_through_edits() {
     assert_eq!(h.tabs(second), ["a.txt", "b.txt"]);
 
     h.keys("<C-w>hggiXX<esc>");
-    assert_eq!(h.state.layout.focus, first);
+    assert_eq!(h.state.layout.focus(), first);
     let shifted =
         parked.transform(|range| helix_core::Range::new(range.anchor + 2, range.head + 2));
     assert_eq!(selection(&h, second, 0), shifted);
@@ -279,14 +274,14 @@ fn buffer_picker_lists_most_recently_used_first() {
                 panic!("wrong picker")
             }
         },
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     };
     assert_eq!(labels, ["a.txt", "b.txt", "c.txt"]);
 
     h.keys("<esc><C-w>v:o c.txt<ret><C-w>h<space>b");
     let first = match &h.state.overlay {
         Overlay::Picker(picker) => picker.items.label(picker.matches[0]).to_owned(),
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     };
     assert_eq!(first, "a.txt", "focusing a pane activates its tab");
 }
@@ -315,7 +310,7 @@ fn split_copies_only_the_active_item() {
     fs::write(dir.path().join("b.txt"), "one two\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>:o b.txt<ret>w");
-    let first = h.state.layout.focus;
+    let first = h.state.layout.focus();
     let selection = h.view().selection.clone();
     h.keys("<C-w>s");
     assert_eq!(h.focused_tabs(), ["b.txt*"]);
@@ -323,7 +318,7 @@ fn split_copies_only_the_active_item() {
 
     h.keys("b");
     assert_ne!(h.view().selection, selection);
-    match h.state.layout.panes[first].active() {
+    match h.state.layout.panes()[first].active() {
         Some(view) => assert_eq!(view.text().selection, selection),
         None => panic!("first pane lost its tab"),
     }
@@ -336,8 +331,8 @@ fn split_of_an_empty_pane_is_empty() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
     h.keys("<C-w>v");
-    let focus = h.state.layout.focus;
-    assert!(h.state.layout.panes[focus].tabs.is_none());
+    let focus = h.state.layout.focus();
+    assert!(h.state.layout.panes()[focus].tabs.is_none());
 }
 
 fn round_trip(saved: &Session) -> Session {
@@ -386,8 +381,8 @@ fn session_tab_lists_are_validated() {
     );
     let session = |pane: &str| -> Session {
         toml::from_str(&format!(
-            "focus = 0\nsidebar = \"hidden\"\nexpanded = []\npanes = [{pane}]\n\
-             layout = {{ kind = \"pane\", pane = 0 }}\n"
+            "focus = 0\nsidebar = \"hidden\"\nexpanded = []\nsidebar_width = \"default\"\ncollapsed = []\npanes = [{pane}]\n\
+             layout = {{ kind = \"pane\", pane = 0, flex = 1.0 }}\n"
         ))
         .expect("well-formed toml")
     };

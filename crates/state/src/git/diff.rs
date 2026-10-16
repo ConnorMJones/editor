@@ -11,9 +11,8 @@ pub use imara_diff::Hunk;
 use imara_diff::{Algorithm, IndentHeuristic, IndentLevel, Interner, Token};
 
 use crate::Refresh;
-use crate::git::changes::Arrive;
+use crate::git::navigate::Landing;
 use crate::view::display::DiffSign;
-use crate::view::layout::PaneId;
 
 const ALGORITHM: Algorithm = Algorithm::Histogram;
 const MAX_DIFF_LINES: usize = 64 * u16::MAX as usize;
@@ -25,15 +24,12 @@ pub struct Diff {
     pub bases: Bases,
     /// Base reads are coalesced per buffer like git status refreshes.
     pub read: Refresh,
-    /// Where `]g` puts the cursor once fresh hunks arrive.
-    pub landing: Option<Landing>,
 }
 
 impl Diff {
     pub const LOADING: Diff = Diff {
-        bases: Bases::Loading,
+        bases: Bases::Loading { landing: None },
         read: Refresh::Idle,
-        landing: None,
     };
 }
 
@@ -41,7 +37,9 @@ pub enum Bases {
     /// Outside any repository's worktree.
     NoRepo,
     /// The first base read has not finished.
-    Loading,
+    Loading {
+        landing: Option<Landing>,
+    },
     /// In neither HEAD nor the index.
     Untracked,
     Tracked(Tracked),
@@ -71,10 +69,11 @@ impl Base {
     }
 }
 
-/// One base side of a read: unchanged since the request, or read anew.
+/// One base side of a read.
 #[derive(Debug)]
 pub enum BaseRead {
-    Kept,
+    /// Still the blob `oid` the request knew.
+    Kept(Oid),
     Fresh(Base),
 }
 
@@ -91,10 +90,12 @@ pub struct Tracked {
     /// Inputs the hunks were computed from; `None` until the first diff lands.
     pub stamp: Option<Stamp>,
     pub compute: Compute,
+    /// Where `]g` puts the cursor once fresh hunks arrive.
+    pub landing: Option<Landing>,
 }
 
 impl Tracked {
-    pub fn new(head: Base, index: Base) -> Tracked {
+    pub fn new(head: Base, index: Base, landing: Option<Landing>) -> Tracked {
         Tracked {
             head,
             index,
@@ -103,6 +104,7 @@ impl Tracked {
             staged: Vec::new(),
             stamp: None,
             compute: Compute::Idle(Box::new(Lines::new())),
+            landing,
         }
     }
 
@@ -117,6 +119,46 @@ impl Tracked {
             bases: [self.head.oid(), self.index.oid()],
         }
     }
+
+    /// Takes back a diff job's line cache, keeping its hunks when they describe `version`.
+    pub fn finish(
+        &mut self,
+        stamp: Stamp,
+        mut lines: Box<Lines>,
+        outcome: Outcome,
+        version: u64,
+    ) -> Finished {
+        let current = self.current(version);
+        // The line cache now holds these bases, so their staged hunks are not computed again.
+        match (outcome, stamp.bases == current.bases) {
+            (
+                Outcome::Diffed {
+                    staged: Some(staged),
+                },
+                true,
+            ) => self.staged = staged,
+            (Outcome::TooLarge, true) => self.staged.clear(),
+            (Outcome::Diffed { .. } | Outcome::TooLarge, _) => {}
+        }
+        let finished = match stamp == current {
+            true => {
+                std::mem::swap(&mut self.hunks, &mut lines.hunks);
+                std::mem::swap(&mut self.unstaged, &mut lines.unstaged);
+                self.stamp = Some(stamp);
+                Finished::Current
+            }
+            false => Finished::Stale,
+        };
+        self.compute = Compute::Idle(lines);
+        finished
+    }
+}
+
+/// Whether a finished diff described the current text and bases.
+pub enum Finished {
+    Current,
+    /// Dropped; `sync` queues the next diff.
+    Stale,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,19 +175,6 @@ pub enum Compute {
     Idle(Box<Lines>),
     /// The line cache travels with the job.
     Running,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Landing {
-    pub pane: PaneId,
-    pub edge: Edge,
-    pub arrive: Arrive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edge {
-    First,
-    Last,
 }
 
 /// How much of a HEAD-to-buffer hunk is already in the index.

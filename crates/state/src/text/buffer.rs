@@ -5,12 +5,16 @@ use helix_core::history::{self, History, UndoKind};
 use helix_core::indent::{IndentStyle, auto_detect_indent_style};
 use helix_core::syntax::config::LanguageConfiguration;
 use helix_core::syntax::{HighlighterError, Loader};
-use helix_core::{Language, LineEnding, Rope, Selection, Syntax, Transaction};
-use slotmap::{SlotMap, new_key_type};
+use helix_core::{
+    ChangeSet, Language, LineEnding, Rope, RopeSlice, Selection, Syntax, Transaction,
+};
+use model::notice::Notice;
+use slotmap::new_key_type;
 
-use crate::git::changes::Arrive;
 use crate::git::conflict::{self, Conflicts};
-use crate::git::diff::{Diff, Edge};
+use crate::git::diff::Diff;
+use crate::git::navigate::Arrive;
+use crate::git::navigate::Edge;
 use crate::view::layout::PaneId;
 
 new_key_type! {
@@ -29,8 +33,6 @@ pub enum Content {
     Text {
         doc: TextDoc,
         disk: Disk,
-        /// Modification time of the disk copy the text last matched; `None` before the first write.
-        mtime: Option<SystemTime>,
         diff: Diff,
     },
 }
@@ -61,10 +63,16 @@ pub struct Position {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disk {
-    Synced,
-    /// Path does not exist yet; the first write creates it.
+    /// The text matches the file as modified at `mtime`.
+    Synced {
+        mtime: SystemTime,
+    },
+    /// The path does not exist yet; the first write creates it.
     New,
-    ChangedExternally,
+    /// The file as modified at `mtime` differs from the text, which kept its unsaved edits.
+    ChangedExternally {
+        mtime: SystemTime,
+    },
     Deleted,
 }
 
@@ -79,13 +87,61 @@ pub struct TextDoc {
     pub uncommitted: Uncommitted,
     pub saved_revision: usize,
     pub line_ending: LineEnding,
-    pub language: Option<Language>,
-    pub syntax: Option<Syntax>,
+    pub highlight: Highlight,
     pub indent_style: IndentStyle,
     pub tab_width: usize,
     pub text_width: usize,
     /// Parsed with the text, then again after edits by `conflict::sync`.
     pub conflicts: Conflicts,
+}
+
+/// What the buffer's grammar made of its text.
+pub enum Highlight {
+    /// No grammar matches the file.
+    Plain,
+    Parsed(Syntax),
+    /// The grammar failed on this text; the next edit parses again from scratch.
+    Failed {
+        language: Language,
+        error: HighlighterError,
+    },
+}
+
+impl Highlight {
+    /// The tree, or the notice for a command that needs one.
+    pub fn tree(&self) -> Result<&Syntax, Notice> {
+        match self {
+            Highlight::Parsed(syntax) => Ok(syntax),
+            Highlight::Plain => Err(Notice::NoSyntax),
+            Highlight::Failed { .. } => Err(Notice::SyntaxFailed),
+        }
+    }
+
+    pub fn parse(text: RopeSlice, language: Language, loader: &Loader) -> Highlight {
+        match Syntax::new(text, language, loader) {
+            Ok(syntax) => Highlight::Parsed(syntax),
+            Err(error) => {
+                tracing::warn!(?error, "syntax parse failed");
+                Highlight::Failed { language, error }
+            }
+        }
+    }
+
+    /// The tree, for readers that fall back to plain text without one.
+    pub fn syntax(&self) -> Option<&Syntax> {
+        match self {
+            Highlight::Parsed(syntax) => Some(syntax),
+            Highlight::Plain | Highlight::Failed { .. } => None,
+        }
+    }
+
+    pub fn language(&self) -> Option<Language> {
+        match self {
+            Highlight::Plain => None,
+            Highlight::Parsed(syntax) => Some(syntax.root_language()),
+            Highlight::Failed { language, .. } => Some(*language),
+        }
+    }
 }
 
 /// Edits applied to `text` but not yet grouped into an undo revision.
@@ -99,10 +155,13 @@ pub enum Uncommitted {
 
 impl TextDoc {
     pub fn new(text: Rope, path: &std::path::Path, loader: &Loader) -> TextDoc {
-        let language = loader.language_for_filename(path);
-        let syntax =
-            language.and_then(|language| Syntax::new(text.slice(..), language, loader).ok());
-        let config = language.map(|language| &**loader.language(language).config());
+        let highlight = match loader.language_for_filename(path) {
+            Some(language) => Highlight::parse(text.slice(..), language, loader),
+            None => Highlight::Plain,
+        };
+        let config = highlight
+            .language()
+            .map(|language| &**loader.language(language).config());
         let indent = config.and_then(|config| config.indent.as_ref());
         let mut conflicts = Conflicts::EMPTY;
         conflict::parse(text.slice(..), 0, &mut conflicts);
@@ -123,8 +182,7 @@ impl TextDoc {
             history: History::default(),
             uncommitted: Uncommitted::Clean,
             saved_revision: 0,
-            language,
-            syntax,
+            highlight,
             conflicts,
         }
     }
@@ -146,14 +204,14 @@ impl TextDoc {
         loader: &'a Loader,
         byte: usize,
     ) -> Option<&'a LanguageConfiguration> {
-        match &self.syntax {
-            Some(syntax) => {
+        match &self.highlight {
+            Highlight::Parsed(syntax) => {
                 let layer = syntax.layer_for_byte_range(byte as u32, byte as u32);
                 Some(&**loader.language(syntax.layer(layer).language).config())
             }
-            None => self
-                .language
-                .map(|language| &**loader.language(language).config()),
+            Highlight::Plain | Highlight::Failed { .. } => {
+                (self.highlight.language()).map(|language| &**loader.language(language).config())
+            }
         }
     }
 
@@ -164,11 +222,7 @@ impl TextDoc {
             return;
         }
         self.version += 1;
-        let updated = self
-            .syntax
-            .as_mut()
-            .map(|syntax| syntax.update(old.slice(..), self.text.slice(..), tx.changes(), loader));
-        self.recover_syntax(updated, loader);
+        self.update_highlight(&old, tx.changes(), loader);
         self.uncommitted = match std::mem::replace(&mut self.uncommitted, Uncommitted::Clean) {
             Uncommitted::Clean => Uncommitted::Pending {
                 changes: tx.clone(),
@@ -207,36 +261,28 @@ impl TextDoc {
             let old = self.text.clone();
             tx.apply(&mut self.text);
             self.version += 1;
-            let updated = self.syntax.as_mut().map(|syntax| {
-                syntax.update(old.slice(..), self.text.slice(..), tx.changes(), loader)
-            });
-            self.recover_syntax(updated, loader);
+            self.update_highlight(&old, tx.changes(), loader);
         }
         txs
     }
 
-    /// Re-parses from scratch after a failed incremental update, which may leave the tree half-edited.
-    pub fn recover_syntax(
-        &mut self,
-        updated: Option<Result<(), HighlighterError>>,
-        loader: &Loader,
-    ) {
-        match (updated, &self.syntax) {
-            (Some(Err(error)), Some(syntax)) => {
-                let language = syntax.root_language();
-                self.syntax = match Syntax::new(self.text.slice(..), language, loader) {
-                    Ok(syntax) => {
-                        tracing::warn!(?error, "syntax update failed; re-parsed");
-                        Some(syntax)
+    /// Brings `highlight` up to the text `changes` made from `old`. A failed incremental update
+    /// may leave the tree half-edited, so it parses again from scratch.
+    pub fn update_highlight(&mut self, old: &Rope, changes: &ChangeSet, loader: &Loader) {
+        let text = self.text.slice(..);
+        self.highlight = match std::mem::replace(&mut self.highlight, Highlight::Plain) {
+            Highlight::Plain => Highlight::Plain,
+            Highlight::Parsed(mut syntax) => {
+                match syntax.update(old.slice(..), text, changes, loader) {
+                    Ok(()) => Highlight::Parsed(syntax),
+                    Err(error) => {
+                        tracing::warn!(?error, "syntax update failed; parsing again");
+                        Highlight::parse(text, syntax.root_language(), loader)
                     }
-                    Err(reparse) => {
-                        tracing::warn!(?error, ?reparse, "syntax update and re-parse failed");
-                        None
-                    }
-                };
+                }
             }
-            (Some(Ok(())) | None, _) | (Some(Err(_)), None) => {}
-        }
+            Highlight::Failed { language, .. } => Highlight::parse(text, language, loader),
+        };
     }
 }
 
@@ -257,17 +303,19 @@ impl Content {
     }
 }
 
-/// The text of `buffer`, once loaded.
-pub fn doc(buffers: &SlotMap<BufferId, Buffer>, buffer: BufferId) -> Option<&TextDoc> {
-    match &buffers.get(buffer)?.content {
-        Content::Text { doc, .. } => Some(doc),
-        Content::Loading { .. } => None,
+impl Buffer {
+    /// `None` while the file is still being read.
+    pub fn doc(&self) -> Option<&TextDoc> {
+        match &self.content {
+            Content::Text { doc, .. } => Some(doc),
+            Content::Loading { .. } => None,
+        }
     }
-}
 
-pub fn doc_mut(buffers: &mut SlotMap<BufferId, Buffer>, buffer: BufferId) -> Option<&mut TextDoc> {
-    match &mut buffers.get_mut(buffer)?.content {
-        Content::Text { doc, .. } => Some(doc),
-        Content::Loading { .. } => None,
+    pub fn doc_mut(&mut self) -> Option<&mut TextDoc> {
+        match &mut self.content {
+            Content::Text { doc, .. } => Some(doc),
+            Content::Loading { .. } => None,
+        }
     }
 }

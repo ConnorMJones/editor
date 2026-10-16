@@ -8,6 +8,7 @@ use state::apply::Force;
 use state::view::layout::{Pane, PaneId, TabKey, Tabs};
 use state::view::panes::{self, Click};
 
+use crate::fonts::hsla;
 use crate::workspace::Workspace;
 
 const TAB_HEIGHT: gpui::Pixels = px(28.);
@@ -27,8 +28,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = &self.theme;
+        let fonts = &self.fonts;
         let state = &self.state;
-        let focused = pane == state.layout.focus;
+        let focused = pane == state.layout.focus();
         let pane_key = pane.data().as_ffi();
         let bar = div()
             .id(ElementId::NamedInteger("tab-bar".into(), pane_key))
@@ -39,9 +41,9 @@ impl Workspace {
             .flex_row()
             .overflow_x_scroll()
             .track_scroll(scroll)
-            .bg(theme.surface)
-            .font(theme.ui.clone())
-            .text_size(theme.ui_size);
+            .bg(hsla(theme.surface))
+            .font(fonts.ui.clone())
+            .text_size(fonts.ui_size);
         let tabs_iter = tabs.items().iter().enumerate().map(|(index, item)| {
             let buffer = &state.buffers[item.view.buffer()];
             let path = buffer.path.as_path();
@@ -52,7 +54,7 @@ impl Workspace {
             // Zed's detail: enough trailing parent directories to differ from every other
             // open tab with the same file name.
             let parent = path.parent().unwrap_or(Path::new(""));
-            let depth = (state.layout.panes.values())
+            let depth = (state.layout.panes().values())
                 .flat_map(Pane::items)
                 .map(|other| state.buffers[other.view.buffer()].path.as_path())
                 .filter(|other| *other != path && other.file_name() == path.file_name())
@@ -77,22 +79,22 @@ impl Workspace {
             let modified = buffer.content.is_modified();
             let (bg, fg, edge, bottom) = match (active, focused) {
                 (true, true) => (
-                    theme.background,
-                    theme.text,
-                    theme.chrome.accent,
-                    theme.background,
+                    hsla(theme.background),
+                    hsla(theme.text),
+                    hsla(theme.chrome.accent),
+                    hsla(theme.background),
                 ),
                 (true, false) => (
-                    theme.background,
-                    theme.text,
-                    theme.background,
-                    theme.background,
+                    hsla(theme.background),
+                    hsla(theme.text),
+                    hsla(theme.background),
+                    hsla(theme.background),
                 ),
                 (false, _) => (
-                    theme.surface,
-                    theme.text_muted,
-                    theme.surface,
-                    theme.chrome.border,
+                    hsla(theme.surface),
+                    hsla(theme.muted),
+                    hsla(theme.surface),
+                    hsla(theme.chrome.border),
                 ),
             };
             let label = div().child(name);
@@ -106,12 +108,12 @@ impl Workspace {
                 TabKey::Diff(_) => (
                     "diff-tab",
                     "diff-tab-close",
-                    Some(div().text_color(theme.text_muted).child("±")),
+                    Some(div().text_color(hsla(theme.muted)).child("±")),
                 ),
-                TabKey::Rendered(_) => (
+                TabKey::Document(_) | TabKey::Pages(_) => (
                     "rendered-tab",
                     "rendered-tab-close",
-                    Some(div().text_color(theme.text_muted).child("◉")),
+                    Some(div().text_color(hsla(theme.muted)).child("◉")),
                 ),
             };
             let key = item.view.buffer().data().as_ffi();
@@ -125,8 +127,12 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .rounded(px(3.))
-                .text_color(theme.text_muted)
-                .hover(|style| style.bg(theme.chrome.hover).text_color(theme.text))
+                .text_color(hsla(theme.muted))
+                .hover(|style| {
+                    style
+                        .bg(hsla(theme.chrome.hover))
+                        .text_color(hsla(theme.text))
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     panes::close_tab(&mut this.state, pane, index, Force::No);
@@ -141,7 +147,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme.chrome.unsaved)
+                .text_color(hsla(theme.chrome.unsaved))
                 .group_hover(GROUP, |style| style.invisible())
                 .child("●");
             let hover = |close: Stateful<Div>| {
@@ -165,9 +171,9 @@ impl Workspace {
                 .bg(bg)
                 .text_color(fg)
                 .border_r_1()
-                .border_color(theme.chrome.border)
+                .border_color(hsla(theme.chrome.border))
                 .when(!active, |tab| {
-                    tab.hover(|style| style.bg(theme.chrome.hover))
+                    tab.hover(|style| style.bg(hsla(theme.chrome.hover)))
                 })
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     let click = match event.click_count() {
@@ -199,7 +205,7 @@ impl Workspace {
                         .children(icon)
                         .child(label)
                         .children(
-                            detail.map(|detail| div().text_color(theme.text_muted).child(detail)),
+                            detail.map(|detail| div().text_color(hsla(theme.muted)).child(detail)),
                         )
                         .child(end),
                 )
@@ -213,7 +219,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .justify_end()
-                .child(div().h(px(1.)).bg(theme.chrome.border)),
+                .child(div().h(px(1.)).bg(hsla(theme.chrome.border))),
         )
     }
 }

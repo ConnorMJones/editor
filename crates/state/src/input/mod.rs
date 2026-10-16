@@ -14,46 +14,27 @@ use model::register::Register;
 
 use crate::apply::{apply, commit_focused};
 use crate::input::keymap::{Context, Resolved};
-use crate::sidebar::tree::TreeEdit;
-use crate::view::layout::{Pane, View};
-use crate::{Effect, Focus, Overlay, Sidebar, State, Sticky, view::scroll};
+use crate::view::layout::View;
+use crate::{Effect, Files, Focus, Overlay, Sidebar, State, Sticky, view::scroll};
 
 pub fn context(state: &State) -> Context {
-    match (
-        &state.overlay,
-        &state.confirm,
-        state.sidebar,
-        &state.tree.edit,
-        state.input.mode,
-    ) {
-        (Overlay::Prompt(_), ..) => Context::Prompt,
-        (Overlay::Picker(_), ..) => Context::Picker,
-        (Overlay::None, Some(_), ..) => Context::Confirm,
-        (Overlay::None, None, Sidebar::Files(Focus::Sidebar), TreeEdit::None, _) => Context::Tree,
+    match (&state.overlay, &state.sidebar) {
+        (Overlay::Prompt(_), _) => Context::Prompt,
+        (Overlay::Picker(_), _) => Context::Picker,
+        (Overlay::Confirm(_), _) => Context::Confirm,
+        (Overlay::None, Sidebar::Files(Files::Tree)) => Context::Tree,
+        (Overlay::None, Sidebar::Files(Files::Edit(_))) => Context::TreeInput,
+        (Overlay::None, Sidebar::Changes(Focus::Sidebar)) => Context::Changes,
         (
             Overlay::None,
-            None,
-            Sidebar::Files(Focus::Sidebar),
-            TreeEdit::Create { .. } | TreeEdit::Rename { .. } | TreeEdit::Delete { .. },
-            _,
-        ) => Context::TreeInput,
-        (Overlay::None, None, Sidebar::Changes(Focus::Sidebar), ..) => Context::Changes,
-        (Overlay::None, None, Sidebar::Hidden | Sidebar::Files(Focus::Editor), _, mode)
-        | (Overlay::None, None, Sidebar::Changes(Focus::Editor), _, mode) => {
-            match (
-                state
-                    .layout
-                    .panes
-                    .get(state.layout.focus)
-                    .and_then(Pane::active),
-                mode,
-            ) {
-                (Some(View::Rendered(_)), _) => Context::Rendered,
-                (Some(View::Text(_) | View::Diff(_)) | None, Mode::Normal) => Context::Normal,
-                (Some(View::Text(_) | View::Diff(_)) | None, Mode::Insert) => Context::Insert,
-                (Some(View::Text(_) | View::Diff(_)) | None, Mode::Select) => Context::Select,
-            }
-        }
+            Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
+        ) => match (state.layout.focused().active(), state.input.mode) {
+            (Some(View::Document(_)), _) => Context::Document,
+            (Some(View::Pages(_)), _) => Context::Pages,
+            (Some(View::Text(_) | View::Diff(_)) | None, Mode::Normal) => Context::Normal,
+            (Some(View::Text(_) | View::Diff(_)) | None, Mode::Insert) => Context::Insert,
+            (Some(View::Text(_) | View::Diff(_)) | None, Mode::Select) => Context::Select,
+        },
     }
 }
 
@@ -118,7 +99,8 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::Picker
             | Context::Changes
             | Context::Confirm
-            | Context::Rendered),
+            | Context::Document
+            | Context::Pages),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -129,7 +111,7 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
         Mode::Insert => {}
         Mode::Normal | Mode::Select => commit_focused(state),
     }
-    let focus = state.layout.focus;
+    let focus = state.layout.focus();
     scroll::follow_cursor(state, focus);
 }
 
@@ -301,7 +283,7 @@ pub fn text(state: &mut State, text: &str, out: &mut Vec<Effect>) {
             None => break,
         }
     }
-    let focus = state.layout.focus;
+    let focus = state.layout.focus();
     scroll::follow_cursor(state, focus);
 }
 
@@ -317,6 +299,7 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::Tree
         | Context::Changes
         | Context::Confirm
-        | Context::Rendered => None,
+        | Context::Document
+        | Context::Pages => None,
     }
 }

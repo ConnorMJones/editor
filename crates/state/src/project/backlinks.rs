@@ -9,12 +9,13 @@ use pulldown_cmark::{Event, LinkType, Parser, Tag};
 
 use crate::input::picker::{Hit, Items, Narrowing, Search};
 use crate::job::Job;
-use crate::project::files::Files;
+use crate::project::Project;
+use crate::project::files::{FileIndex, Indexed, OnIndexed};
 use crate::project::links::{self, Dest, Resolution};
 use crate::project::path::RelPath;
 use crate::render::markdown::{self, Format, LinkTarget, WikiLink};
 use crate::text::buffer::{BufferId, Content};
-use crate::{Effect, Overlay, State, render::rendered};
+use crate::{Effect, Overlay, State, render::document};
 
 #[derive(Default)]
 pub struct Backlinks {
@@ -29,8 +30,6 @@ pub struct Backlinks {
 pub enum Build {
     #[default]
     Unbuilt,
-    /// Asked for before the file index was ready.
-    Waiting,
     /// The first read of every note runs; notes that change meanwhile are read again after it.
     Building {
         stamp: u64,
@@ -166,57 +165,73 @@ fn is_note(path: &RelPath) -> bool {
     Format::of(Path::new(path.as_str())) == Some(Format::Markdown)
 }
 
-fn request(state: &mut State, paths: Vec<RelPath>, out: &mut Vec<Effect>) -> u64 {
-    state.backlinks.stamp += 1;
-    let stamp = state.backlinks.stamp;
+fn request(
+    backlinks: &mut Backlinks,
+    root: &Path,
+    paths: Vec<RelPath>,
+    out: &mut Vec<Effect>,
+) -> u64 {
+    backlinks.stamp += 1;
     out.push(Effect::Job(Job::Links {
-        root: state.root.path().to_owned(),
+        root: root.to_owned(),
         paths,
-        stamp,
+        stamp: backlinks.stamp,
     }));
-    stamp
+    backlinks.stamp
 }
 
-/// Starts the first read of every note unless it ran already; waits for the file index.
+/// Starts the first read of every note unless it ran already; before the first walk ends, asks
+/// for it to start then.
 pub fn ensure(state: &mut State, out: &mut Vec<Effect>) {
-    match state.backlinks.build {
-        Build::Unbuilt | Build::Waiting => {}
-        Build::Building { .. } | Build::Ready => return,
+    let root = state.project.root.path();
+    match &mut state.project.index {
+        FileIndex::Loading { then } => *then = OnIndexed::BuildBacklinks,
+        FileIndex::Ready(Indexed {
+            files, backlinks, ..
+        }) => match backlinks.build {
+            Build::Unbuilt => {
+                let notes = files.iter().filter(|file| is_note(file)).cloned().collect();
+                let stamp = request(backlinks, root, notes, out);
+                backlinks.build = Build::Building {
+                    stamp,
+                    dirty: Vec::new(),
+                };
+            }
+            Build::Building { .. } | Build::Ready => {}
+        },
     }
-    let notes = match &state.files {
-        Files::Ready(files) => files.iter().filter(|file| is_note(file)).cloned().collect(),
-        Files::Loading => return state.backlinks.build = Build::Waiting,
-    };
-    let stamp = request(state, notes, out);
-    state.backlinks.build = Build::Building {
-        stamp,
-        dirty: Vec::new(),
-    };
 }
 
-/// Notes the watcher saw change.
+/// Notes the watcher saw change; before the first walk ends, the build reads them anyway.
 pub fn changed(state: &mut State, paths: &[RelPath], out: &mut Vec<Effect>) {
+    let root = state.project.root.path();
+    let FileIndex::Ready(Indexed { backlinks, .. }) = &mut state.project.index else {
+        return;
+    };
     let notes: Vec<RelPath> = paths.iter().filter(|path| is_note(path)).cloned().collect();
-    match (&mut state.backlinks.build, notes.is_empty()) {
-        (_, true) | (Build::Unbuilt | Build::Waiting, false) => {}
+    match (&mut backlinks.build, notes.is_empty()) {
+        (_, true) | (Build::Unbuilt, false) => {}
         (Build::Building { dirty, .. }, false) => dirty.extend(notes),
         (Build::Ready, false) => {
-            request(state, notes, out);
+            request(backlinks, root, notes, out);
         }
     }
 }
 
 /// The file index changed: drops notes that are gone and reads ones it does not know.
 pub fn reconcile(state: &mut State, out: &mut Vec<Effect>) {
-    let Files::Ready(files) = &state.files else {
+    let root = state.project.root.path();
+    let FileIndex::Ready(Indexed {
+        files, backlinks, ..
+    }) = &mut state.project.index
+    else {
         return;
     };
-    match state.backlinks.build {
+    match backlinks.build {
         Build::Ready => {}
-        Build::Waiting => return ensure(state, out),
         Build::Unbuilt | Build::Building { .. } => return,
     }
-    let notes = &mut state.backlinks.notes;
+    let notes = &mut backlinks.notes;
     notes.retain(|path, _| files.binary_search(path).is_ok());
     let unknown: Vec<RelPath> = files
         .iter()
@@ -226,16 +241,23 @@ pub fn reconcile(state: &mut State, out: &mut Vec<Effect>) {
     match unknown.is_empty() {
         true => {}
         false => {
-            request(state, unknown, out);
+            request(backlinks, root, unknown, out);
         }
     }
 }
 
 /// A finished read: applies notes no newer source replaced, then fills a waiting picker.
 pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &mut Vec<Effect>) {
+    let root = state.project.root.path();
     let State {
-        backlinks, buffers, ..
+        project: Project { index, .. },
+        buffers,
+        ..
     } = state;
+    // Reads start from a built index, so one is here.
+    let FileIndex::Ready(Indexed { backlinks, .. }) = index else {
+        return;
+    };
     for (path, read) in reads {
         let newer = backlinks.notes.get(&path).is_some_and(|note| {
             note.stamp > stamp
@@ -266,13 +288,13 @@ pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &
             stamp: started,
             dirty,
         } if *started == stamp => std::mem::take(dirty),
-        Build::Building { .. } | Build::Unbuilt | Build::Waiting | Build::Ready => return,
+        Build::Building { .. } | Build::Unbuilt | Build::Ready => return,
     };
     backlinks.build = Build::Ready;
     match dirty.is_empty() {
         true => {}
         false => {
-            request(state, dirty, out);
+            request(backlinks, root, dirty, out);
         }
     }
     reconcile(state, out);
@@ -285,19 +307,21 @@ pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &
             },
             Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Grep(_) => return,
         },
-        Overlay::None | Overlay::Prompt(_) => return,
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => return,
     };
     sync_buffers(state, out);
-    let found = hits(state, &note);
     let State {
-        overlay, matcher, ..
+        overlay,
+        matcher,
+        project: Project { index, .. },
+        ..
     } = state;
-    let Overlay::Picker(picker) = overlay else {
+    let (FileIndex::Ready(indexed), Overlay::Picker(picker)) = (index, overlay) else {
         return;
     };
     match &mut picker.items {
         Items::Backlinks(referrers) => {
-            referrers.hits = found;
+            referrers.hits = hits(indexed, &note);
             referrers.search = Search::Done;
         }
         Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Grep(_) => return,
@@ -310,12 +334,14 @@ pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &
 /// closed.
 pub fn sync_buffers(state: &mut State, out: &mut Vec<Effect>) {
     let State {
-        backlinks,
+        project: Project { index, root, .. },
         buffers,
-        root,
-        previews,
+        documents,
         ..
     } = state;
+    let FileIndex::Ready(Indexed { backlinks, .. }) = index else {
+        return;
+    };
     let mut scratch = String::new();
     for (id, buffer) in buffers.iter() {
         let Content::Text { doc, .. } = &buffer.content else {
@@ -336,7 +362,7 @@ pub fn sync_buffers(state: &mut State, out: &mut Vec<Effect>) {
             (true, Some(known)) if known == source => continue,
             (true, Some(_) | None) => {}
         }
-        let text = match rendered::markdown(previews, id, doc) {
+        let text = match document::markdown(documents, id, doc) {
             Some(parsed) => parsed.source.as_str(),
             None => {
                 scratch.clear();
@@ -370,26 +396,20 @@ pub fn sync_buffers(state: &mut State, out: &mut Vec<Effect>) {
     match closed.is_empty() {
         true => {}
         false => {
-            request(state, closed, out);
+            request(backlinks, root.path(), closed, out);
         }
     }
 }
 
 /// Every link to `note`, in path and line order.
-pub fn hits(state: &mut State, note: &RelPath) -> Vec<Hit> {
+pub fn hits(indexed: &mut Indexed, note: &RelPath) -> Vec<Hit> {
     let key = links::link_key(note.name());
-    let State {
-        backlinks,
-        vault,
-        files,
-        ..
-    } = state;
-    let index = links::index(vault, files);
+    let (index, backlinks) = indexed.links();
     let mut hits: Vec<Hit> = backlinks
         .notes
         .iter()
         .flat_map(|(path, entry)| {
-            let dir = path.parent().unwrap_or("");
+            let dir = path.folder_path();
             entry
                 .links
                 .iter()

@@ -11,13 +11,11 @@ use model::command::{
     SyntaxObject,
 };
 use model::mode::Mode;
-use model::notice::Notice;
 
 use crate::State;
-use crate::apply::{count_of, focused, movement_of, reselect, select, try_select};
+use crate::apply::{count_of, focused_text, movement_of, reselect, select, try_select};
 use crate::git::diffview::Right;
 use crate::view::display::{Indent, text_format};
-use crate::view::layout::Viewport;
 use crate::view::scroll::{self, Pointed, SCROLLOFF};
 
 pub(crate) fn direction(direction: Direction) -> movement::Direction {
@@ -42,9 +40,9 @@ pub fn motion(state: &mut State, motion: Motion) {
     let count = count_of(state);
     let behaviour = movement_of(state);
     let extend = behaviour == Movement::Extend;
-    let viewport = match focused(&mut state.layout, &mut state.buffers) {
+    let viewport = match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
         Some((view, _)) => view.scroll.viewport,
-        None => Viewport::default(),
+        None => return,
     };
     // Same format as drawn, so visual lines follow soft wrap.
     let vertical = |state: &mut State, f: MoveFn, dir: Direction| {
@@ -151,7 +149,7 @@ pub fn motion(state: &mut State, motion: Motion) {
             let text = doc.text.slice(..);
             selection.clone().transform(|range| {
                 let pos = range.cursor(text);
-                let matched = match &doc.syntax {
+                let matched = match doc.highlight.syntax() {
                     Some(syntax) => match_brackets::find_matching_bracket_fuzzy(syntax, text, pos),
                     None => match_brackets::find_matching_bracket_plaintext(text, pos),
                 };
@@ -166,15 +164,14 @@ pub fn motion(state: &mut State, motion: Motion) {
                 Motion::ParentNodeStart => movement::Direction::Backward,
                 _ => movement::Direction::Forward,
             };
-            select(state, |doc, selection, _| match &doc.syntax {
-                Some(syntax) => movement::move_parent_node_end(
-                    syntax,
+            try_select(state, |doc, selection, _| {
+                Ok(movement::move_parent_node_end(
+                    doc.highlight.tree()?,
                     doc.text.slice(..),
                     selection.clone(),
                     dir,
                     behaviour,
-                ),
-                None => selection.clone(),
+                ))
             })
         }
         Motion::Window(align) => {
@@ -189,7 +186,7 @@ pub fn motion(state: &mut State, motion: Motion) {
                 doc,
                 padding,
                 right: Right::Live,
-            }) = scroll::pane_text(layout, buffers, layout.focus)
+            }) = scroll::pane_text(layout, buffers, layout.focus())
             else {
                 return;
             };
@@ -319,21 +316,21 @@ pub fn text_object(state: &mut State, scope: ObjectScope, object: Object) {
             Object::LongWord => textobject::textobject_word(text, range, scope, count, true),
             Object::Paragraph => textobject::textobject_paragraph(text, range, scope, count),
             Object::ClosestPair => textobject::textobject_pair_surround_closest(
-                doc.syntax.as_ref(),
+                doc.highlight.syntax(),
                 text,
                 range,
                 scope,
                 count,
             ),
             Object::Pair(ch) => textobject::textobject_pair_surround(
-                doc.syntax.as_ref(),
+                doc.highlight.syntax(),
                 text,
                 range,
                 scope,
                 ch,
                 count,
             ),
-            Object::Syntax(object) => match &doc.syntax {
+            Object::Syntax(object) => match doc.highlight.syntax() {
                 Some(syntax) => textobject::textobject_treesitter(
                     text,
                     range,
@@ -365,7 +362,7 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
         doc,
         padding,
         right: Right::Live,
-    }) = scroll::pane_text(layout, buffers, layout.focus)
+    }) = scroll::pane_text(layout, buffers, layout.focus())
     else {
         return;
     };
@@ -443,7 +440,7 @@ pub fn align_view(state: &mut State, align: Align) {
         doc,
         padding,
         right: Right::Live,
-    }) = scroll::pane_text(layout, buffers, layout.focus)
+    }) = scroll::pane_text(layout, buffers, layout.focus())
     else {
         return;
     };
@@ -465,9 +462,7 @@ pub fn goto_syntax_object(state: &mut State, object: SyntaxObject, dir: Directio
     let count = count_of(state);
     let select_mode = state.input.mode == Mode::Select;
     try_select(state, |doc, selection, loader| {
-        let Some(syntax) = &doc.syntax else {
-            return Err(Notice::NoSyntax);
-        };
+        let syntax = doc.highlight.tree()?;
         let text = doc.text.slice(..);
         Ok(selection.clone().transform(|range| {
             let found = movement::goto_treesitter_object(

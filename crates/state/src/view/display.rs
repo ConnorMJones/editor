@@ -22,7 +22,7 @@ pub struct Indent {
 
 impl Indent {
     pub fn of(doc: &TextDoc, loader: &Loader) -> Indent {
-        let config = doc.syntax.as_ref().and_then(|syntax| {
+        let config = doc.highlight.syntax().and_then(|syntax| {
             loader
                 .language(syntax.root_language())
                 .config()
@@ -258,7 +258,7 @@ pub fn layout(
     // Rows skipped past the anchor are its own wrapped rows or annotations, so one more line
     // covers them.
     let end_line = (first_line + viewport.rows as usize + 2).min(text.len_lines());
-    let mut highlighter = doc.syntax.as_ref().map(|syntax| {
+    let mut highlighter = doc.highlight.syntax().map(|syntax| {
         syntax.highlighter(
             text,
             loader,
@@ -514,8 +514,7 @@ fn cell_style(cursors: &[Cursor], row: u16, col: u16, style: Style) -> Style {
         .take_while(|c| c.row == row)
         .find(|c| c.col == col && c.shape == CursorShape::Block);
     match block.map(|c| c.rank) {
-        Some(Rank::Primary) => style.patch(Style::fg(theme::CURSOR_PRIMARY.fg)),
-        Some(Rank::Secondary) => style.patch(Style::fg(theme::CURSOR_SECONDARY.fg)),
+        Some(Rank::Primary | Rank::Secondary) => style.patch(Style::fg(theme::CURSOR_TEXT)),
         None => style,
     }
 }

@@ -14,7 +14,7 @@ use state::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
 use state::project::watch::{self, Watcher};
 use state::render::typeset::{Look, Request};
 use state::view::layout::{PaneId, TextView, View};
-use state::{Effect, Root, State, git::changes, input, job, text::registers};
+use state::{Confirm, Effect, Overlay, Root, State, input, job, text::registers};
 
 pub struct Harness {
     pub state: State,
@@ -38,7 +38,7 @@ pub const LOOK: Look = Look {
         g: 0xd0,
         b: 0xd0,
     },
-    prose_size: model::typeset::Pt(12.0),
+    prose_size: model::units::Pt(12.0),
     palette: Palette(
         [Rgb {
             r: 0x80,
@@ -216,7 +216,7 @@ impl Harness {
     /// Syncs and runs queued effects synchronously, as the host's flush does.
     fn drain(&mut self) {
         loop {
-            changes::sync(&mut self.state, &mut self.effects);
+            state::sync(&mut self.state, &mut self.effects);
             let Some(effect) = self.effects.pop() else {
                 break;
             };
@@ -249,17 +249,24 @@ impl Harness {
     /// Active view of the focused pane.
     /// Active view of the focused pane: a text view, or a diff's buffer side.
     pub fn view(&self) -> &TextView {
-        match self.state.layout.panes[self.state.layout.focus].active() {
+        match self.state.layout.focused().active() {
             Some(view) => view.text(),
             None => panic!("focused pane has no tab"),
         }
     }
 
     pub fn view_mut(&mut self) -> &mut TextView {
-        let focus = self.state.layout.focus;
-        match self.state.layout.panes[focus].active_mut() {
+        match self.state.layout.focused_mut().active_mut() {
             Some(view) => view.text_mut(),
             None => panic!("focused pane has no tab"),
+        }
+    }
+
+    /// The action an open confirm asks about.
+    pub fn confirm(&self) -> Option<&Confirm> {
+        match &self.state.overlay {
+            Overlay::Confirm(confirm) => Some(confirm),
+            Overlay::None | Overlay::Prompt(_) | Overlay::Picker(_) => None,
         }
     }
 
@@ -271,7 +278,7 @@ impl Harness {
     }
 
     pub fn focused_path(&self) -> Option<PathBuf> {
-        let pane = &self.state.layout.panes[self.state.layout.focus];
+        let pane = &self.state.layout.panes()[self.state.layout.focus()];
         pane.active()
             .map(|view| self.state.buffers[view.buffer()].path.clone())
     }
@@ -279,7 +286,7 @@ impl Harness {
     /// File names of `pane`'s tabs in bar order, diffs prefixed `±`, rendered views `◉` and the
     /// preview marked `*`.
     pub fn tabs(&self, pane: PaneId) -> Vec<String> {
-        let target = &self.state.layout.panes[pane];
+        let target = &self.state.layout.panes()[pane];
         let preview = target.tabs.as_ref().and_then(|tabs| tabs.preview());
         target
             .items()
@@ -291,7 +298,7 @@ impl Harness {
                 let kind = match item.view {
                     View::Text(_) => "",
                     View::Diff(_) => "±",
-                    View::Rendered(_) => "◉",
+                    View::Document(_) | View::Pages(_) => "◉",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),
@@ -303,12 +310,12 @@ impl Harness {
 
     /// Tabs of the focused pane; see `tabs`.
     pub fn focused_tabs(&self) -> Vec<String> {
-        self.tabs(self.state.layout.focus)
+        self.tabs(self.state.layout.focus())
     }
 
     /// The open buffer at `path` relative to the root.
     pub fn buffer(&self, name: &str) -> BufferId {
-        let path = self.state.root.path().join(name);
+        let path = self.state.project.root.path().join(name);
         self.state
             .buffers
             .iter()

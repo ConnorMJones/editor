@@ -15,14 +15,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use model::color::{Base16, Palette, Rgb};
 pub use model::typeset::{
     Compilation, Diagnostic, Diagnostics, Display, DocumentError, Jump, LineColumn, Origin,
-    PX_PER_PT, PagePoint, Pages, Pt, SourceFile, Svg,
+    PackageFile, PagePoint, Pages, SourceFile, Svg,
 };
-use typst::diag::{SourceDiagnostic, Warned};
+pub use model::units::{Pt, Px};
+use typst::diag::{FileError, SourceDiagnostic, Warned};
 use typst::foundations::Bytes;
 use typst::introspection::{PagedPosition, Tag};
 use typst::layout::{Abs, Frame, FrameItem, Point, Size};
 use typst::math::EquationElem;
-use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
+use typst::syntax::{FileId, RealizeError, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{FontVariant, FontVariations};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
@@ -51,12 +52,29 @@ pub enum TypesetError {
     Latex(String),
     #[error("typst rejected the converted LaTeX: {}", .0.join("; "))]
     Math(Vec<String>),
+    #[error("typst laid out the inline equation without its start tag")]
+    NoBaseline,
     #[error("the source is not a mermaid diagram")]
     NotMermaid,
     #[error("mermaid: {0}")]
     Mermaid(#[from] merman::svg::HeadlessError),
     #[error("the mermaid SVG has no usable viewBox")]
     MermaidSize,
+    #[error("the mermaid output has no root element")]
+    MermaidSvg,
+}
+
+/// A place typst named that cannot be turned into a file and position.
+#[derive(Debug, thiserror::Error)]
+pub enum LookupError {
+    #[error("no compiled document for {0:?}")]
+    NotCompiled(PathBuf),
+    #[error("typst cannot read {file:?}: {error}")]
+    Unreadable { file: FileId, error: FileError },
+    #[error("byte {byte} is outside {file:?}")]
+    OutOfRange { file: FileId, byte: usize },
+    #[error("{file:?} does not map under the root: {error:?}")]
+    OutsideRoot { file: FileId, error: RealizeError },
 }
 
 /// A merman renderer themed from one palette.
@@ -172,15 +190,16 @@ impl Typesetter {
                 document.pages().len()
             )]));
         };
-        Ok(page_svg(
-            page,
-            match display {
-                Display::Inline => {
-                    equation_baseline(&page.frame, Abs::zero()).map(|y| y.to_pt() as f32)
-                }
-                Display::Block => None,
+        let svg = page_svg(page);
+        Ok(match display {
+            Display::Inline => Svg {
+                baseline: Pt(equation_baseline(&page.frame, Abs::zero())
+                    .ok_or(TypesetError::NoBaseline)?
+                    .to_pt() as f32),
+                ..svg
             },
-        ))
+            Display::Block => svg,
+        })
     }
 
     pub fn mermaid(&mut self, src: &str, palette: &Palette) -> Result<Svg, TypesetError> {
@@ -236,7 +255,7 @@ impl Typesetter {
             .render_svg_with_pipeline_sync(src, &mermaid.pipeline)?
             .ok_or(TypesetError::NotMermaid)?;
         // Mermaid paints the root white; the diagram sits on the reader's background instead.
-        let root_end = svg.find('>').unwrap_or(0);
+        let root_end = svg.find('>').ok_or(TypesetError::MermaidSvg)?;
         match svg[..root_end].find("background-color:white") {
             Some(at) => svg.replace_range(
                 at..at + "background-color:white".len(),
@@ -263,9 +282,9 @@ impl Typesetter {
         match (width, height) {
             (Some(width), Some(height)) if width > 0.0 && height > 0.0 => Ok(Svg {
                 bytes: Arc::from(svg.into_bytes()),
-                width_pt: width / PX_PER_PT,
-                height_pt: height / PX_PER_PT,
-                baseline_pt: None,
+                width: Pt::from(Px(width)),
+                height: Pt::from(Px(height)),
+                baseline: Pt::from(Px(height)),
             }),
             _ => Err(TypesetError::MermaidSize),
         }
@@ -297,7 +316,7 @@ impl Typesetter {
                     let hash = typst::utils::hash128(page);
                     match self.exported_pages.get(index) {
                         Some((cached, svg)) if *cached == hash => (hash, svg.clone()),
-                        _ => (hash, page_svg(page, None)),
+                        _ => (hash, page_svg(page)),
                     }
                 })
                 .collect();
@@ -339,36 +358,48 @@ impl Typesetter {
     }
 
     /// What the point `at` on a page of `main`'s last compiled document leads to.
-    pub fn click(&self, main: &Path, at: PagePoint) -> Option<Jump> {
-        let kept = self.documents.get(main)?;
+    /// `None` when nothing at the point leads anywhere.
+    pub fn click(&self, main: &Path, at: PagePoint) -> Result<Option<Jump>, LookupError> {
+        let kept =
+            (self.documents.get(main)).ok_or_else(|| LookupError::NotCompiled(main.to_owned()))?;
         let position = PagedPosition {
-            page: NonZeroUsize::new(at.page + 1)?,
+            page: NonZeroUsize::MIN.saturating_add(at.page),
             point: Point::new(Abs::pt(at.x.0.into()), Abs::pt(at.y.0.into())),
         };
-        match typst_ide::jump_from_click(&self.world, &kept.document, &position)? {
-            typst_ide::Jump::File(id, byte) => {
-                let source = self.world.source(id).ok()?;
-                let (line, column) = source.lines().byte_to_line_column(byte)?;
-                Some(Jump::Source {
-                    file: self.source_file(id)?,
-                    at: LineColumn { line, column },
-                })
-            }
-            typst_ide::Jump::Url(url) => Some(Jump::Url(url.as_str().to_owned())),
-            typst_ide::Jump::Position(position) => Some(Jump::Page(page_point(&position))),
-        }
+        Ok(
+            match typst_ide::jump_from_click(&self.world, &kept.document, &position) {
+                None => None,
+                Some(typst_ide::Jump::File(id, byte)) => {
+                    let source = self.source(id)?;
+                    Some(Jump::Source {
+                        file: self.source_file(id)?,
+                        at: line_column(&source, id, byte)?,
+                    })
+                }
+                Some(typst_ide::Jump::Url(url)) => Some(Jump::Url(url.as_str().to_owned())),
+                Some(typst_ide::Jump::Position(position)) => {
+                    Some(Jump::Page(page_point(&position)))
+                }
+            },
+        )
     }
 
-    /// The file `id` names, if it is a project or embedded file.
-    fn source_file(&self, id: FileId) -> Option<SourceFile> {
+    fn source(&self, id: FileId) -> Result<Source, LookupError> {
+        (self.world.source(id)).map_err(|error| LookupError::Unreadable { file: id, error })
+    }
+
+    fn source_file(&self, id: FileId) -> Result<SourceFile, LookupError> {
         match id.root() {
-            VirtualRoot::Project => Some(SourceFile::Project(
-                id.vpath().realize(&self.world.root).ok()?,
-            )),
+            VirtualRoot::Project => (id.vpath().realize(&self.world.root))
+                .map(SourceFile::Project)
+                .map_err(|error| LookupError::OutsideRoot { file: id, error }),
             VirtualRoot::Package(spec) if spec.namespace == EMBEDDED_NAMESPACE => {
-                Some(SourceFile::Embedded(id.get().vpath().get_with_slash()))
+                Ok(SourceFile::Embedded(id.get().vpath().get_with_slash()))
             }
-            VirtualRoot::Package(_) => None,
+            VirtualRoot::Package(spec) => Ok(SourceFile::Package(Box::new(PackageFile {
+                package: spec.to_string(),
+                path: id.vpath().get_with_slash().to_owned(),
+            }))),
         }
     }
 
@@ -455,29 +486,25 @@ impl Typesetter {
         diagnostics
             .iter()
             .map(|diagnostic| Diagnostic {
-                origin: diagnostic
-                    .span
-                    .id()
-                    .zip(self.world.range(diagnostic.span))
-                    .and_then(|(id, range)| {
-                        let source = self.world.source(id).ok()?;
-                        let lines = source.lines();
-                        let (start_line, start_column) = lines.byte_to_line_column(range.start)?;
-                        let (end_line, end_column) = lines.byte_to_line_column(range.end)?;
-                        let file = self.source_file(id)?;
-                        Some(Origin::Span {
-                            file,
-                            start: LineColumn {
-                                line: start_line,
-                                column: start_column,
-                            },
-                            end: LineColumn {
-                                line: end_line,
-                                column: end_column,
-                            },
-                        })
-                    })
-                    .unwrap_or(Origin::Detached),
+                origin: match (diagnostic.span.id(), self.world.range(diagnostic.span)) {
+                    (Some(id), Some(range)) => {
+                        let span = self.source(id).and_then(|source| {
+                            Ok(Origin::Span {
+                                file: self.source_file(id)?,
+                                start: line_column(&source, id, range.start)?,
+                                end: line_column(&source, id, range.end)?,
+                            })
+                        });
+                        match span {
+                            Ok(span) => span,
+                            Err(error) => {
+                                tracing::warn!(%error, "typst diagnostic without a usable place");
+                                Origin::Detached
+                            }
+                        }
+                    }
+                    (None, _) | (_, None) => Origin::Detached,
+                },
                 message: diagnostic.message.to_string(),
                 hints: diagnostic
                     .hints
@@ -487,6 +514,12 @@ impl Typesetter {
             })
             .collect()
     }
+}
+
+fn line_column(source: &Source, file: FileId, byte: usize) -> Result<LineColumn, LookupError> {
+    let (line, column) =
+        (source.lines().byte_to_line_column(byte)).ok_or(LookupError::OutOfRange { file, byte })?;
+    Ok(LineColumn { line, column })
 }
 
 /// Finds the inline equation's start tag; line layout places tags on the baseline.
@@ -500,14 +533,14 @@ fn equation_baseline(frame: &Frame, offset: Abs) -> Option<Abs> {
     })
 }
 
-fn page_svg(page: &Page, baseline_pt: Option<f32>) -> Svg {
+fn page_svg(page: &Page) -> Svg {
     // typst-svg clamps pages to at least 1pt, so the reported size does too.
     let size = page.frame.size().max(Size::splat(Abs::pt(1.0)));
     Svg {
         bytes: Arc::from(typst_svg::svg(page, &typst_svg::SvgOptions::default()).into_bytes()),
-        width_pt: size.x.to_pt() as f32,
-        height_pt: size.y.to_pt() as f32,
-        baseline_pt,
+        width: Pt(size.x.to_pt() as f32),
+        height: Pt(size.y.to_pt() as f32),
+        baseline: Pt(size.y.to_pt() as f32),
     }
 }
 

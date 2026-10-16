@@ -1,12 +1,13 @@
 use std::path::Path;
 
 use helix_core::Rope;
+use model::markdown::CalloutKind;
+use model::typeset::Display;
 use state::project::links::{Index, Resolution};
 use state::project::path::RelPath;
 use state::render::markdown::{
-    self, Base, BlockKind, CalloutFold, CalloutKind, Column, Display, EmbedKind, Emphasis,
-    FigureKind, Format, ImageFile, Level, LinkTarget, ListKind, Markdown, RowKind, SpanKind, Task,
-    WikiLink,
+    self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, Format, ImageFile,
+    Level, LinkTarget, ListKind, Markdown, RowKind, SpanKind, Task, WikiLink,
 };
 
 fn parse(text: &str) -> Markdown {

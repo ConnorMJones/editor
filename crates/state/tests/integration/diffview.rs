@@ -5,14 +5,16 @@ use model::command::ChangesCommand;
 use model::git::Group;
 use model::notice::Notice;
 use state::Confirm;
-use state::git::changes::{self, Discard, ListCursor, ListRow};
 use state::git::diffview::{self, DiffView, LEFT, Left, RIGHT, Right};
+use state::git::stage::Discard;
 use state::input;
 use state::input::keymap::Context;
 use state::project::session::{self, SessionItem, SessionPane, SessionSidebar};
+use state::sidebar::changes::{self, ListCursor, ListRow};
 use state::sidebar::tree::Fold;
 use state::view::layout::{View, Viewport};
 use state::view::panes::{self, Click};
+use state::view::scroll;
 use state::{Focus, Repo, Sidebar};
 
 use crate::git::{init, stage_path, staged_text};
@@ -21,17 +23,19 @@ use crate::harness::Harness;
 const FIVE: &str = "a\nb\nc\nd\ne\n";
 
 fn diff(h: &Harness) -> &DiffView {
-    match h.state.layout.panes[h.state.layout.focus].active() {
+    match h.state.layout.panes()[h.state.layout.focus()].active() {
         Some(View::Diff(diff)) => diff,
-        Some(View::Text(_) | View::Rendered(_)) => panic!("focused tab is not a diff"),
+        Some(View::Text(_) | View::Document(_) | View::Pages(_)) => {
+            panic!("focused tab is not a diff")
+        }
         None => panic!("focused pane has no tab"),
     }
 }
 
 /// Draws nothing but records the size of the focused diff, as a frame would.
 fn show(h: &mut Harness, rows: u16) {
-    let focus = h.state.layout.focus;
-    h.run(|state, out| diffview::prepare(state, focus, Viewport { rows, cols: 40 }, out));
+    let focus = h.state.layout.focus();
+    h.run(|state, _| scroll::measured(state, focus, Viewport { rows, cols: 40 }));
 }
 
 fn cursor_line(h: &Harness) -> usize {
@@ -40,7 +44,7 @@ fn cursor_line(h: &Harness) -> usize {
 }
 
 fn changed(h: &Harness) -> Vec<(Group, String)> {
-    match &h.state.git.repo {
+    match &h.state.project.git {
         Repo::Found { snapshot, .. } => snapshot
             .changes
             .iter()
@@ -69,7 +73,7 @@ fn a_pane_holds_a_file_and_its_diff() {
     h.keys("j<space>d");
     assert_eq!(h.focused_tabs(), ["a.txt", "±a.txt"]);
     assert!(matches!(
-        h.state.layout.panes[h.state.layout.focus].active(),
+        h.state.layout.panes()[h.state.layout.focus()].active(),
         Some(View::Text(_))
     ));
     assert_eq!(cursor_line(&h), 3);
@@ -130,9 +134,46 @@ fn next_hunk_past_the_end_opens_the_next_diff() {
     // From a text view it opens text, as before.
     h.keys("<space>d]g");
     assert!(matches!(
-        h.state.layout.panes[h.state.layout.focus].active(),
+        h.state.layout.panes()[h.state.layout.focus()].active(),
         Some(View::Text(_))
     ));
+}
+
+#[test]
+fn hunk_keys_wrap_through_changed_files_visiting_each_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(
+        dir.path(),
+        &[("a.txt", FIVE), ("b.txt", FIVE), ("c.txt", FIVE)],
+    );
+    fs::write(dir.path().join("a.txt"), "a\nb\nC\nd\ne\n").unwrap();
+    fs::write(dir.path().join("b.txt"), "a\nB\nc\nd\ne\n").unwrap();
+    stage_path(&repo, "b.txt");
+    fs::write(dir.path().join("b.txt"), "a\nB\nc\nD\ne\n").unwrap();
+    fs::write(dir.path().join("c.txt"), "a\nb\nc\nd\nE\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    let file = |h: &Harness| {
+        let path = &h.state.buffers[h.view().buffer()].path;
+        path.file_name().unwrap().to_str().unwrap().to_owned()
+    };
+    // Sidebar order is staged b, then a and c; b's unstaged entry is not visited again.
+    h.keys(":o a.txt<ret>]g");
+    assert_eq!((file(&h), cursor_line(&h)), ("a.txt".to_owned(), 2));
+    h.keys("]g");
+    assert_eq!((file(&h), cursor_line(&h)), ("c.txt".to_owned(), 4));
+    h.keys("]g");
+    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 1));
+    h.keys("]g");
+    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 3));
+    h.keys("]g");
+    assert_eq!((file(&h), cursor_line(&h)), ("a.txt".to_owned(), 2));
+    // Backwards lands on each file's last hunk, and past the first file wraps to the last.
+    h.keys("[g");
+    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 3));
+    h.keys("[g");
+    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 1));
+    h.keys("[g");
+    assert_eq!((file(&h), cursor_line(&h)), ("c.txt".to_owned(), 4));
 }
 
 #[test]
@@ -154,10 +195,10 @@ fn deleted_files_show_head_beside_an_inert_side() {
     assert_eq!(shown.align.sides[RIGHT].lead, 3);
     h.keys("ityped");
     assert_eq!(h.doc().text, "");
-    assert!(matches!(h.state.notice, Some(Notice::NoBuffer)));
+    assert!(matches!(h.state.notice, Some(Notice::ReadOnly)));
     h.keys("<esc>");
     // The wheel still scrolls HEAD through the lead.
-    let focus = h.state.layout.focus;
+    let focus = h.state.layout.focus();
     h.run(|state, _| state::view::scroll::wheel(state, focus, 1));
     match &diff(&h).left {
         // The view opened at the top of the filler rows; one row down faces HEAD's `y`.
@@ -202,10 +243,10 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
             (Group::Changes, "new.txt".to_owned()),
         ]
     );
-    let Repo::Found { snapshot, .. } = &h.state.git.repo else {
+    let Repo::Found { snapshot, .. } = &h.state.project.git else {
         panic!("no repository");
     };
-    let folds = h.state.git.folds;
+    let folds = h.state.changes.folds;
     let rows: Vec<Option<ListRow>> = (0..changes::list_len(&snapshot.changes, &folds) + 1)
         .map(|row| changes::list_row(&snapshot.changes, &folds, row))
         .collect();
@@ -259,7 +300,7 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
     // Discarding asks first; `n` keeps the file, `y` deletes the untracked file.
     h.keys("jd");
     assert!(matches!(
-        h.state.confirm,
+        h.confirm(),
         Some(Confirm::Discard {
             how: Discard::Delete(_),
             ..
@@ -329,7 +370,7 @@ fn clicking_the_head_side_moves_the_cursor_to_the_facing_line() {
     h.keys(":o a.txt<ret><space>dge");
     show(&mut h, 20);
     assert_eq!(diff(&h).align.sides[LEFT].lead, 2);
-    let focus = h.state.layout.focus;
+    let focus = h.state.layout.focus();
     // Row 3 of the HEAD side is its second line, `b`, below two filler rows.
     h.run(|state, _| diffview::click_left(state, focus, 3, 0));
     assert_eq!(cursor_line(&h), 3);
@@ -337,7 +378,7 @@ fn clicking_the_head_side_moves_the_cursor_to_the_facing_line() {
 }
 
 fn cursor_path(h: &Harness) -> Option<&str> {
-    match h.state.git.cursor.as_ref() {
+    match h.state.changes.cursor.as_ref() {
         Some(ListCursor::Entry(changed)) => Some(changed.path.as_str()),
         Some(ListCursor::Header(_)) | None => None,
     }
@@ -352,25 +393,37 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     let mut h = Harness::new(dir.path());
     h.keys("<space>g");
     // Nothing selected yet: the cursor shows on the first file, below its header.
-    let Repo::Found { snapshot, .. } = &h.state.git.repo else {
+    let Repo::Found { snapshot, .. } = &h.state.project.git else {
         panic!("no repository");
     };
     assert_eq!(
-        changes::cursor_row(&snapshot.changes, &h.state.git.folds, None),
+        changes::cursor_row(&snapshot.changes, &h.state.changes.folds, None),
         Some(1)
     );
 
     // `h` on an entry moves to its header; `h` there collapses, `l` expands again.
     h.keys("h");
-    assert_eq!(h.state.git.cursor, Some(ListCursor::Header(Group::Changes)));
+    assert_eq!(
+        h.state.changes.cursor,
+        Some(ListCursor::Header(Group::Changes))
+    );
     h.keys("h");
-    assert_eq!(h.state.git.folds[Group::Changes as usize], Fold::Collapsed);
-    let Repo::Found { snapshot, .. } = &h.state.git.repo else {
+    assert_eq!(
+        h.state.changes.folds[Group::Changes as usize],
+        Fold::Collapsed
+    );
+    let Repo::Found { snapshot, .. } = &h.state.project.git else {
         panic!("no repository");
     };
-    assert_eq!(changes::list_len(&snapshot.changes, &h.state.git.folds), 1);
+    assert_eq!(
+        changes::list_len(&snapshot.changes, &h.state.changes.folds),
+        1
+    );
     h.keys("l");
-    assert_eq!(h.state.git.folds[Group::Changes as usize], Fold::Expanded);
+    assert_eq!(
+        h.state.changes.folds[Group::Changes as usize],
+        Fold::Expanded
+    );
 
     // `s` on the header stages the whole group; the Staged header's button unstages it all.
     h.keys("s");
@@ -385,7 +438,10 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), "a\nb\nC\nd\ne\n");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), FIVE);
     h.run(|state, out| panes::click_changes(state, 0, Click::Single, out));
-    assert_eq!(h.state.git.folds[Group::Staged as usize], Fold::Collapsed);
+    assert_eq!(
+        h.state.changes.folds[Group::Staged as usize],
+        Fold::Collapsed
+    );
 
     // Discard refuses whole groups.
     h.keys("d");
@@ -398,7 +454,7 @@ fn changes_groups_collapse_and_act_as_a_whole() {
         .run(|state, out| session::restore(state, saved, out))
         .expect("valid session");
     assert_eq!(
-        after.state.git.folds[Group::Staged as usize],
+        after.state.changes.folds[Group::Staged as usize],
         Fold::Collapsed
     );
 }

@@ -6,8 +6,8 @@ use model::command::{Answer, Command, FileOp};
 use model::notice::Notice;
 use state::Confirm;
 use state::apply::apply;
-use state::git::changes::Discard;
 use state::git::diff::{Bases, Diff, Hunk, Stage, Tracked, stage};
+use state::git::stage::Discard;
 use state::text::buffer::Content;
 
 use crate::harness::Harness;
@@ -202,7 +202,7 @@ fn stage_unstage_and_discard_files() {
     // Discarding waits for confirmation and restores the index copy.
     run(&mut h, Command::File(FileOp::Discard("a.txt".into())));
     assert!(matches!(
-        &h.state.confirm,
+        h.confirm(),
         Some(Confirm::Discard {
             how: Discard::Checkout,
             ..
@@ -224,7 +224,7 @@ fn stage_unstage_and_discard_files() {
     // An untracked file is deleted.
     run(&mut h, Command::File(FileOp::Discard("new.txt".into())));
     assert!(matches!(
-        &h.state.confirm,
+        h.confirm(),
         Some(Confirm::Discard {
             how: Discard::Delete(_),
             ..
@@ -232,7 +232,7 @@ fn stage_unstage_and_discard_files() {
     ));
     run(&mut h, Command::Confirm(Answer::Yes));
     assert!(!dir.path().join("new.txt").exists());
-    assert_eq!(h.state.confirm, None);
+    assert_eq!(h.confirm(), None);
 
     run(&mut h, Command::File(FileOp::Discard("a.txt".into())));
     assert!(matches!(h.state.notice, Some(Notice::Unchanged { .. })));

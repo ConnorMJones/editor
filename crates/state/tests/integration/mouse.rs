@@ -1,16 +1,15 @@
 use std::fs;
 use std::path::Path;
 
-use model::command::{Command, PickerCommand};
+use model::command::{Command, PickerCommand, PickerKind};
 use model::notice::Notice;
-use model::window::PickerKind;
 use state::apply::Force;
 use state::input::picker::{PREVIEW_SLOTS, Preview, Previews};
 use state::job::Job;
 use state::project::path::RelPath;
 use state::sidebar::tree::{self, Fold, RowKind};
 use state::view::panes::{self, Click};
-use state::{Effect, Focus, Overlay, Sidebar};
+use state::{Effect, Files, Overlay, Sidebar};
 
 use crate::harness::Harness;
 
@@ -34,18 +33,18 @@ fn tree_clicks_toggle_directories_and_open_files() {
     fs::write(dir.path().join("src/lib.rs"), "fn x() {}\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys("<space>e<esc>");
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 
     let src = row(&h, "src");
     h.run(|state, out| panes::click_tree(state, src, Click::Single, out));
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Sidebar));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Tree));
     assert_eq!(h.state.tree.cursor, src);
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Expanded));
 
     let lib = row(&h, "src/lib.rs");
     h.run(|state, out| panes::click_tree(state, lib, Click::Single, out));
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "src/lib.rs")));
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 
     h.run(|state, out| panes::click_tree(state, src, Click::Single, out));
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Collapsed));
@@ -68,7 +67,7 @@ fn picker_click_opens_the_row() {
             .iter()
             .position(|&index| picker.items.label(index) == "b.txt")
             .expect("b.txt listed"),
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     };
     h.run(|state, out| panes::click_picker(state, target, out));
     assert!(matches!(h.state.overlay, Overlay::None));
@@ -82,12 +81,12 @@ fn tab_clicks_show_and_close_through_the_close_guard() {
     fs::write(dir.path().join("b.txt"), "b\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>:o b.txt<ret><space>e");
-    let pane = h.state.layout.focus;
+    let pane = h.state.layout.focus();
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt"]);
 
     panes::click_tab(&mut h.state, pane, 0, Click::Single);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 
     h.keys("ix<esc>");
     panes::close_tab(&mut h.state, pane, 0, Force::No);
@@ -110,10 +109,10 @@ fn clicking_a_pane_focuses_it() {
     let mut h = Harness::new(dir.path());
     h.keys("<C-w>v<space>e");
     let first = h.state.layout.leaves()[0];
-    assert_ne!(h.state.layout.focus, first);
+    assert_ne!(h.state.layout.focus(), first);
     panes::focus_pane(&mut h.state, first);
-    assert_eq!(h.state.layout.focus, first);
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.layout.focus(), first);
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 }
 
 #[test]
@@ -127,7 +126,7 @@ fn previews_load_in_jobs_and_are_cached() {
     h.keys(":o f0.txt<ret><space>f");
     match &mut h.state.overlay {
         Overlay::Picker(picker) => picker.previews = Previews::default(),
-        Overlay::None | Overlay::Prompt(_) => panic!("picker closed"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker closed"),
     }
 
     let preview = |h: &Harness, path: &str| match &h.state.overlay {
@@ -139,7 +138,7 @@ fn previews_load_in_jobs_and_are_cached() {
             Some(Preview::TooLarge) => "large",
             Some(Preview::Failed(_)) => "failed",
         },
-        Overlay::None | Overlay::Prompt(_) => panic!("picker closed"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker closed"),
     };
     let select = |h: &mut Harness, label: &str| {
         let Overlay::Picker(picker) = &mut h.state.overlay else {
@@ -201,7 +200,11 @@ fn unsaved_markers_cover_ancestors_and_clear_on_save() {
     h.keys(":o a/b/c.txt<ret>ix<esc>");
     let sync = |h: &mut Harness| {
         let state = &mut h.state;
-        tree::sync_unsaved(&mut state.tree.unsaved, state.root.path(), &state.buffers);
+        tree::sync_unsaved(
+            &mut state.tree.unsaved,
+            state.project.root.path(),
+            &state.buffers,
+        );
     };
     sync(&mut h);
     let marked = |h: &Harness, path: &str| {

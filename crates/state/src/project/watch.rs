@@ -1,13 +1,14 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use model::git::GitStatus;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
-use crate::job::{Job, ReloadPolicy};
-use crate::project::files::Files;
-use crate::project::path::RelPath;
-use crate::text::buffer::Content;
+use crate::job::{Job, ReloadIf, ReloadPolicy};
+use crate::project::files::FileIndex;
+use crate::project::path::{Folder, RelPath, RelPathError};
+use crate::text::buffer::{Content, Disk};
 use crate::{Effect, Repo, State, project::backlinks, request_git};
 
 /// Long-lived watcher owned by the host; dropping it stops events.
@@ -41,42 +42,47 @@ pub fn watch(watcher: &mut Watcher, dirs: &[PathBuf]) {
 
 /// Routes changed paths to buffer reloads, tree relistings, index rescans and git refreshes.
 pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
-    let root = state.root.path().to_owned();
+    let root = state.project.root.path().to_owned();
     let mut refresh_git = false;
     let mut rescan: Vec<RelPath> = Vec::new();
-    let mut relist: Vec<RelPath> = Vec::new();
-    crate::render::typeset::invalidate(&mut state.previews, &paths);
+    let mut relist: HashSet<Folder> = HashSet::new();
+    crate::render::typeset::invalidate(&mut state.compiles, &paths);
     for path in paths {
         for (id, buffer) in state.buffers.iter() {
             // A loading buffer's pending read already sees the change.
             match (&buffer.content, buffer.path == path) {
-                (Content::Text { mtime, .. }, true) => out.push(Effect::Job(Job::Reload {
+                (Content::Text { disk, .. }, true) => out.push(Effect::Job(Job::Reload {
                     buffer: id,
                     path: path.clone(),
-                    mtime: *mtime,
+                    when: match *disk {
+                        Disk::Synced { mtime } | Disk::ChangedExternally { mtime } => {
+                            ReloadIf::ChangedSince(mtime)
+                        }
+                        Disk::New | Disk::Deleted => ReloadIf::Always,
+                    },
                     policy: ReloadPolicy::KeepEdits,
                 })),
                 (Content::Text { .. } | Content::Loading { .. }, _) => {}
             }
         }
-        match &state.git.repo {
+        match &state.project.git {
             Repo::Found { git_dir, .. } if path.starts_with(git_dir) => {
                 refresh_git = true;
                 continue;
             }
             Repo::Found { .. } | Repo::None | Repo::Unknown => {}
         }
-        let Ok(rel) = RelPath::new(&root, &path) else {
-            continue;
-        };
-        let parent = rel.parent().map(|p| RelPath(p.to_owned()));
-        match parent {
-            Some(parent) if state.tree.dirs.contains_key(&parent) && !relist.contains(&parent) => {
-                relist.push(parent)
+        let rel = match RelPath::new(&root, &path) {
+            Ok(rel) => rel,
+            // The entries that changed under the root report their own paths.
+            Err(RelPathError::Root) => continue,
+            Err(error @ (RelPathError::Outside(_) | RelPathError::NotUtf8(_))) => {
+                tracing::debug!(%error, "ignoring a watched path");
+                continue;
             }
-            Some(_) | None => {}
-        }
-        let ignored = match &state.git.repo {
+        };
+        relist.insert(rel.folder());
+        let ignored = match &state.project.git {
             Repo::Found { snapshot, .. } => snapshot.get(&rel) == Some(GitStatus::Ignored),
             Repo::None | Repo::Unknown => false,
         };
@@ -90,19 +96,22 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
             }
         }
     }
-    for dir in relist {
+    for dir in relist
+        .into_iter()
+        .filter(|dir| state.tree.dirs.contains_key(dir))
+    {
         out.push(Effect::Job(Job::ListDir {
             root: root.clone(),
             dir,
         }));
     }
     backlinks::changed(state, &rescan, out);
-    match (&state.files, rescan.is_empty()) {
-        (Files::Ready(_), false) => out.push(Effect::Job(Job::Rescan {
+    match (&state.project.index, rescan.is_empty()) {
+        (FileIndex::Ready(_), false) => out.push(Effect::Job(Job::Rescan {
             root,
             paths: rescan,
         })),
-        (Files::Ready(_), true) | (Files::Loading, _) => {}
+        (FileIndex::Ready(_), true) | (FileIndex::Loading { .. }, _) => {}
     }
     match refresh_git {
         true => request_git(state, out),

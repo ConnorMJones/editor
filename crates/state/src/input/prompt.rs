@@ -11,7 +11,8 @@ use model::register::Register;
 use model::window::Axis;
 
 use crate::apply::apply;
-use crate::project::files::Files;
+use crate::project::Project;
+use crate::project::files::{FileIndex, Indexed};
 use crate::{Effect, Overlay, Prompt, PromptKind, State, text::registers, text::select};
 
 /// Where up/down browsing of the prompt's history register stands.
@@ -95,7 +96,7 @@ pub const COMMANDS: [(&[&str], Completes); 26] = [
 ];
 
 /// A fresh prompt, with completions listed up front like helix.
-pub fn open(kind: PromptKind, files: &Files) -> Prompt {
+pub fn open(kind: PromptKind, index: &FileIndex) -> Prompt {
     let mut prompt = Prompt {
         kind,
         line: String::new(),
@@ -103,12 +104,12 @@ pub fn open(kind: PromptKind, files: &Files) -> Prompt {
         history: History::Editing,
         completion: Completion::default(),
     };
-    complete(&mut prompt, files);
+    complete(&mut prompt, index);
     prompt
 }
 
 /// Recomputes the candidates for the line; paths come from the file index, one directory level at a time.
-pub fn complete(prompt: &mut Prompt, files: &Files) {
+pub fn complete(prompt: &mut Prompt, index: &FileIndex) {
     let completion = &mut prompt.completion;
     completion.candidates.clear();
     completion.chosen = Chosen::Nothing;
@@ -135,9 +136,10 @@ pub fn complete(prompt: &mut Prompt, files: &Files) {
         ),
         (Some(_), Completes::Nothing) => {}
         (Some(arg), Completes::Paths) => {
-            let files = match files {
-                Files::Ready(files) => files,
-                Files::Loading => return,
+            // Paths complete once the first walk has listed them.
+            let files = match index {
+                FileIndex::Ready(Indexed { files, .. }) => files,
+                FileIndex::Loading { .. } => return,
             };
             let arg = arg.trim_start();
             let arg_start = line.len() - arg.len();
@@ -182,10 +184,10 @@ pub fn insert(state: &mut State, c: char) {
             prompt.line.insert(prompt.cursor, c);
             prompt.cursor += c.len_utf8();
             prompt.history = History::Editing;
-            complete(prompt, &state.files);
+            complete(prompt, &state.project.index);
             select::preview_regex(state);
         }
-        Overlay::None | Overlay::Picker(_) => {}
+        Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => {}
     }
 }
 
@@ -238,7 +240,7 @@ pub fn command(state: &mut State, command: PromptCommand, out: &mut Vec<Effect>)
     let State {
         overlay,
         registers,
-        files,
+        project: Project { index, .. },
         ..
     } = state;
     let Overlay::Prompt(prompt) = overlay else {
@@ -314,14 +316,14 @@ pub fn command(state: &mut State, command: PromptCommand, out: &mut Vec<Effect>)
     };
     match change {
         Change::Nothing => {}
-        Change::Descend => complete(prompt, files),
+        Change::Descend => complete(prompt, index),
         Change::Typed => {
             prompt.history = History::Editing;
-            complete(prompt, files);
+            complete(prompt, index);
             select::preview_regex(state);
         }
         Change::Replaced => {
-            complete(prompt, files);
+            complete(prompt, index);
             select::preview_regex(state);
         }
         Change::Close => apply(state, Command::PromptCancel, out),

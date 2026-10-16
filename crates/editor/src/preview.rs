@@ -7,13 +7,13 @@ use gpui::{
 };
 use helix_core::Selection;
 use helix_core::text_annotations::TextAnnotations;
-use model::theme as roles;
 use state::Overlay;
 use state::input::picker::{self, Preview, PreviewSource};
 use state::text::buffer::{Content, TextDoc};
 use state::view::display::{self, CursorShape, Focus, Frame};
 use state::view::layout::{Pane, Scroll, Viewport};
 
+use crate::fonts::hsla;
 use crate::workspace::Workspace;
 
 /// Read-only view of the picker's highlighted item around its target line.
@@ -88,20 +88,21 @@ impl Element for PreviewElement {
             let mut cache = cache.unwrap_or_default();
             let workspace = self.workspace.read(cx);
             let theme = &workspace.theme;
+            let fonts = &workspace.fonts;
             let state = &workspace.state;
-            let cell = theme.cell;
+            let cell = fonts.cell;
             let viewport = Viewport {
                 rows: (bounds.size.height / cell.height).floor().max(0.0) as u16,
                 cols: (bounds.size.width / cell.width).floor().max(0.0) as u16,
             };
-            let root = state.root.path();
+            let root = state.project.root.path();
             let shown = match &state.overlay {
                 Overlay::Picker(open) => match picker::preview_source(open) {
                     None => Shown::Message(""),
                     Some(PreviewSource::Buffer(buffer)) => {
                         match state.buffers.get(buffer).map(|b| &b.content) {
                             Some(Content::Text { doc, .. }) => {
-                                let cursor = (state.layout.panes.values())
+                                let cursor = (state.layout.panes().values())
                                     .flat_map(Pane::items)
                                     .find_map(|item| {
                                         let view = item.view.text();
@@ -150,7 +151,7 @@ impl Element for PreviewElement {
                         }
                     }
                 },
-                Overlay::None | Overlay::Prompt(_) => Shown::Message(""),
+                Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => Shown::Message(""),
             };
 
             let text_system = window.text_system();
@@ -182,12 +183,12 @@ impl Element for PreviewElement {
                         cache.runs.extend(
                             frame.runs[row.runs.clone()]
                                 .iter()
-                                .map(|run| crate::text::text_run(theme, run)),
+                                .map(|run| crate::text::text_run(theme, fonts, run)),
                         );
                         let text = SharedString::from(frame.text[row.text.clone()].to_owned());
                         cache.lines.push(text_system.shape_line(
                             text,
-                            theme.mono_size,
+                            fonts.mono_size,
                             &cache.runs,
                             None,
                         ));
@@ -199,15 +200,15 @@ impl Element for PreviewElement {
                     cache.frame.cursors.clear();
                     let run = TextRun {
                         len: message.len(),
-                        font: theme.mono[0].clone(),
-                        color: theme.text_muted,
+                        font: fonts.mono[0].clone(),
+                        color: hsla(theme.muted),
                         background_color: None,
                         underline: None,
                         strikethrough: None,
                     };
                     cache.lines.push(text_system.shape_line(
                         SharedString::new_static(message),
-                        theme.mono_size,
+                        fonts.mono_size,
                         &[run],
                         None,
                     ));
@@ -229,8 +230,8 @@ impl Element for PreviewElement {
         cx: &mut App,
     ) {
         let Prepaint { cell, target } = *prepaint;
-        let colors = &self.workspace.read(cx).theme.colors;
-        let (highlight, cursor_bg) = (colors[roles::CURSORLINE], colors[roles::CURSOR_PRIMARY.bg]);
+        let editor = &self.workspace.read(cx).theme.editor;
+        let (highlight, cursor_bg) = (hsla(editor.cursorline), hsla(editor.cursor_primary));
         let id = id.expect("preview element has an id");
         window.with_element_state(id, |cache: Option<Cache>, window| {
             let cache = cache.unwrap_or_default();

@@ -6,18 +6,20 @@ use model::window::{Axis, Side};
 use slotmap::{SlotMap, new_key_type};
 
 use crate::git::diffview::DiffView;
-use crate::render::rendered::RenderedView;
+use crate::render::document::DocumentView;
+use crate::render::pages::PagesView;
 use crate::text::buffer::BufferId;
 
 new_key_type! {
     pub struct PaneId;
 }
 
-/// Panes arranged in a split tree; `focus` always names a leaf of `root`.
+/// Panes arranged in a split tree.
 pub struct Layout {
-    pub panes: SlotMap<PaneId, Pane>,
-    pub root: Node,
-    pub focus: PaneId,
+    // Private: the leaves of `root` are exactly the keys of `panes`, and `focus` is one of them.
+    panes: SlotMap<PaneId, Pane>,
+    root: Node,
+    focus: PaneId,
     /// Last stamp handed to an activated tab.
     pub clock: Tick,
 }
@@ -37,8 +39,27 @@ pub struct Child {
 }
 
 /// A positive, finite share weight.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
 pub struct Flex(f32);
+
+#[derive(Debug, thiserror::Error)]
+#[error("split weight {0} is not a positive number")]
+pub struct InvalidFlex(pub f32);
+
+impl TryFrom<f32> for Flex {
+    type Error = InvalidFlex;
+
+    fn try_from(weight: f32) -> Result<Flex, InvalidFlex> {
+        Flex::new(weight).ok_or(InvalidFlex(weight))
+    }
+}
+
+impl From<Flex> for f32 {
+    fn from(flex: Flex) -> f32 {
+        flex.0
+    }
+}
 
 impl Flex {
     pub const EVEN: Flex = Flex(1.0);
@@ -94,6 +115,10 @@ pub enum CloseError {
     NotInLayout,
 }
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("pane {0:?} is not in the layout")]
+pub struct NotInLayout(pub PaneId);
+
 impl Layout {
     pub fn new() -> Layout {
         let mut panes = SlotMap::with_key();
@@ -106,22 +131,120 @@ impl Layout {
         }
     }
 
+    /// From a session: `root` was built from the keys of `panes`, each once, and `focus` is one.
+    pub(crate) fn restored(
+        panes: SlotMap<PaneId, Pane>,
+        root: Node,
+        focus: PaneId,
+        clock: Tick,
+    ) -> Layout {
+        Layout {
+            panes,
+            root,
+            focus,
+            clock,
+        }
+    }
+
+    pub fn panes(&self) -> &SlotMap<PaneId, Pane> {
+        &self.panes
+    }
+
+    pub fn root(&self) -> &Node {
+        &self.root
+    }
+
+    pub fn focus(&self) -> PaneId {
+        self.focus
+    }
+
+    pub fn focused(&self) -> &Pane {
+        &self.panes[self.focus]
+    }
+
+    pub fn focused_mut(&mut self) -> &mut Pane {
+        &mut self.panes[self.focus]
+    }
+
+    /// A pane the caller knows is live: the focus, or a link's pane.
+    pub fn pane(&mut self, pane: PaneId) -> &mut Pane {
+        &mut self.panes[pane]
+    }
+
+    /// A pane id kept from earlier, such as the host's last frame; `None` once it closed.
+    pub fn find_pane(&mut self, pane: PaneId) -> Option<&mut Pane> {
+        self.panes.get_mut(pane)
+    }
+
+    /// Every pane, for edits that leave the tree as it is.
+    pub fn panes_mut(&mut self) -> impl Iterator<Item = (PaneId, &mut Pane)> {
+        self.panes.iter_mut()
+    }
+
+    pub fn set_focus(&mut self, pane: PaneId) -> Result<(), NotInLayout> {
+        match self.panes.contains_key(pane) {
+            true => {
+                self.focus = pane;
+                Ok(())
+            }
+            false => Err(NotInLayout(pane)),
+        }
+    }
+
+    /// Focuses the neighbour on `side`; `None` when there is none.
+    pub fn focus_side(&mut self, side: Side) -> Option<PaneId> {
+        let pane = self.neighbour(side)?;
+        self.focus = pane;
+        Some(pane)
+    }
+
+    pub fn focus_next(&mut self) -> PaneId {
+        self.focus = self.next();
+        self.focus
+    }
+
     pub fn tick(&mut self) -> Tick {
         self.clock.0 += 1;
         self.clock
     }
 
-    pub fn rendered(&self, pane: PaneId) -> Option<&RenderedView> {
+    /// The selection of the first view showing `buffer`, for history to restore; the start of
+    /// the text when no view shows it.
+    pub fn selection_of(&self, buffer: BufferId) -> Selection {
+        (self.panes.values())
+            .flat_map(Pane::items)
+            .map(|item| item.view.text())
+            .find(|view| view.buffer() == buffer)
+            .map_or_else(|| Selection::point(0), |view| view.selection.clone())
+    }
+
+    /// `pane`'s active tab, when it is a document view.
+    pub fn document(&self, pane: PaneId) -> Option<&DocumentView> {
         match self.panes.get(pane)?.active()? {
-            View::Rendered(view) => Some(view),
-            View::Text(_) | View::Diff(_) => None,
+            View::Document(view) => Some(view),
+            View::Text(_) | View::Diff(_) | View::Pages(_) => None,
         }
     }
 
-    pub fn rendered_mut(&mut self, pane: PaneId) -> Option<&mut RenderedView> {
+    pub fn document_mut(&mut self, pane: PaneId) -> Option<&mut DocumentView> {
         match self.panes.get_mut(pane)?.active_mut()? {
-            View::Rendered(view) => Some(view),
-            View::Text(_) | View::Diff(_) => None,
+            View::Document(view) => Some(view),
+            View::Text(_) | View::Diff(_) | View::Pages(_) => None,
+        }
+    }
+
+    /// `pane`'s active tab, when it is a pages view.
+    pub fn pages(&self, pane: PaneId) -> Option<&PagesView> {
+        match self.panes.get(pane)?.active()? {
+            View::Pages(view) => Some(view),
+            View::Text(_) | View::Diff(_) | View::Document(_) => None,
+        }
+    }
+
+    pub fn pages_mut(&mut self, pane: PaneId) -> Option<&mut PagesView> {
+        match self.panes.get_mut(pane)?.active_mut()? {
+            View::Pages(view) => Some(view),
+            View::Text(_) | View::Diff(_) | View::Document(_) => None,
         }
     }
 
@@ -149,7 +272,8 @@ impl Layout {
         id
     }
 
-    /// Removes `pane`, moving focus from it to the pane beside where it was.
+    /// Removes `pane`, moving focus from it to the pane beside where it was; views following
+    /// it become standalone.
     pub fn close(&mut self, pane: PaneId) -> Result<(), CloseError> {
         let beside = match &self.root {
             Node::Pane(_) => return Err(CloseError::LastPane),
@@ -158,6 +282,7 @@ impl Layout {
             }
         };
         self.panes.remove(pane);
+        self.unlink(|followed| followed == pane);
         match self.focus == pane {
             true => self.focus = beside,
             false => {}
@@ -181,10 +306,25 @@ impl Layout {
         Some(item)
     }
 
+    /// Keeps only the focused pane; views following any other become standalone.
     pub fn only(&mut self) {
         let focus = self.focus;
         self.panes.retain(|id, _| id == focus);
         self.root = Node::Pane(focus);
+        self.unlink(|followed| followed != focus);
+    }
+
+    fn unlink(&mut self, gone: impl Fn(PaneId) -> bool) {
+        let views = (self.panes.values_mut())
+            .filter_map(|pane| pane.tabs.as_mut())
+            .flat_map(|tabs| tabs.items.iter_mut());
+        for item in views {
+            match &mut item.view {
+                View::Document(view) => view.source.link.unlink_if(&gone),
+                View::Pages(view) => view.source.link.unlink_if(&gone),
+                View::Text(_) | View::Diff(_) => {}
+            }
+        }
     }
 
     /// Panes in reading order.
@@ -196,7 +336,8 @@ impl Layout {
 
     pub fn next(&self) -> PaneId {
         let order = self.leaves();
-        let index = order.iter().position(|&p| p == self.focus).unwrap_or(0);
+        let index =
+            (order.iter().position(|&p| p == self.focus)).expect("the focused pane is a leaf");
         order[(index + 1) % order.len()]
     }
 
@@ -248,7 +389,8 @@ impl Layout {
     /// Nearest pane touching the focused pane's `side` that overlaps it across that side.
     pub fn neighbour(&self, side: Side) -> Option<PaneId> {
         let rects = self.rects();
-        let (_, from) = *rects.iter().find(|(id, _)| *id == self.focus)?;
+        let (_, from) =
+            *(rects.iter().find(|(id, _)| *id == self.focus)).expect("the focused pane is a leaf");
         const EPS: f32 = 1e-4;
         let overlap = |a0: f32, a1: f32, b0: f32, b1: f32| a0.max(b0) < a1.min(b1) - EPS;
         rects
@@ -492,7 +634,8 @@ pub struct Item {
 pub enum View {
     Text(TextView),
     Diff(DiffView),
-    Rendered(RenderedView),
+    Document(DocumentView),
+    Pages(PagesView),
 }
 
 /// Identifies a tab within its pane, so one pane can hold a file and its diff.
@@ -500,13 +643,17 @@ pub enum View {
 pub enum TabKey {
     Text(BufferId),
     Diff(BufferId),
-    Rendered(BufferId),
+    Document(BufferId),
+    Pages(BufferId),
 }
 
 impl TabKey {
     pub fn buffer(self) -> BufferId {
         match self {
-            TabKey::Text(buffer) | TabKey::Diff(buffer) | TabKey::Rendered(buffer) => buffer,
+            TabKey::Text(buffer)
+            | TabKey::Diff(buffer)
+            | TabKey::Document(buffer)
+            | TabKey::Pages(buffer) => buffer,
         }
     }
 }
@@ -516,7 +663,8 @@ impl View {
         match self {
             View::Text(view) => TabKey::Text(view.buffer),
             View::Diff(diff) => TabKey::Diff(diff.text.buffer),
-            View::Rendered(rendered) => TabKey::Rendered(rendered.text.buffer),
+            View::Document(view) => TabKey::Document(view.source.text.buffer),
+            View::Pages(view) => TabKey::Pages(view.source.text.buffer),
         }
     }
 
@@ -525,12 +673,13 @@ impl View {
     }
 
     /// The buffer's selection and scroll: the text view, a diff's right side, or the source
-    /// position a rendered view returns to.
+    /// position a document or pages view returns to.
     pub fn text(&self) -> &TextView {
         match self {
             View::Text(view) => view,
             View::Diff(diff) => &diff.text,
-            View::Rendered(rendered) => &rendered.text,
+            View::Document(view) => &view.source.text,
+            View::Pages(view) => &view.source.text,
         }
     }
 
@@ -538,7 +687,8 @@ impl View {
         match self {
             View::Text(view) => view,
             View::Diff(diff) => &mut diff.text,
-            View::Rendered(rendered) => &mut rendered.text,
+            View::Document(view) => &mut view.source.text,
+            View::Pages(view) => &mut view.source.text,
         }
     }
 }

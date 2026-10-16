@@ -90,7 +90,7 @@ fn backlinks(c: &mut Criterion) {
         b.iter(|| {
             let mut found = 0usize;
             for (path, links) in &all {
-                let dir = path.parent().unwrap_or("");
+                let dir = path.folder_path();
                 for link in links {
                     match links::resolve(&index, dir, link.dest.as_str()) {
                         links::Resolution::File(_) => found += 1,

@@ -8,7 +8,7 @@ use model::git::Group;
 use model::notice::Notice;
 use state::Repo;
 use state::apply::apply;
-use state::git::conflict::{self, Conflict};
+use state::git::conflict::{self, Conflict, Sections};
 use state::view::layout::Viewport;
 use state::view::scroll::{self, Press, Unit};
 
@@ -85,7 +85,7 @@ fn run(h: &mut Harness, command: Command) {
 }
 
 fn groups(h: &Harness, name: &str) -> Vec<Group> {
-    match &h.state.git.repo {
+    match &h.state.project.git {
         Repo::Found { snapshot, .. } => snapshot
             .changes
             .iter()
@@ -123,7 +123,7 @@ fn a_real_merge_conflict_resolves_and_leaves_the_conflicts_group_once_staged() {
         conflicts(&h),
         [Conflict {
             open: 1,
-            base: None,
+            sections: Sections::TwoWay,
             separator: 3,
             close: 5
         }]
@@ -170,7 +170,7 @@ fn every_resolution_is_one_undoable_edit() {
         conflicts(&h),
         [Conflict {
             open: 1,
-            base: Some(3),
+            sections: Sections::Diff3 { base: 3 },
             separator: 5,
             close: 7
         }]
@@ -295,8 +295,8 @@ fn every_selected_conflict_resolves_in_one_edit() {
 #[test]
 fn clicks_and_scrolling_count_the_label_rows() {
     let mut h = Harness::with("a.txt", &format!("#[t|]#{}", &THREE[1..]));
-    let pane = h.state.layout.focus;
-    scroll::set_viewport(&mut h.state, pane, Viewport { rows: 8, cols: 40 });
+    let pane = h.state.layout.focus();
+    scroll::measured(&mut h.state, pane, Viewport { rows: 8, cols: 40 });
     // Rows: top, ours label, <<<<<<<, a, =======, b, >>>>>>>, theirs label, mid.
     scroll::press(&mut h.state, pane, 3, 0, Press::Select(Unit::Char));
     assert_eq!(selected(&h), (2, 2, 2));

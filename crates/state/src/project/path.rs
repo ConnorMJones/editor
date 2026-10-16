@@ -1,10 +1,22 @@
 use std::borrow::Borrow;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
-/// Root-relative, `/`-separated UTF-8 path with only normal components; empty for the root.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+/// A file or folder under the root: `/`-separated UTF-8 with only normal components, never the
+/// root itself.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
 pub struct RelPath(pub(crate) String);
+
+/// A folder: the root, or one under it. Hashes and borrows as its path, empty for the root.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Folder {
+    Root,
+    Sub(RelPath),
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RelPathError {
@@ -12,35 +24,32 @@ pub enum RelPathError {
     Outside(PathBuf),
     #[error("{0:?} is not valid UTF-8")]
     NotUtf8(PathBuf),
+    #[error("the root itself is not a file or folder under it")]
+    Root,
 }
 
 impl RelPath {
-    pub const ROOT: RelPath = RelPath(String::new());
-
     pub fn new(root: &Path, path: &Path) -> Result<RelPath, RelPathError> {
         let relative = path
             .strip_prefix(root)
             .map_err(|_| RelPathError::Outside(path.to_owned()))?;
-        let mut out = String::with_capacity(relative.as_os_str().len());
+        let mut parts = Vec::new();
         for component in relative.components() {
             match component {
-                Component::Normal(name) => {
-                    let name = name
-                        .to_str()
-                        .ok_or_else(|| RelPathError::NotUtf8(path.to_owned()))?;
-                    match out.is_empty() {
-                        true => {}
-                        false => out.push('/'),
-                    }
-                    out.push_str(name);
-                }
+                Component::Normal(name) => parts.push(
+                    name.to_str()
+                        .ok_or_else(|| RelPathError::NotUtf8(path.to_owned()))?,
+                ),
                 Component::CurDir => {}
                 Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
                     return Err(RelPathError::Outside(path.to_owned()));
                 }
             }
         }
-        Ok(RelPath(out))
+        match parts.is_empty() {
+            true => Err(RelPathError::Root),
+            false => Ok(RelPath(parts.join("/"))),
+        }
     }
 
     /// Parses an already root-relative `/`-separated path, as git reports them.
@@ -49,7 +58,7 @@ impl RelPath {
             path.is_empty(),
             path.split('/').all(|part| !matches!(part, "" | "." | "..")),
         ) {
-            (true, _) => Ok(RelPath::ROOT),
+            (true, _) => Err(RelPathError::Root),
             (false, true) => Ok(RelPath(path.to_owned())),
             (false, false) => Err(RelPathError::Outside(PathBuf::from(path))),
         }
@@ -59,19 +68,11 @@ impl RelPath {
         &self.0
     }
 
-    pub fn is_root(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// `name` must be a single normal component.
     pub fn join(&self, name: &str) -> RelPath {
-        match self.0.is_empty() {
-            true => RelPath(name.to_owned()),
-            false => RelPath(format!("{}/{name}", self.0)),
-        }
+        RelPath(format!("{}/{name}", self.0))
     }
 
-    /// Last component; empty for the root.
     pub fn name(&self) -> &str {
         match self.0.rsplit_once('/') {
             Some((_, name)) => name,
@@ -79,58 +80,110 @@ impl RelPath {
         }
     }
 
-    /// `None` for the root.
-    pub fn parent(&self) -> Option<&str> {
-        match (self.0.is_empty(), self.0.rsplit_once('/')) {
-            (true, _) => None,
-            (false, Some((parent, _))) => Some(parent),
-            (false, None) => Some(""),
+    /// The folder this sits in.
+    pub fn folder(&self) -> Folder {
+        Folder::of(self.folder_path())
+    }
+
+    /// The path of the folder this sits in, empty for the root.
+    pub fn folder_path(&self) -> &str {
+        match self.0.rsplit_once('/') {
+            Some((folder, _)) => folder,
+            None => "",
         }
     }
 
-    /// Proper ancestors from the parent up to and including the root.
+    /// Paths of the folders above, from the nearest up to the root's empty path.
     pub fn ancestors(&self) -> impl Iterator<Item = &str> {
-        let mut rest = Some(self.0.as_str()).filter(|s| !s.is_empty());
+        let mut rest = Some(self.0.as_str());
         std::iter::from_fn(move || {
             let current = rest?;
-            let parent = match current.rsplit_once('/') {
-                Some((parent, _)) => parent,
-                None => "",
+            let (folder, next) = match current.rsplit_once('/') {
+                Some((folder, _)) => (folder, Some(folder)),
+                None => ("", None),
             };
-            rest = Some(parent).filter(|p| !p.is_empty());
-            Some(parent)
+            rest = next;
+            Some(folder)
         })
     }
 
-    /// True when `self` equals `dir` or lies beneath it.
-    pub fn is_within(&self, dir: &str) -> bool {
-        match dir.is_empty() {
-            true => true,
-            false => {
-                self.0 == dir
-                    || (self.0.starts_with(dir) && self.0.as_bytes().get(dir.len()) == Some(&b'/'))
-            }
-        }
+    /// True when `self` is `dir` or lies beneath it.
+    pub fn is_within(&self, dir: &RelPath) -> bool {
+        self.0 == dir.0
+            || (self.0.starts_with(&dir.0) && self.0.as_bytes().get(dir.0.len()) == Some(&b'/'))
     }
 
     pub fn to_path(&self, root: &Path) -> PathBuf {
-        match self.0.is_empty() {
-            true => root.to_owned(),
-            false => root.join(&self.0),
-        }
+        root.join(&self.0)
     }
 
     /// Replaces the `from` prefix with `to`; `self` must be within `from`.
     pub fn rebase(&self, from: &RelPath, to: &RelPath) -> RelPath {
-        let rest = match from.0.is_empty() {
-            true => self.0.as_str(),
-            false => self.0[from.0.len()..].trim_start_matches('/'),
-        };
-        match (rest.is_empty(), to.0.is_empty()) {
-            (true, _) => to.clone(),
-            (false, true) => RelPath(rest.to_owned()),
-            (false, false) => RelPath(format!("{}/{rest}", to.0)),
+        match self.0[from.0.len()..].trim_start_matches('/') {
+            "" => to.clone(),
+            rest => to.join(rest),
         }
+    }
+}
+
+impl Folder {
+    /// A folder path as `ancestors` yields it: empty for the root.
+    pub(crate) fn of(path: &str) -> Folder {
+        match path {
+            "" => Folder::Root,
+            path => Folder::Sub(RelPath(path.to_owned())),
+        }
+    }
+
+    /// `/`-separated, empty for the root.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Folder::Root => "",
+            Folder::Sub(path) => path.as_str(),
+        }
+    }
+
+    /// `name` must be a single normal component.
+    pub fn join(&self, name: &str) -> RelPath {
+        match self {
+            Folder::Root => RelPath(name.to_owned()),
+            Folder::Sub(path) => path.join(name),
+        }
+    }
+
+    pub fn to_path(&self, root: &Path) -> PathBuf {
+        match self {
+            Folder::Root => root.to_owned(),
+            Folder::Sub(path) => path.to_path(root),
+        }
+    }
+
+    /// True for everything under the root, or `path` within this folder.
+    pub fn contains(&self, path: &RelPath) -> bool {
+        match self {
+            Folder::Root => true,
+            Folder::Sub(folder) => path.is_within(folder),
+        }
+    }
+}
+
+impl Hash for Folder {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
+    }
+}
+
+impl TryFrom<String> for RelPath {
+    type Error = RelPathError;
+
+    fn try_from(path: String) -> Result<RelPath, RelPathError> {
+        RelPath::parse(&path)
+    }
+}
+
+impl From<RelPath> for String {
+    fn from(path: RelPath) -> String {
+        path.0
     }
 }
 
@@ -140,11 +193,23 @@ impl Borrow<str> for RelPath {
     }
 }
 
+impl Borrow<str> for Folder {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl fmt::Display for RelPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.is_empty() {
-            true => f.write_str("."),
-            false => f.write_str(&self.0),
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Display for Folder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Folder::Root => f.write_str("."),
+            Folder::Sub(path) => f.write_str(path.as_str()),
         }
     }
 }

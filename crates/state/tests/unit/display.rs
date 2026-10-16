@@ -187,7 +187,7 @@ fn selections_and_cursors_land_on_cells() {
     assert_eq!(frame.primary_line, 0);
     assert_eq!(frame.rows[1].mark, LineMark::Cursor);
     assert_eq!(frame.rows[2].mark, LineMark::Plain);
-    assert_eq!(style_at(&frame, 1, 0).fg, Some(theme::CURSOR_SECONDARY.fg));
+    assert_eq!(style_at(&frame, 1, 0).fg, Some(theme::CURSOR_TEXT));
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn rust_captures_fall_back_to_theme_prefixes() {
         &loader,
     );
     assert!(
-        doc.syntax.is_some(),
+        doc.highlight.syntax().is_some(),
         "rust grammar missing from HELIX_RUNTIME"
     );
     let mut frame = Frame::default();

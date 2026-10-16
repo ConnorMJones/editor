@@ -22,7 +22,7 @@ use model::mode::Mode;
 use model::notice::{Notice, SurroundError};
 use model::register::Register;
 
-use crate::apply::{commit_focused, count_of, edit, exit_select_mode, focused, try_edit};
+use crate::apply::{commit_focused, count_of, edit, exit_select_mode, focused_text, try_edit};
 use crate::text::buffer::TextDoc;
 use crate::{Effect, State};
 
@@ -50,7 +50,7 @@ fn continued_comment<'a>(
 ) -> Option<&'a str> {
     let first = text.line(line).first_non_whitespace_char()?;
     let byte = text.char_to_byte(text.line_to_char(line) + first);
-    match &doc.syntax {
+    match doc.highlight.syntax() {
         Some(syntax) => syntax
             .layers_for_byte_range(byte as u32, byte as u32)
             .filter_map(|layer| {
@@ -61,8 +61,7 @@ fn continued_comment<'a>(
                     .and_then(|tokens| comment::get_comment_token(text, tokens.as_slice(), line))
             })
             .last(),
-        None => doc
-            .language
+        None => (doc.highlight.language())
             .map(|language| &**loader.language(language).config())
             .and_then(|config| config.comment_tokens.as_ref())
             .and_then(|tokens| comment::get_comment_token(text, tokens.as_slice(), line)),
@@ -136,7 +135,7 @@ pub fn insert_newline(state: &mut State) {
                             (Some(first), Some(_)) => line.slice(..first).to_string(),
                             (Some(_) | None, _) => indent::indent_for_newline(
                                 loader,
-                                doc.syntax.as_ref(),
+                                doc.highlight.syntax(),
                                 &HEURISTIC,
                                 &doc.indent_style,
                                 doc.tab_width,
@@ -317,7 +316,7 @@ pub fn insert_with_indent(state: &mut State, fallback: Fallback) {
                 true => {
                     let indent = indent::indent_for_newline(
                         loader,
-                        doc.syntax.as_ref(),
+                        doc.highlight.syntax(),
                         &HEURISTIC,
                         &doc.indent_style,
                         doc.tab_width,
@@ -394,7 +393,7 @@ fn open_lines(state: &mut State, direction: Direction, comments: Comments) {
                 (Some(first), Some(_)) => line.slice(..first).to_string(),
                 (Some(_) | None, _) => indent::indent_for_newline(
                     loader,
-                    doc.syntax.as_ref(),
+                    doc.highlight.syntax(),
                     &HEURISTIC,
                     &doc.indent_style,
                     doc.tab_width,
@@ -454,8 +453,8 @@ pub fn delete_selection(
     out: &mut Vec<Effect>,
 ) {
     let register = state.input.register.unwrap_or(Register::DEFAULT);
-    let Some((view, doc)) = focused(&mut state.layout, &mut state.buffers) else {
-        state.notice = Some(Notice::NoBuffer);
+    let Some((view, doc)) = focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
+    else {
         return;
     };
     let text = doc.text.slice(..);
@@ -632,7 +631,7 @@ pub fn toggle_comments(state: &mut State) {
         let cursor = selection.primary().cursor(text);
         let byte = doc.text.char_to_byte(cursor) as u32;
         let (mut line_layer, mut block_layer) = (None, None);
-        if let Some(syntax) = &doc.syntax {
+        if let Some(syntax) = doc.highlight.syntax() {
             for layer in syntax.layers_for_byte_range(byte, byte) {
                 let language = syntax.layer(layer).language;
                 let config = loader.language(language).config();
@@ -646,7 +645,7 @@ pub fn toggle_comments(state: &mut State) {
         }
         let config = line_layer
             .or(block_layer)
-            .or(doc.language)
+            .or(doc.highlight.language())
             .map(|language| &**loader.language(language).config());
         let cursor_line = doc.text.char_to_line(cursor);
         let line_token: Option<&str> = config
@@ -740,7 +739,7 @@ fn surround_positions(
         SurroundPair::Char(ch) => Some(ch),
     };
     surround::get_surround_pos(
-        doc.syntax.as_ref(),
+        doc.highlight.syntax(),
         doc.text.slice(..),
         selection,
         ch,
@@ -835,7 +834,8 @@ pub enum Yank {
 }
 
 pub fn yank(state: &mut State, register: Register, yank: Yank, out: &mut Vec<Effect>) {
-    let Some((view, doc)) = focused(&mut state.layout, &mut state.buffers) else {
+    let Some((view, doc)) = focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
+    else {
         return;
     };
     let text = doc.text.slice(..);

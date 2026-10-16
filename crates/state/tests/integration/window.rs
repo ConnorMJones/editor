@@ -1,12 +1,11 @@
 use std::fs;
 
-use model::command::{Command, PickerCommand};
+use model::command::{Command, PickerCommand, PickerKind};
 use model::notice::Notice;
-use model::window::{Axis, PickerKind};
-use state::project::session::{self, Session, SessionError};
-use state::view::layout::{Flex, Node};
+use model::units::Px;
+use state::project::session::{self, Session};
 use state::view::panes::{self, Close};
-use state::{Focus, Overlay, Sidebar, SidebarWidth};
+use state::{Dragged, Files, Overlay, Sidebar, SidebarWidth};
 
 use crate::harness::Harness;
 
@@ -21,14 +20,14 @@ fn close_is_refused_with_unsaved_edits() {
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>ix<esc><space>e");
     h.run(|state, out| panes::picker(state, PickerCommand::Open(PickerKind::Files), out));
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Sidebar));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Tree));
 
     assert_eq!(panes::request_close(&mut h.state), Close::Refused);
     assert!(matches!(
         h.state.notice,
         Some(Notice::UnsavedBuffers { count: 1 })
     ));
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
     assert!(matches!(h.state.overlay, Overlay::None));
 
     // The title bar's close button and `:q` take the same path.
@@ -64,7 +63,7 @@ fn split_ratios_survive_a_session_round_trip() {
     after
         .run(|state, out| session::restore(state, round_trip(&saved), out))
         .expect("valid session");
-    assert_eq!(after.state.layout.root, before.state.layout.root);
+    assert_eq!(after.state.layout.root(), before.state.layout.root());
     let rects = |h: &Harness| -> Vec<_> {
         h.state
             .layout
@@ -78,74 +77,36 @@ fn split_ratios_survive_a_session_round_trip() {
 }
 
 #[test]
-fn sessions_without_weights_or_width_still_load() {
-    let dir = tempfile::tempdir().unwrap();
-    for name in ["a.txt", "b.txt"] {
-        std::fs::write(dir.path().join(name), name).unwrap();
-    }
-    let mut h = Harness::new(dir.path());
-    let root = dir.path().canonicalize().unwrap();
-    let pane = |name: &str| {
-        format!(
-            "{{ kind = \"tabs\", active = 0, tabs = [{{ kind = \"text\", path = {:?}, \
-             ranges = [[0, 0]], primary = 0, scroll = 0 }}] }}",
-            root.join(name)
-        )
-    };
-    let saved: Session = toml::from_str(&format!(
-        "focus = 0\nsidebar = \"shown\"\nexpanded = []\n\
-         panes = [{}, {}]\n\
-         [layout]\nkind = \"split\"\naxis = \"row\"\n\
-         children = [{{ kind = \"pane\", pane = 0 }}, {{ kind = \"pane\", pane = 1 }}]\n",
-        pane("a.txt"),
-        pane("b.txt")
-    ))
-    .expect("older session parses");
-    h.run(|state, out| session::restore(state, saved, out))
-        .expect("valid session");
-    assert_eq!(h.state.sidebar_width, SidebarWidth::DEFAULT);
-    match &h.state.layout.root {
-        Node::Split { axis, children } => {
-            assert_eq!(*axis, Axis::Row);
-            assert!(children.iter().all(|child| child.flex == Flex::EVEN));
-        }
-        Node::Pane(_) => panic!("split was not restored"),
-    }
-}
-
-#[test]
 fn non_positive_weights_are_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = Harness::new(dir.path());
-    let saved: Session = toml::from_str(
-        "focus = 0\nsidebar = \"hidden\"\nexpanded = []\n\
+    let parsed = toml::from_str::<Session>(
+        "focus = 0\nsidebar = \"hidden\"\nexpanded = []\nsidebar_width = \"default\"\ncollapsed = []\n\
          panes = [{ kind = \"empty\" }, { kind = \"empty\" }]\n\
-         [layout]\nkind = \"split\"\naxis = \"column\"\n\
-         children = [{ kind = \"pane\", pane = 0, flex = 0.0 }, { kind = \"pane\", pane = 1 }]\n",
-    )
-    .expect("well-formed toml");
-    assert!(matches!(
-        h.run(|state, out| session::restore(state, saved, out)),
-        Err(SessionError::InvalidFlex(_))
-    ));
+         [layout]\nkind = \"split\"\naxis = \"column\"\nflex = 1.0\n\
+         children = [{ kind = \"pane\", pane = 0, flex = 0.0 }, { kind = \"pane\", pane = 1, flex = 1.0 }]\n",
+    );
+    assert!(parsed.is_err());
 }
 
 #[test]
-fn sidebar_width_is_clamped_and_persisted() {
-    assert_eq!(SidebarWidth::new(1.0).get(), SidebarWidth::MIN);
-    assert_eq!(SidebarWidth::new(1e6).get(), SidebarWidth::MAX);
-    assert_eq!(SidebarWidth::new(f32::NAN), SidebarWidth::DEFAULT);
+fn dragged_sidebar_widths_persist_and_bad_ones_are_rejected() {
+    assert!(Dragged::new(Px(0.0)).is_err());
+    assert!(Dragged::new(Px(f32::NAN)).is_err());
 
     let dir = tempfile::tempdir().unwrap();
     let mut before = Harness::new(dir.path());
     before.keys("<space>e");
-    before.state.sidebar_width = SidebarWidth::new(333.0);
+    let width = SidebarWidth::Dragged(Dragged::new(Px(333.0)).unwrap());
+    before.state.sidebar_width = width;
     let saved = session::snapshot(&before.state);
-    assert_eq!(saved.sidebar_width, 333.0);
 
     let mut after = Harness::new(dir.path());
     after
         .run(|state, out| session::restore(state, round_trip(&saved), out))
         .expect("valid session");
-    assert_eq!(after.state.sidebar_width.get(), 333.0);
+    assert_eq!(after.state.sidebar_width, width);
+
+    let text = toml::to_string(&saved)
+        .unwrap()
+        .replace("dragged = 333.0", "dragged = -1.0");
+    assert!(toml::from_str::<Session>(&text).is_err());
 }

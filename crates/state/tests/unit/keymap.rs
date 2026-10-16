@@ -1,4 +1,6 @@
-use model::command::Command;
+use model::command::{
+    Command, Direction, DocumentCommand, PagesCommand, ReadCommand, ReadMove, ScrollBy,
+};
 use model::key::{Key, KeyCode, KeySeq};
 use state::input::keymap::{Context, Keymap, Resolved};
 
@@ -82,5 +84,40 @@ fn keymap_reference_is_current() {
                 "docs/keymap.md is stale; run UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference"
             );
         }
+    }
+}
+
+#[test]
+fn document_and_pages_views_each_have_only_their_own_keys() {
+    let keymap = Keymap::helix().unwrap();
+    let heading = [Key::char(']'), Key::char(']')];
+    assert!(matches!(
+        keymap.resolve(Context::Document, &heading),
+        Resolved::Command(Command::Document(DocumentCommand::Heading(
+            Direction::Forward
+        )))
+    ));
+    assert!(matches!(
+        keymap.resolve(Context::Pages, &heading),
+        Resolved::Unbound
+    ));
+    let fit = [Key::char('f')];
+    assert!(matches!(
+        keymap.resolve(Context::Pages, &fit),
+        Resolved::Command(Command::Pages(PagesCommand::Fit))
+    ));
+    assert!(matches!(
+        keymap.resolve(Context::Document, &fit),
+        Resolved::Unbound
+    ));
+    // Scrolling is shared.
+    for context in [Context::Document, Context::Pages] {
+        assert!(matches!(
+            keymap.resolve(context, &[Key::char('j')]),
+            Resolved::Command(Command::Read(ReadCommand::Move(ReadMove::Scroll(
+                Direction::Forward,
+                ScrollBy::Lines
+            ))))
+        ));
     }
 }

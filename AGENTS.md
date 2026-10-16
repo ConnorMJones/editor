@@ -1,4 +1,7 @@
 ### Coding Guidelines
+Before writing or changing code, read docs/design.md; it describes the approach, and this
+file describes the result.
+
 Code style:
 
 Code Guidelines:
@@ -91,3 +94,31 @@ Repo Rules:
   forth with the user, and then look at if we can break up and organize this work for
   more agents to help out on. The splitting up of work should not sacrifice quality if
   some things are better handled together obviously, so some discerment is required there.
+
+### Your own words on why you don't follow these instructions.
+Why it keeps happening
+
+I start from the call site I'm editing and ask "what happens here if X is missing?". That question can only be answered with control flow: a guard, an Option, an expect. The design question is "which type makes X impossible to build, and who owns it?", and I keep skipping to the first one.
+
+Mass sed and perl rewrites make it worse. They keep the old control-flow shape and spread it across 60 sites, which is also where your review burden comes from.
+
+Even my step-2 sketch was already control-flow shaped. set_focus -> Result hands the check to every caller instead of putting the operation with the owner.
+
+Where it shows in steps 1–2
+
+1. set_focus has 13 callers matching Ok/Err, or using .expect. The real gaps are two invariants:
+   - The owner should do the operation. panes.rs asks Layout for a neighbour's id, then hands it back to set_focus with an expect. Layout should own "focus the pane to the left" and "focus the next pane" as operations.
+   - A rendered view's Link::Follows { pane } can name a closed pane. Nothing unlinks it when the pane closes, so every use rechecks with contains_key or set_focus. The fix is that closing a pane turns its followers Standalone. A link then always names a live pane, and the checks disappear.
+2. scroll.rs: set_focus(pane).ok()?. This turns an error back into a silent None, the exact thing this work is meant to remove.
+3. Layout::from_parts checks a tree that session restore already checked, then gets .expect. check_node validates, then restore_node re-derives with expect("checked by check_node"). That's "check, then trust", not "parse into the type".
+   - Session restore should parse SessionNode into Node in one pass that returns Result.
+   - flex should deserialize straight into Flex through try_from, as Dragged does.
+   - The layout should then be built from the parsed tree, so the panes and the tree can't disagree and there's nothing left to compare.
+4. Bool-tuple matches:
+   - from_parts matches on (leaves == keys, contains_key).
+   - The session focus check is match focus < len { true => {}, false => return Err }. It should be session.panes.get(focus).ok_or(MissingFocus)?, where the check returns the pane as its evidence.
+
+How I'll work from here
+
+- Before writing anything for a change, answer the design questions in the plan: the states as enums, the owner of each invariant, and where bad input is rejected when values are built. The sketch I show you is that, not function signatures.
+- No mass rewrites. If many call sites need the same change, that means the operation belongs with the owner. The fix is a method that makes those call sites shorter or unnecessary, not the same guard pasted 13 times.

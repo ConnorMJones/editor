@@ -24,7 +24,7 @@ fn display(c: &mut Criterion) {
     let text = Rope::from(source);
     let doc = TextDoc::new(text, Path::new("window.rs"), &loader);
     assert!(
-        doc.syntax.is_some(),
+        doc.highlight.syntax().is_some(),
         "rust grammar missing from HELIX_RUNTIME"
     );
     let viewport = Viewport {

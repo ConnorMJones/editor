@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use helix_core::syntax::{HighlightEvent, Loader};
 use helix_core::{Rope, RopeSlice, Syntax};
+use model::markdown::CalloutKind;
 use model::theme::{self, Style};
+use model::typeset::Display;
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
 };
@@ -128,62 +130,6 @@ pub struct Callout {
     pub index: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CalloutKind {
-    Note,
-    Abstract,
-    Info,
-    Todo,
-    Tip,
-    Success,
-    Question,
-    Warning,
-    Failure,
-    Danger,
-    Bug,
-    Example,
-    Quote,
-}
-
-impl CalloutKind {
-    /// Obsidian's names and aliases; unknown kinds read as notes.
-    pub fn parse(name: &str) -> CalloutKind {
-        match name.to_ascii_lowercase().as_str() {
-            "abstract" | "summary" | "tldr" => CalloutKind::Abstract,
-            "info" => CalloutKind::Info,
-            "todo" => CalloutKind::Todo,
-            "tip" | "hint" | "important" => CalloutKind::Tip,
-            "success" | "check" | "done" => CalloutKind::Success,
-            "question" | "help" | "faq" => CalloutKind::Question,
-            "warning" | "caution" | "attention" => CalloutKind::Warning,
-            "failure" | "fail" | "missing" => CalloutKind::Failure,
-            "danger" | "error" => CalloutKind::Danger,
-            "bug" => CalloutKind::Bug,
-            "example" => CalloutKind::Example,
-            "quote" | "cite" => CalloutKind::Quote,
-            _ => CalloutKind::Note,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            CalloutKind::Note => "Note",
-            CalloutKind::Abstract => "Abstract",
-            CalloutKind::Info => "Info",
-            CalloutKind::Todo => "Todo",
-            CalloutKind::Tip => "Tip",
-            CalloutKind::Success => "Success",
-            CalloutKind::Question => "Question",
-            CalloutKind::Warning => "Warning",
-            CalloutKind::Failure => "Failure",
-            CalloutKind::Danger => "Danger",
-            CalloutKind::Bug => "Bug",
-            CalloutKind::Example => "Example",
-            CalloutKind::Quote => "Quote",
-        }
-    }
-}
-
 /// Whether a callout can fold, and its fold before the view toggles it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CalloutFold {
@@ -203,8 +149,6 @@ pub struct Code {
     /// Keys `Markdown::highlights`.
     pub hash: u64,
 }
-
-pub use model::typeset::Display;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Math {

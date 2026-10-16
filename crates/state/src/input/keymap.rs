@@ -1,12 +1,12 @@
 use model::command::{
-    Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, Find, HunkOp, HunkTarget,
-    Inclusion, Join, Motion, ObjectScope, Paste, Pending, PickerCommand, PromptCommand,
-    PromptMotion, RegexOp, RenderedCommand, ScrollBy, SyntaxObject, Take, TreeCommand,
-    WindowCommand, WordBounds, Yanking, ZoomBy,
+    Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand, Find, HunkOp,
+    HunkTarget, Inclusion, Join, Motion, ObjectScope, PagesCommand, Paste, Pending, PickerCommand,
+    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, ScrollBy,
+    SyntaxObject, Take, TreeCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
-use model::window::{Axis, PickerKind, Side};
+use model::window::{Axis, Side};
 
 /// Which binding table applies; derived from mode, overlay and focus each key press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,12 +23,14 @@ pub enum Context {
     Changes,
     /// An action such as a discard waits for `y` or `n`.
     Confirm,
-    /// A rendered markdown or typst view has focus.
-    Rendered,
+    /// A document view, such as rendered markdown, has focus.
+    Document,
+    /// A pages view, such as a typst preview, has focus.
+    Pages,
 }
 
 impl Context {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
     pub const ALL: [Context; Context::COUNT] = [
         Context::Normal,
         Context::Insert,
@@ -39,7 +41,8 @@ impl Context {
         Context::Picker,
         Context::Changes,
         Context::Confirm,
-        Context::Rendered,
+        Context::Document,
+        Context::Pages,
     ];
 }
 
@@ -976,121 +979,123 @@ const MARKDOWN: Bindings = &[
     ),
 ];
 
-const fn rendered(command: RenderedCommand) -> Command {
-    Command::Rendered(command)
+const fn read(command: ReadCommand) -> Command {
+    Command::Read(command)
 }
 
-const RENDERED: Bindings = &[
+const fn scroll(direction: Direction, by: ScrollBy) -> Command {
+    read(ReadCommand::Move(ReadMove::Scroll(direction, by)))
+}
+
+/// Document and pages views alike.
+const READ: Bindings = &[
     (
         &[Key::char('j')],
-        rendered(RenderedCommand::Scroll(Direction::Forward, ScrollBy::Lines)),
+        scroll(Direction::Forward, ScrollBy::Lines),
     ),
     (
         &[Key::code(KeyCode::Down)],
-        rendered(RenderedCommand::Scroll(Direction::Forward, ScrollBy::Lines)),
+        scroll(Direction::Forward, ScrollBy::Lines),
     ),
     (
         &[Key::char('k')],
-        rendered(RenderedCommand::Scroll(
-            Direction::Backward,
-            ScrollBy::Lines,
-        )),
+        scroll(Direction::Backward, ScrollBy::Lines),
     ),
     (
         &[Key::code(KeyCode::Up)],
-        rendered(RenderedCommand::Scroll(
-            Direction::Backward,
-            ScrollBy::Lines,
-        )),
+        scroll(Direction::Backward, ScrollBy::Lines),
     ),
     (
         &[Key::ctrl('d')],
-        rendered(RenderedCommand::Scroll(
-            Direction::Forward,
-            ScrollBy::HalfPageCursor,
-        )),
+        scroll(Direction::Forward, ScrollBy::HalfPageCursor),
     ),
     (
         &[Key::ctrl('u')],
-        rendered(RenderedCommand::Scroll(
-            Direction::Backward,
-            ScrollBy::HalfPageCursor,
-        )),
+        scroll(Direction::Backward, ScrollBy::HalfPageCursor),
     ),
     (
         &[Key::ctrl('f')],
-        rendered(RenderedCommand::Scroll(Direction::Forward, ScrollBy::Page)),
+        scroll(Direction::Forward, ScrollBy::Page),
     ),
     (
         &[Key::code(KeyCode::PageDown)],
-        rendered(RenderedCommand::Scroll(Direction::Forward, ScrollBy::Page)),
+        scroll(Direction::Forward, ScrollBy::Page),
     ),
     (
         &[Key::char(' '), Key::char(' ')],
-        rendered(RenderedCommand::Scroll(Direction::Forward, ScrollBy::Page)),
+        scroll(Direction::Forward, ScrollBy::Page),
     ),
     (
         &[Key::ctrl('b')],
-        rendered(RenderedCommand::Scroll(Direction::Backward, ScrollBy::Page)),
+        scroll(Direction::Backward, ScrollBy::Page),
     ),
     (
         &[Key::code(KeyCode::PageUp)],
-        rendered(RenderedCommand::Scroll(Direction::Backward, ScrollBy::Page)),
+        scroll(Direction::Backward, ScrollBy::Page),
     ),
     (
         &[Key::char('g'), Key::char('g')],
-        rendered(RenderedCommand::Top),
+        read(ReadCommand::Move(ReadMove::Top)),
     ),
-    (&[Key::code(KeyCode::Home)], rendered(RenderedCommand::Top)),
+    (
+        &[Key::code(KeyCode::Home)],
+        read(ReadCommand::Move(ReadMove::Top)),
+    ),
     (
         &[Key::char('g'), Key::char('e')],
-        rendered(RenderedCommand::Bottom),
+        read(ReadCommand::Move(ReadMove::Bottom)),
     ),
-    (&[Key::char('G')], rendered(RenderedCommand::Bottom)),
+    (&[Key::char('G')], read(ReadCommand::Move(ReadMove::Bottom))),
     (
         &[Key::code(KeyCode::End)],
-        rendered(RenderedCommand::Bottom),
+        read(ReadCommand::Move(ReadMove::Bottom)),
     ),
+    (&[Key::code(KeyCode::Esc)], read(ReadCommand::Leave)),
+    (&[Key::char(':')], Command::CommandMode),
+    (&SAVE_ALL, Command::WriteAll),
+];
+
+const DOCUMENT: Bindings = &[
     (
         &[Key::char(']'), Key::char(']')],
-        rendered(RenderedCommand::Heading(Direction::Forward)),
+        Command::Document(DocumentCommand::Heading(Direction::Forward)),
     ),
     (
         &[Key::char('['), Key::char('[')],
-        rendered(RenderedCommand::Heading(Direction::Backward)),
+        Command::Document(DocumentCommand::Heading(Direction::Backward)),
     ),
-    (&[Key::code(KeyCode::Esc)], rendered(RenderedCommand::Leave)),
-    (&[Key::char('f')], rendered(RenderedCommand::Fit)),
+];
+
+const PAGES: Bindings = &[
+    (&[Key::char('f')], Command::Pages(PagesCommand::Fit)),
     (
         &[Key::char('+')],
-        rendered(RenderedCommand::Zoom(ZoomBy::In)),
+        Command::Pages(PagesCommand::Zoom(ZoomBy::In)),
     ),
     (
         &[Key::char('-')],
-        rendered(RenderedCommand::Zoom(ZoomBy::Out)),
+        Command::Pages(PagesCommand::Zoom(ZoomBy::Out)),
     ),
     (
         &[Key::char('=')],
-        rendered(RenderedCommand::Zoom(ZoomBy::Reset)),
+        Command::Pages(PagesCommand::Zoom(ZoomBy::Reset)),
     ),
     (
         &[Key::char('h')],
-        rendered(RenderedCommand::Pan(Direction::Backward)),
+        Command::Pages(PagesCommand::Pan(Direction::Backward)),
     ),
     (
         &[Key::code(KeyCode::Left)],
-        rendered(RenderedCommand::Pan(Direction::Backward)),
+        Command::Pages(PagesCommand::Pan(Direction::Backward)),
     ),
     (
         &[Key::char('l')],
-        rendered(RenderedCommand::Pan(Direction::Forward)),
+        Command::Pages(PagesCommand::Pan(Direction::Forward)),
     ),
     (
         &[Key::code(KeyCode::Right)],
-        rendered(RenderedCommand::Pan(Direction::Forward)),
+        Command::Pages(PagesCommand::Pan(Direction::Forward)),
     ),
-    (&[Key::char(':')], Command::CommandMode),
-    (&SAVE_ALL, Command::WriteAll),
 ];
 
 const TABLES: [&[Bindings]; Context::COUNT] = [
@@ -1126,7 +1131,17 @@ const TABLES: [&[Bindings]; Context::COUNT] = [
     &[CHANGES, WORKSPACE, WINDOW, SPACE_WINDOW],
     &[CONFIRM],
     &[
-        RENDERED,
+        READ,
+        DOCUMENT,
+        MARKDOWN,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
+        READ,
+        PAGES,
         MARKDOWN,
         WORKSPACE,
         WINDOW,
@@ -1199,7 +1214,8 @@ impl Keymap {
             picker,
             changes,
             confirm,
-            rendered,
+            document,
+            pages,
         ] = Context::ALL;
         Ok(Keymap {
             tries: [
@@ -1212,7 +1228,8 @@ impl Keymap {
                 build_trie(picker)?,
                 build_trie(changes)?,
                 build_trie(confirm)?,
-                build_trie(rendered)?,
+                build_trie(document)?,
+                build_trie(pages)?,
             ],
         })
     }
@@ -1299,21 +1316,21 @@ dimmed. Clicking the strip puts the text cursor on the error.
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space v` | normal, select, rendered | Open a rendered view of the file in a split to the right that follows the text pane; again (from either side) closes it. Focus stays in the text. |
-| `space V` | normal, select, rendered | Toggle the tab between the file's text and its rendered view in place, keeping the position. |
-| `j` / `k`, down / up | rendered | Scroll a little. |
-| `C-d` / `C-u` | rendered | Scroll half a page. |
-| `C-f` / `C-b`, pagedown / pageup, `space space` | rendered | Scroll a page. |
-| `gg` / `ge` / `G`, home / end | rendered | Top / bottom. |
-| `]]` / `[[` | rendered | Next / previous top-level heading. |
-| `esc` | rendered | Back to the text pane it follows; a standalone view toggles back to text. |
-| `f` | rendered | Typst preview: fit pages to the pane width, or each page whole. |
-| `+` / `-` / `=` | rendered | Typst preview: zoom pages in / out from the fit, or back to it. |
-| `h` / `l`, left / right | rendered | Typst preview: pan sideways across pages wider than the pane. |
+| `space v` | normal, select, document, pages | Open a rendered view of the file in a split to the right that follows the text pane; again (from either side) closes it. Focus stays in the text. |
+| `space V` | normal, select, document, pages | Toggle the tab between the file's text and its rendered view in place, keeping the position. |
+| `j` / `k`, down / up | document, pages | Scroll a little. |
+| `C-d` / `C-u` | document, pages | Scroll half a page. |
+| `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Scroll a page. |
+| `gg` / `ge` / `G`, home / end | document, pages | Top / bottom. |
+| `]]` / `[[` | document | Next / previous top-level heading. |
+| `esc` | document, pages | Back to the text pane it follows; a standalone view toggles back to text. |
+| `f` | pages | Fit pages to the pane width, or each page whole. |
+| `+` / `-` / `=` | pages | Zoom pages in / out from the fit, or back to it. |
+| `h` / `l`, left / right | pages | Pan sideways across pages wider than the pane. |
 | `:export-pdf` | typst file | Compile the focused typst file to `<file>.pdf` beside it (also in the `space ?` palette). Markdown export is not supported yet. |
-| mouse | rendered | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
+| mouse | document, pages | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
 | `gf` | normal, select | Follow the link under the cursor: a wikilink, a markdown link or a URL in a markdown file; elsewhere the URL or file path under the cursor (or the selected text), relative to the file's folder, then the root, as in helix. |
-| `space l` | normal, select, rendered | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
+| `space l` | normal, select, document, pages | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
 | `y` / `n` / `esc` | confirm | Create the note an unresolved link names, or not. |
 
 A following view scrolls to the block under the text cursor, or under the text's top line

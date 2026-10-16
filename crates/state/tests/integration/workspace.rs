@@ -4,13 +4,13 @@ use std::path::Path;
 use model::git::GitStatus;
 use model::notice::Notice;
 use state::input::picker::Items;
-use state::project::files::Files;
+use state::project::files::{FileIndex, Indexed};
 use state::project::path::RelPath;
 use state::sidebar::tree::{RowKind, TreeAction, TreeTarget};
 use state::text::buffer::Disk;
 use state::view::layout::Node;
 use state::view::panes;
-use state::{Focus, Overlay, Repo, Sidebar, State};
+use state::{Files, Overlay, Repo, Sidebar, State};
 
 use crate::harness::{Harness, disk_of};
 
@@ -28,7 +28,7 @@ fn commit_all(dir: &Path) {
 }
 
 fn status(state: &State, path: &str) -> Option<GitStatus> {
-    match &state.git.repo {
+    match &state.project.git {
         Repo::Found { snapshot, .. } => snapshot.get(&RelPath::parse(path).unwrap()),
         Repo::None | Repo::Unknown => panic!("no repository"),
     }
@@ -45,12 +45,14 @@ fn file_picker_opens_selected_file() {
     fs::write(dir.path().join("a.txt"), "a").unwrap();
     fs::write(dir.path().join("src/lib.rs"), "fn x() {}").unwrap();
     let mut h = Harness::new(dir.path());
-    assert!(matches!(&h.state.files, Files::Ready(files) if files.len() == 2));
+    assert!(
+        matches!(&h.state.project.index, FileIndex::Ready(Indexed { files, .. }) if files.len() == 2)
+    );
 
     h.keys("<space>flib");
     match &h.state.overlay {
         Overlay::Picker(picker) => assert_eq!(picker.matches.len(), 1),
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     }
     h.keys("<ret>");
     assert!(matches!(h.state.overlay, Overlay::None));
@@ -84,11 +86,11 @@ fn split_focus_and_close_panes() {
     fs::write(dir.path().join("a.txt"), "a").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>");
-    let first = h.state.layout.focus;
+    let first = h.state.layout.focus();
 
     h.keys("<C-w>v");
-    assert_eq!(h.state.layout.panes.len(), 2);
-    let second = h.state.layout.focus;
+    assert_eq!(h.state.layout.panes().len(), 2);
+    let second = h.state.layout.focus();
     assert_ne!(first, second);
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
     assert_eq!(
@@ -98,21 +100,21 @@ fn split_focus_and_close_panes() {
     );
 
     h.keys("<C-w>h");
-    assert_eq!(h.state.layout.focus, first);
+    assert_eq!(h.state.layout.focus(), first);
     h.keys("<C-w>l");
-    assert_eq!(h.state.layout.focus, second);
+    assert_eq!(h.state.layout.focus(), second);
 
     h.keys("<space>ws");
-    assert_eq!(h.state.layout.panes.len(), 3);
-    assert!(matches!(&h.state.layout.root, Node::Split { children, .. } if children.len() == 2));
+    assert_eq!(h.state.layout.panes().len(), 3);
+    assert!(matches!(&h.state.layout.root(), Node::Split { children, .. } if children.len() == 2));
     h.keys("<C-w>k");
-    assert_eq!(h.state.layout.focus, second);
+    assert_eq!(h.state.layout.focus(), second);
 
     h.keys("<C-w>q");
-    assert_eq!(h.state.layout.panes.len(), 2);
+    assert_eq!(h.state.layout.panes().len(), 2);
     h.keys("<C-w>o");
-    assert_eq!(h.state.layout.panes.len(), 1);
-    assert!(matches!(h.state.layout.root, Node::Pane(_)));
+    assert_eq!(h.state.layout.panes().len(), 1);
+    assert!(matches!(h.state.layout.root(), Node::Pane(_)));
 
     h.keys("<C-w>q");
     assert!(h.quit);
@@ -128,20 +130,20 @@ fn closing_buffer_keeps_panes_valid() {
     let (first, second) = (h.state.layout.leaves()[0], h.state.layout.leaves()[1]);
     h.keys(":bc<ret>");
     assert_eq!(h.state.buffers.len(), 1);
-    for pane in h.state.layout.panes.values() {
+    for pane in h.state.layout.panes().values() {
         match pane.active() {
             Some(view) => assert!(h.state.buffers.contains_key(view.buffer())),
             None => panic!("pane lost its buffer"),
         }
     }
     assert!(
-        !h.state.layout.panes.contains_key(second),
+        !h.state.layout.panes().contains_key(second),
         "the emptied pane closes"
     );
     assert_eq!(h.tabs(first), ["a.txt"]);
     // The last pane stays, empty, once its last buffer closes.
     h.keys(":bc<ret>");
-    assert!(h.state.layout.panes[first].tabs.is_none());
+    assert!(h.state.layout.panes()[first].tabs.is_none());
     assert!(h.state.buffers.is_empty());
 }
 
@@ -154,7 +156,7 @@ fn tree_expands_creates_renames_and_deletes() {
     let mut h = Harness::new(dir.path());
 
     h.keys("<space>e");
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Sidebar));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Tree));
     let names: Vec<&str> = h.state.tree.rows.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(names, ["src", "z.txt"]);
 
@@ -166,7 +168,7 @@ fn tree_expands_creates_renames_and_deletes() {
     h.keys("anew.rs<ret>");
     assert!(dir.path().join("src/new.rs").is_file());
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "src/new.rs")));
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
     assert!(
         h.state
             .tree
@@ -175,7 +177,7 @@ fn tree_expands_creates_renames_and_deletes() {
             .any(|r| r.path.as_str() == "src/new.rs")
     );
     assert!(
-        matches!(&h.state.files, Files::Ready(f) if f.iter().any(|p| p.as_str() == "src/new.rs"))
+        matches!(&h.state.project.index, FileIndex::Ready(Indexed { files: f, .. }) if f.iter().any(|p| p.as_str() == "src/new.rs"))
     );
 
     h.keys("<space>e");
@@ -223,7 +225,7 @@ fn tree_expands_creates_renames_and_deletes() {
     assert_eq!(h.state.tree.rows.len(), 1);
 
     h.keys("<esc>");
-    assert_eq!(h.state.sidebar, Sidebar::Files(Focus::Editor));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 }
 
 #[test]
@@ -243,7 +245,7 @@ fn save_all_updates_git_status() {
     assert_eq!(status(&h.state, "target"), Some(GitStatus::Ignored));
     assert_eq!(status(&h.state, "target/out"), Some(GitStatus::Ignored));
     assert!(
-        matches!(&h.state.files, Files::Ready(f) if f.iter().all(|p| !p.as_str().starts_with("target")))
+        matches!(&h.state.project.index, FileIndex::Ready(Indexed { files: f, .. }) if f.iter().all(|p| !p.as_str().starts_with("target")))
     );
 
     h.keys(":o src/a.txt<ret>ix<esc>");
@@ -276,8 +278,11 @@ fn external_changes_reload_clean_and_flag_dirty() {
         let path = canonical(dir.path(), name);
         disk_of(h.state.buffers.values().find(|b| b.path == path).unwrap())
     };
-    assert_eq!(disk(&h, "clean.txt"), Disk::Synced);
-    assert_eq!(disk(&h, "dirty.txt"), Disk::ChangedExternally);
+    assert!(matches!(disk(&h, "clean.txt"), Disk::Synced { .. }));
+    assert!(matches!(
+        disk(&h, "dirty.txt"),
+        Disk::ChangedExternally { .. }
+    ));
 
     h.keys("u");
     assert_eq!(h.doc().text.to_string(), "old\n");
@@ -295,7 +300,7 @@ fn own_writes_do_not_flag_changes() {
     h.keys(":o a.txt<ret>ix<esc>:w<ret>iy<esc>");
     h.changed(vec![canonical(dir.path(), "a.txt")]);
     let buffer = h.state.buffers.values().next().unwrap();
-    assert_eq!(disk_of(buffer), Disk::Synced);
+    assert!(matches!(disk_of(buffer), Disk::Synced { .. }));
     assert_eq!(h.doc().text.to_string(), "xya");
 }
 
@@ -310,7 +315,7 @@ fn live_watcher_reloads_and_indexes() {
     fs::write(dir.path().join("src/a.txt"), "changed on disk\n").unwrap();
     fs::write(dir.path().join("src/b.txt"), "").unwrap();
     let reloaded = h.wait_for_events(|state| {
-        let indexed = matches!(&state.files, Files::Ready(f) if f.iter().any(|p| p.as_str() == "src/b.txt"));
+        let indexed = matches!(&state.project.index, FileIndex::Ready(Indexed { files: f, .. }) if f.iter().any(|p| p.as_str() == "src/b.txt"));
         let text = state
             .buffers
             .values()
@@ -339,7 +344,7 @@ fn grep_picker_jumps_to_hit() {
                 panic!("wrong picker")
             }
         },
-        Overlay::None | Overlay::Prompt(_) => panic!("picker not open"),
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => panic!("picker not open"),
     }
     h.keys("<ret>");
     let doc = h.doc();
@@ -352,7 +357,7 @@ fn command_palette_runs_command() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
     h.keys("<space>?vsplit<ret>");
-    assert_eq!(h.state.layout.panes.len(), 2);
+    assert_eq!(h.state.layout.panes().len(), 2);
 }
 
 #[test]
@@ -408,6 +413,23 @@ fn tree_menu_creates_files_and_folders_renames_and_deletes() {
     h.run(|state, out| panes::tree_action(state, TreeTarget::Row(b), TreeAction::Delete, out));
     h.keys("y<ret>");
     assert!(!dir.path().join("b.txt").exists());
+}
+
+#[test]
+fn leaving_the_tree_drops_the_line_being_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "a").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>e");
+    let a = row(&h, "a.txt");
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(a), TreeAction::Rename, out));
+    assert!(matches!(h.state.sidebar, Sidebar::Files(Files::Edit(_))));
+    let focus = h.state.layout.focus();
+    h.run(|state, _| panes::focus_pane(state, focus));
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
+    // Back in the tree, keys move the cursor again instead of typing into the old line.
+    h.keys("<space>e");
+    assert_eq!(h.state.sidebar, Sidebar::Files(Files::Tree));
 }
 
 #[test]

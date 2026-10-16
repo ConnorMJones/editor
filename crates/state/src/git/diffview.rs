@@ -15,7 +15,7 @@ use crate::git::diff::{Base, Bases, Diff, Hunk, Side, Stamp, Tracked};
 use crate::job::Job;
 use crate::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
 use crate::view::display::{Indent, Shade, text_format};
-use crate::view::layout::{Layout, Pane, PaneId, Scroll, TextView, View, Viewport};
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, View};
 use crate::view::scroll::{self, Padding};
 use crate::{Effect, State};
 
@@ -383,10 +383,10 @@ fn active<'a>(
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
 ) -> Option<(&'a mut DiffView, &'a TextDoc, &'a Tracked)> {
-    let View::Diff(diff) = layout.panes.get_mut(pane)?.active_mut()? else {
+    let View::Diff(diff) = layout.find_pane(pane)?.active_mut()? else {
         return None;
     };
-    match &buffers.get(diff.text.buffer())?.content {
+    match &buffers[diff.text.buffer()].content {
         Content::Text {
             doc,
             diff:
@@ -487,7 +487,7 @@ enum Wanted<'a> {
 /// Brings the left side of the diff active in `pane` up to date with its buffer's HEAD copy,
 /// starting a parse when HEAD moved, then realigns.
 pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
-    let Some(View::Diff(diff)) = state.layout.panes.get(pane).and_then(Pane::active) else {
+    let Some(View::Diff(diff)) = state.layout.panes().get(pane).and_then(Pane::active) else {
         return;
     };
     let buffer = diff.text.buffer();
@@ -497,7 +497,7 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     let wanted = match &entry.content {
         Content::Loading { .. } => return,
         Content::Text { diff, .. } => match &diff.bases {
-            Bases::Loading => Wanted::Pending,
+            Bases::Loading { .. } => Wanted::Pending,
             Bases::NoRepo | Bases::Untracked => Wanted::Absent,
             Bases::Tracked(tracked) => match &tracked.head {
                 Base::Absent => Wanted::Absent,
@@ -519,7 +519,7 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
             Left::Pending | Left::Absent | Left::Parsing { .. } | Left::Head { .. },
         ) => {
             // Another view of the same blob shares its parse, done or under way.
-            let shared = (state.layout.panes.values())
+            let shared = (state.layout.panes().values())
                 .flat_map(Pane::items)
                 .find_map(|item| match &item.view {
                     View::Diff(other) if other.text.buffer() == buffer => match &other.left {
@@ -537,7 +537,7 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
                             None
                         }
                     },
-                    View::Diff(_) | View::Text(_) | View::Rendered(_) => None,
+                    View::Diff(_) | View::Text(_) | View::Document(_) | View::Pages(_) => None,
                 });
             Some(match shared {
                 Some(left) => left,
@@ -556,20 +556,20 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     };
     match (
         next,
-        state.layout.panes.get_mut(pane).and_then(Pane::active_mut),
+        state.layout.find_pane(pane).and_then(Pane::active_mut),
     ) {
         (Some(left), Some(View::Diff(diff))) => {
             diff.left = left;
             diff.align = Align::default();
         }
-        (Some(_), Some(View::Text(_) | View::Rendered(_)) | None) | (None, _) => {}
+        (Some(_), Some(View::Text(_) | View::Document(_) | View::Pages(_)) | None) | (None, _) => {}
     }
     sync_left(state, pane);
 }
 
 /// Refreshes the diff shown in every pane.
 pub fn refresh(state: &mut State, out: &mut Vec<Effect>) {
-    let panes: SmallVec<[PaneId; 8]> = state.layout.panes.keys().collect();
+    let panes: SmallVec<[PaneId; 8]> = state.layout.panes().keys().collect();
     for pane in panes {
         refresh_pane(state, pane, out);
     }
@@ -578,7 +578,7 @@ pub fn refresh(state: &mut State, out: &mut Vec<Effect>) {
 /// Hands a parsed HEAD copy to every diff view of `buffer` waiting for blob `oid`.
 pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) {
     let doc = Arc::new(doc);
-    for pane in state.layout.panes.values_mut() {
+    for pane in state.layout.panes_mut().map(|(_, pane)| pane) {
         for item in pane.items_mut() {
             match &mut item.view {
                 View::Diff(diff) if diff.text.buffer() == buffer => match diff.left {
@@ -592,27 +592,18 @@ pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) 
                     }
                     Left::Pending | Left::Absent | Left::Parsing { .. } | Left::Head { .. } => {}
                 },
-                View::Diff(_) | View::Text(_) | View::Rendered(_) => {}
+                View::Diff(_) | View::Text(_) | View::Document(_) | View::Pages(_) => {}
             }
         }
     }
 }
 
-/// Records the drawn size of the diff in `pane` for both sides, then refreshes it.
-pub fn prepare(state: &mut State, pane: PaneId, viewport: Viewport, out: &mut Vec<Effect>) {
-    match state.layout.panes.get_mut(pane).and_then(Pane::active_mut) {
-        Some(View::Diff(diff)) if diff.text.scroll.viewport != viewport => {
-            diff.text.scroll.viewport = viewport;
-            scroll::follow_cursor(state, pane);
-        }
-        Some(View::Diff(_) | View::Text(_) | View::Rendered(_)) | None => {}
-    }
-    refresh_pane(state, pane, out);
-}
-
 /// A click on the HEAD side puts the cursor on the buffer line facing the clicked line.
 pub fn click_left(state: &mut State, pane: PaneId, row: u16, col: u16) {
-    state.layout.focus = pane;
+    match state.layout.set_focus(pane) {
+        Ok(()) => {}
+        Err(NotInLayout(_)) => return,
+    }
     let State {
         layout,
         buffers,

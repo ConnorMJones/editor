@@ -2,11 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use helix_core::Selection;
-use model::command::{Command, PickerCommand};
+use model::command::{Command, PickerCommand, PickerKind};
 use model::notice::Notice;
-use model::window::PickerKind;
 use state::apply::apply;
-use state::git::changes::Arrive;
+use state::git::navigate::Arrive;
 use state::job::{self, Job};
 use state::text::buffer::{Content, Disk, Jump, Position, Target};
 use state::{Effect, State};
@@ -77,13 +76,10 @@ fn open_reads_and_parses_in_a_job() {
 
     finish(&mut h, held);
     match &h.state.buffers[id].content {
-        Content::Text {
-            doc, disk, mtime, ..
-        } => {
+        Content::Text { doc, disk, .. } => {
             assert_eq!(doc.text, "fn a() {}\n");
-            assert!(doc.syntax.is_some(), "parsed off the UI thread");
-            assert_eq!(*disk, Disk::Synced);
-            assert!(mtime.is_some());
+            assert!(doc.highlight.syntax().is_some(), "parsed off the UI thread");
+            assert!(matches!(disk, Disk::Synced { .. }));
         }
         Content::Loading { .. } => panic!("still loading"),
     }
@@ -176,7 +172,7 @@ fn grep_jump_waits_for_the_text() {
     h.keys("<space>/needle");
 
     let held = apply_held(&mut h.state, Command::Picker(PickerCommand::Submit));
-    let focus = h.state.layout.focus;
+    let focus = h.state.layout.focus();
     let id = h.state.buffers.keys().next().unwrap();
     assert_eq!(
         match &h.state.buffers[id].content {
@@ -190,7 +186,7 @@ fn grep_jump_waits_for_the_text() {
         })
     );
     finish(&mut h, held);
-    assert_eq!(h.state.layout.focus, focus);
+    assert_eq!(h.state.layout.focus(), focus);
     assert_eq!(h.view().selection, Selection::point(8));
 }
 

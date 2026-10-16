@@ -17,37 +17,44 @@ use model::command::{ChangesCommand, Command, PickerCommand};
 use model::config::TitleBar;
 use model::git::{Change, GitStatus, Group, Kind};
 use model::register::Clipboard;
+use model::theme::Theme;
+use model::units::Px;
 use model::window::Axis;
 use slotmap::SecondaryMap;
-use state::git::changes::{self, Discard, ListRow};
-use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
 use state::git::diffview::{Left, RIGHT};
+use state::git::stage::Discard;
+use state::git::{Unlisted, conflict};
 use state::input::keymap::{self, Context as KeyContext};
 use state::input::picker::{Grep, Items, PALETTE, Referrers, Search};
 use state::job::{self, JobResult};
 use state::project::path::RelPath;
 use state::project::watch::{self, Watcher};
-use state::render::rendered::{Fit, Link};
+use state::render::document::DocumentView;
+use state::render::pages::{Fit, PagesView};
+use state::render::source::{Link, Source};
 use state::render::typeset::Request;
+use state::sidebar::changes::{self, ListRow};
 use state::sidebar::tree::{self, Fold, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget};
-use state::text::buffer::{Content, Disk};
+use state::text::buffer::{Content, Disk, Highlight};
 use state::view::display::{self, Gutter, Indent};
 use state::view::layout::{Node, Pane, PaneId, SplitPath, Tabs, View};
 use state::view::scroll;
 use state::{
-    Confirm, Effect, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply, input,
-    project::session, text::registers, view::panes,
+    Confirm, Dragged, Effect, Files, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, apply,
+    input, project::session, text::registers, view::panes,
 };
 
+use crate::fonts::{Fonts, hsla};
 use crate::preview::PreviewElement;
-use crate::rendered::{Rasterized, Rasters, RenderedPane};
+use crate::rendered::raster::{Rasterized, Rasters};
+use crate::rendered::{RenderedPane, Shape};
 use crate::text::{Part, TextElement};
-use crate::theme::Theme;
 
 pub struct Workspace {
     pub state: State,
     pub theme: Theme,
+    pub fonts: Fonts,
     pub title_bar: TitleBar,
     pub effects: Vec<Effect>,
     pub focus: gpui::FocusHandle,
@@ -138,6 +145,9 @@ const INDENT: f32 = 14.0;
 const TITLE_HEIGHT: Pixels = px(32.0);
 /// Hit width of split and sidebar dividers; a 1px line is drawn in the middle.
 const DIVIDER: Pixels = px(5.0);
+/// Sidebar widths in ems of the interface font.
+const SIDEBAR_DEFAULT: f32 = 20.0;
+const SIDEBAR_MIN: f32 = 8.0;
 const SHADOW: Pixels = px(10.0);
 const ROUNDING: Pixels = px(10.0);
 const BORDER: Pixels = px(1.0);
@@ -226,12 +236,12 @@ impl Workspace {
     pub fn changed(&mut self, cx: &mut Context<Self>) {
         self.tree_scroll
             .scroll_to_item(self.state.tree.cursor, ScrollStrategy::Nearest);
-        match &self.state.git.repo {
+        match &self.state.project.git {
             Repo::Found { snapshot, .. } => {
                 match changes::cursor_row(
                     &snapshot.changes,
-                    &self.state.git.folds,
-                    self.state.git.cursor.as_ref(),
+                    &self.state.changes.folds,
+                    self.state.changes.cursor.as_ref(),
                 ) {
                     Some(row) => self
                         .changes_scroll
@@ -245,10 +255,10 @@ impl Workspace {
             Overlay::Picker(picker) => self
                 .picker_scroll
                 .scroll_to_item(picker.cursor, ScrollStrategy::Nearest),
-            Overlay::None | Overlay::Prompt(_) => {}
+            Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
         }
-        let focus = self.state.layout.focus;
-        let active = (self.state.layout.panes.get(focus))
+        let focus = self.state.layout.focus();
+        let active = (self.state.layout.panes().get(focus))
             .and_then(|pane| pane.tabs.as_ref())
             .map(Tabs::active);
         match (active, self.tab_scroll.get(focus)) {
@@ -296,7 +306,14 @@ impl Workspace {
             }
             (Drag::Sidebar, Some(MouseButton::Left)) => {
                 let left = self.areas.sidebar.get().origin.x;
-                self.state.sidebar_width = SidebarWidth::new((event.position.x - left) / px(1.));
+                let width = fit_sidebar(
+                    event.position.x - left,
+                    &self.fonts,
+                    window.viewport_size().width,
+                );
+                self.state.sidebar_width = SidebarWidth::Dragged(
+                    Dragged::new(Px(width / px(1.))).expect("a fitted width is positive"),
+                );
                 cx.notify();
             }
             (
@@ -331,7 +348,7 @@ impl Workspace {
     /// Syncs the state once per change, brings the lists along and runs what they queued.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         loop {
-            state::git::changes::sync(&mut self.state, &mut self.effects);
+            state::sync(&mut self.state, &mut self.effects);
             crate::rendered::sync(self, cx);
             let effects = std::mem::take(&mut self.effects);
             match effects.as_slice() {
@@ -441,7 +458,7 @@ impl Workspace {
         let frame = round_corners(div(), tiling)
             .cursor(CursorStyle::Arrow)
             .size_full()
-            .border_color(self.theme.chrome.border)
+            .border_color(hsla(self.theme.chrome.border))
             .on_mouse_move(|_, _, cx| cx.stop_propagation());
         let frame = match tiling.top {
             true => frame,
@@ -516,6 +533,7 @@ impl Workspace {
     /// platform's window buttons on either side of the project name.
     fn titlebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
+        let fonts = &self.fonts;
         let controls = window.window_controls();
         let tiling = match window.window_decorations() {
             Decorations::Server => Tiling::tiled(),
@@ -525,7 +543,7 @@ impl Workspace {
             .button_layout()
             .unwrap_or_else(WindowButtonLayout::linux_default);
         let maximized = window.is_maximized();
-        let icon = theme.chrome.title_text;
+        let icon = hsla(theme.chrome.title_text);
         let buttons = |side: [Option<WindowButton>; gpui::MAX_BUTTONS_PER_SIDE],
                        cx: &mut Context<Self>| {
             side.into_iter()
@@ -540,7 +558,7 @@ impl Workspace {
                         (WindowButton::Minimize, _) => (
                             "minimize",
                             div().w(px(10.)).h(px(1.)).bg(icon).into_any_element(),
-                            theme.chrome.hover,
+                            hsla(theme.chrome.hover),
                         ),
                         (WindowButton::Maximize, false) => (
                             "maximize",
@@ -549,7 +567,7 @@ impl Workspace {
                                 .border_1()
                                 .border_color(icon)
                                 .into_any_element(),
-                            theme.chrome.hover,
+                            hsla(theme.chrome.hover),
                         ),
                         (WindowButton::Maximize, true) => (
                             "restore",
@@ -565,12 +583,12 @@ impl Workspace {
                                     inset: false,
                                 }])
                                 .into_any_element(),
-                            theme.chrome.hover,
+                            hsla(theme.chrome.hover),
                         ),
                         (WindowButton::Close, _) => (
                             "close",
                             div().text_color(icon).child("✕").into_any_element(),
-                            theme.chrome.close_hover,
+                            hsla(theme.chrome.close_hover),
                         ),
                     };
                     div()
@@ -601,7 +619,7 @@ impl Workspace {
         };
         let left = buttons(layout.left, cx);
         let right = buttons(layout.right, cx);
-        let root = self.state.root.path();
+        let root = self.state.project.root.path();
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -617,21 +635,21 @@ impl Workspace {
             .items_center()
             .gap_1()
             .px_2()
-            .bg(theme.chrome.title)
-            .text_color(theme.chrome.title_text)
-            .font(theme.ui.clone())
-            .text_size(theme.ui_size)
+            .bg(hsla(theme.chrome.title))
+            .text_color(hsla(theme.chrome.title_text))
+            .font(fonts.ui.clone())
+            .text_size(fonts.ui_size)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.drag = Drag::Title),
             )
             .children(left)
             .child(div().flex_1())
-            .child(div().text_color(theme.text).child(name))
+            .child(div().text_color(hsla(theme.text)).child(name))
             .child(
                 div()
                     .pl_2()
-                    .text_color(theme.text_muted)
+                    .text_color(hsla(theme.muted))
                     .child(root.display().to_string()),
             )
             .child(div().flex_1())
@@ -660,17 +678,18 @@ impl Workspace {
     /// Helix statusline: mode, file name, modification; selections, position, encoding.
     fn statusline(&self, pane: PaneId) -> Div {
         let theme = &self.theme;
+        let fonts = &self.fonts;
         let state = &self.state;
-        let focused = pane == state.layout.focus;
+        let focused = pane == state.layout.focus();
         let mode = state.input.mode;
         let (file, flags, hunks, conflicts, selections, position) =
-            match state.layout.panes.get(pane).and_then(Pane::active) {
+            match state.layout.panes().get(pane).and_then(Pane::active) {
                 Some(shown) => {
                     let view = shown.text();
                     let buffer = &state.buffers[view.buffer()];
                     let name = buffer
                         .path
-                        .strip_prefix(state.root.path())
+                        .strip_prefix(state.project.root.path())
                         .unwrap_or(&buffer.path)
                         .display()
                         .to_string();
@@ -686,9 +705,13 @@ impl Workspace {
                                 false => "",
                             };
                             let disk = match disk {
-                                Disk::Synced | Disk::New => "",
-                                Disk::ChangedExternally => " [changed on disk]",
+                                Disk::Synced { .. } | Disk::New => "",
+                                Disk::ChangedExternally { .. } => " [changed on disk]",
                                 Disk::Deleted => " [deleted]",
+                            };
+                            let highlight = match doc.highlight {
+                                Highlight::Failed { .. } => " [parse failed]",
+                                Highlight::Plain | Highlight::Parsed(_) => "",
                             };
                             let selections = match view.selection.len() {
                                 1 => "1 sel".to_owned(),
@@ -696,10 +719,26 @@ impl Workspace {
                             };
                             let hunks = match (shown, &diff.bases) {
                                 (View::Text(_), _) => String::new(),
-                                (View::Rendered(view), _) => match view.link {
-                                    Link::Follows { .. } => "rendered: following".to_owned(),
-                                    Link::Standalone => "rendered".to_owned(),
-                                },
+                                (
+                                    View::Document(DocumentView {
+                                        source:
+                                            Source {
+                                                link: Link::Follows { .. },
+                                                ..
+                                            },
+                                        ..
+                                    })
+                                    | View::Pages(PagesView {
+                                        source:
+                                            Source {
+                                                link: Link::Follows { .. },
+                                                ..
+                                            },
+                                        ..
+                                    }),
+                                    _,
+                                ) => "rendered: following".to_owned(),
+                                (View::Document(_) | View::Pages(_), _) => "rendered".to_owned(),
                                 (View::Diff(_), Bases::Tracked(tracked)) => {
                                     let at = diff::hunk_at(
                                         &tracked.hunks,
@@ -719,7 +758,7 @@ impl Workspace {
                                 (View::Diff(_), Bases::NoRepo) => {
                                     "diff: not in a repository".to_owned()
                                 }
-                                (View::Diff(_), Bases::Loading) => "diff".to_owned(),
+                                (View::Diff(_), Bases::Loading { .. }) => "diff".to_owned(),
                             };
                             let list = &conflict::current(doc).list;
                             let at = list.partition_point(|conflict| conflict.close < line);
@@ -733,7 +772,7 @@ impl Workspace {
                             };
                             (
                                 name,
-                                format!("{marker}{disk}"),
+                                format!("{marker}{disk}{highlight}"),
                                 hunks,
                                 conflicts,
                                 selections,
@@ -761,8 +800,8 @@ impl Workspace {
             };
         // Buffers are always UTF-8; helix shows the encoding only when it differs.
         let (mode_label, mode_bg, mode_fg) = match focused {
-            true => (mode.label(), theme.mode[mode], theme.mode.fg),
-            false => ("   ", theme.surface, theme.text_muted),
+            true => (mode.label(), hsla(theme.mode[mode]), hsla(theme.mode.fg)),
+            false => ("   ", hsla(theme.surface), hsla(theme.muted)),
         };
         let pending: String = match focused {
             true => state
@@ -775,16 +814,16 @@ impl Workspace {
             false => String::new(),
         };
         let text = match focused {
-            true => theme.text,
-            false => theme.text_muted,
+            true => hsla(theme.text),
+            false => hsla(theme.muted),
         };
         div()
             .flex()
             .flex_row()
-            .bg(theme.surface)
+            .bg(hsla(theme.surface))
             .text_color(text)
-            .font(theme.ui.clone())
-            .text_size(theme.ui_size)
+            .font(fonts.ui.clone())
+            .text_size(fonts.ui_size)
             .child(
                 div()
                     .px_2()
@@ -793,14 +832,19 @@ impl Workspace {
                     .child(mode_label),
             )
             .child(div().pl_2().child(file))
-            .child(div().pl_1().text_color(theme.chrome.unsaved).child(flags))
+            .child(
+                div()
+                    .pl_1()
+                    .text_color(hsla(theme.chrome.unsaved))
+                    .child(flags),
+            )
             .child(div().flex_1())
-            .child(div().px_2().text_color(theme.text_muted).child(pending))
+            .child(div().px_2().text_color(hsla(theme.muted)).child(pending))
             .child(div().px_2().child(hunks))
             .child(
                 div()
                     .px_2()
-                    .text_color(theme.chrome.close_hover)
+                    .text_color(hsla(theme.chrome.close_hover))
                     .child(conflicts),
             )
             .child(div().px_2().child(selections))
@@ -812,7 +856,7 @@ impl Workspace {
         match node {
             Node::Pane(pane) => {
                 let pane = *pane;
-                let target = self.state.layout.panes.get(pane);
+                let target = self.state.layout.panes().get(pane);
                 let bar = match (
                     target.and_then(|target| target.tabs.as_ref()),
                     self.tab_scroll.get(pane),
@@ -847,7 +891,12 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(element(Part::Head)),
                                 )
-                                .child(div().flex_none().w(px(1.)).bg(self.theme.chrome.border))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(1.))
+                                        .bg(hsla(self.theme.chrome.border)),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -855,18 +904,18 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(element(Part::Buffer)),
                                 ),
-                            (Content::Text { .. }, View::Rendered(_)) => div()
+                            (Content::Text { .. }, View::Document(_) | View::Pages(_)) => div()
                                 .flex_1()
                                 .min_h_0()
                                 .flex()
                                 .flex_col()
                                 .overflow_hidden()
-                                .bg(self.theme.background)
+                                .bg(hsla(self.theme.background))
                                 .child(crate::rendered::body(self, pane, cx)),
                             (Content::Loading { .. }, _) => div()
                                 .flex_1()
                                 .p_2()
-                                .text_color(self.theme.text_muted)
+                                .text_color(hsla(self.theme.muted))
                                 .child("loading…"),
                         }
                     }
@@ -910,7 +959,7 @@ impl Workspace {
                         _ => {
                             let split = path.clone();
                             container = container.child(
-                                divider(axis, self.theme.chrome.border).on_mouse_down(
+                                divider(axis, hsla(self.theme.chrome.border)).on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _, _, cx| {
                                         this.drag = Drag::Divider {
@@ -940,12 +989,13 @@ impl Workspace {
         }
     }
 
-    fn sidebar(&self, focus: Focus, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&self, focus: Focus, window: Pixels, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
-        let drop_bg = theme.chrome.selection;
+        let fonts = &self.fonts;
+        let drop_bg = hsla(theme.chrome.selection);
         let border = match focus {
-            Focus::Sidebar => theme.chrome.accent,
-            Focus::Editor => theme.chrome.border,
+            Focus::Sidebar => hsla(theme.chrome.accent),
+            Focus::Editor => hsla(theme.chrome.border),
         };
         let areas = self.areas.clone();
         div()
@@ -956,13 +1006,20 @@ impl Workspace {
             .child(
                 div()
                     .relative()
-                    .w(px(self.state.sidebar_width.get()))
+                    .w(fit_sidebar(
+                        match self.state.sidebar_width {
+                            SidebarWidth::Default => fonts.ui_size * SIDEBAR_DEFAULT,
+                            SidebarWidth::Dragged(width) => px(width.get().0),
+                        },
+                        fonts,
+                        window,
+                    ))
                     .h_full()
                     .flex()
                     .flex_col()
-                    .bg(theme.surface)
-                    .font(theme.ui.clone())
-                    .text_size(theme.ui_size)
+                    .bg(hsla(theme.surface))
+                    .font(fonts.ui.clone())
+                    .text_size(fonts.ui_size)
                     .child(
                         canvas(
                             move |bounds, _, _| areas.sidebar.set(bounds),
@@ -971,27 +1028,58 @@ impl Workspace {
                         .absolute()
                         .size_full(),
                     )
+                    .children(match (&self.state.sidebar, &self.state.project.git) {
+                        (Sidebar::Changes(_), Repo::Found { snapshot, .. }) => {
+                            let missing = (snapshot.unlisted.iter())
+                                .filter(|unlisted| match unlisted {
+                                    Unlisted::Root(Change::Ignored) => false,
+                                    Unlisted::Root(_)
+                                    | Unlisted::NotUtf8(_)
+                                    | Unlisted::Invalid(_) => true,
+                                })
+                                .count();
+                            let note = match missing {
+                                0 => None,
+                                1 => Some("1 change is not listed; see the log".to_owned()),
+                                count => {
+                                    Some(format!("{count} changes are not listed; see the log"))
+                                }
+                            };
+                            note.map(|note| {
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_color(hsla(theme.muted))
+                                    .child(note)
+                            })
+                        }
+                        (Sidebar::Hidden | Sidebar::Files(_), _)
+                        | (Sidebar::Changes(_), Repo::None | Repo::Unknown) => None,
+                    })
                     .child(match self.state.sidebar {
                         Sidebar::Changes(_) => uniform_list(
                             "changes",
-                            match &self.state.git.repo {
+                            match &self.state.project.git {
                                 Repo::Found { snapshot, .. } => {
-                                    changes::list_len(&snapshot.changes, &self.state.git.folds)
+                                    changes::list_len(&snapshot.changes, &self.state.changes.folds)
                                 }
                                 Repo::None | Repo::Unknown => 0,
                             },
                             cx.processor(|this, range: Range<usize>, _window, cx| {
                                 let state = &this.state;
                                 let theme = &this.theme;
-                                let Repo::Found { snapshot, .. } = &state.git.repo else {
+                                let Repo::Found { snapshot, .. } = &state.project.git else {
                                     return Vec::new();
                                 };
                                 let entries = &snapshot.changes;
                                 let focused =
                                     matches!(state.sidebar, Sidebar::Changes(Focus::Sidebar));
-                                let folds = &state.git.folds;
-                                let cursor =
-                                    changes::cursor_row(entries, folds, state.git.cursor.as_ref());
+                                let folds = &state.changes.folds;
+                                let cursor = changes::cursor_row(
+                                    entries,
+                                    folds,
+                                    state.changes.cursor.as_ref(),
+                                );
                                 range
                                     .map(|row| match changes::list_row(entries, folds, row) {
                                         Some(ListRow::Header { group, count, fold }) => {
@@ -1023,9 +1111,9 @@ impl Workspace {
                                                 ),
                                             };
                                             let bg = match (Some(row) == cursor, focused) {
-                                                (true, true) => theme.chrome.selection,
-                                                (true, false) => theme.background,
-                                                (false, _) => theme.surface,
+                                                (true, true) => hsla(theme.chrome.selection),
+                                                (true, false) => hsla(theme.background),
+                                                (false, _) => hsla(theme.surface),
                                             };
                                             div()
                                                 .id(row)
@@ -1036,8 +1124,8 @@ impl Workspace {
                                                 .gap_1()
                                                 .px_2()
                                                 .bg(bg)
-                                                .hover(|style| style.bg(theme.chrome.hover))
-                                                .text_color(theme.text_muted)
+                                                .hover(|style| style.bg(hsla(theme.chrome.hover)))
+                                                .text_color(hsla(theme.muted))
                                                 .on_click(cx.listener(
                                                     move |this, _: &ClickEvent, window, cx| {
                                                         panes::click_changes(
@@ -1099,9 +1187,9 @@ impl Workspace {
                                                 | None => "",
                                             };
                                             let bg = match (Some(row) == cursor, focused) {
-                                                (true, true) => theme.chrome.selection,
-                                                (true, false) => theme.background,
-                                                (false, _) => theme.surface,
+                                                (true, true) => hsla(theme.chrome.selection),
+                                                (true, false) => hsla(theme.background),
+                                                (false, _) => hsla(theme.surface),
                                             };
                                             let buttons = match changed.group {
                                                 Group::Changes => [
@@ -1145,7 +1233,7 @@ impl Workspace {
                                                     None,
                                                 ],
                                             };
-                                            let dir = changed.path.parent().unwrap_or("");
+                                            let dir = changed.path.folder_path();
                                             div()
                                                 .id(row)
                                                 .group("change-row")
@@ -1156,7 +1244,7 @@ impl Workspace {
                                                 .pl_4()
                                                 .pr_2()
                                                 .bg(bg)
-                                                .hover(|style| style.bg(theme.chrome.hover))
+                                                .hover(|style| style.bg(hsla(theme.chrome.hover)))
                                                 .on_click(cx.listener(
                                                     move |this, event: &ClickEvent, window, cx| {
                                                         let click = match event.click_count() {
@@ -1176,7 +1264,7 @@ impl Workspace {
                                                 .child(
                                                     div()
                                                         .flex_none()
-                                                        .text_color(theme.chrome[status])
+                                                        .text_color(hsla(theme.chrome[status]))
                                                         .child(changed.path.name().to_owned()),
                                                 )
                                                 .child(
@@ -1185,21 +1273,21 @@ impl Workspace {
                                                         .min_w_0()
                                                         .overflow_hidden()
                                                         .whitespace_nowrap()
-                                                        .text_color(theme.text_muted)
+                                                        .text_color(hsla(theme.muted))
                                                         .child(dir.to_owned()),
                                                 )
                                                 .children(buttons.into_iter().flatten())
                                                 .child(
                                                     div()
                                                         .flex_none()
-                                                        .text_color(theme.text_muted)
+                                                        .text_color(hsla(theme.muted))
                                                         .child(marker),
                                                 )
                                                 .child(
                                                     div()
                                                         .flex_none()
                                                         .w(px(12.))
-                                                        .text_color(theme.chrome[status])
+                                                        .text_color(hsla(theme.chrome[status]))
                                                         .child(letter),
                                                 )
                                         }
@@ -1244,24 +1332,26 @@ impl Workspace {
                                         let state = &this.state;
                                         let theme = &this.theme;
                                         let (drop_bg, preview_bg, preview_fg) = (
-                                            theme.chrome.selection,
-                                            theme.chrome.title,
-                                            theme.text,
+                                            hsla(theme.chrome.selection),
+                                            hsla(theme.chrome.title),
+                                            hsla(theme.text),
                                         );
-                                        let focused =
-                                            matches!(state.sidebar, Sidebar::Files(Focus::Sidebar));
+                                        let focused = matches!(
+                                            state.sidebar,
+                                            Sidebar::Files(Files::Tree | Files::Edit(_))
+                                        );
                                         range
                                             .map(|index| {
                                                 let row = &state.tree.rows[index];
-                                                let status = match &state.git.repo {
+                                                let status = match &state.project.git {
                                                     Repo::Found { snapshot, .. } => {
                                                         snapshot.get(&row.path)
                                                     }
                                                     Repo::None | Repo::Unknown => None,
                                                 };
                                                 let color = match status {
-                                                    Some(status) => theme.chrome[status],
-                                                    None => theme.text,
+                                                    Some(status) => hsla(theme.chrome[status]),
+                                                    None => hsla(theme.text),
                                                 };
                                                 let icon = match row.kind {
                                                     RowKind::File => "  ",
@@ -1279,16 +1369,16 @@ impl Workspace {
                                                 };
                                                 let bg = match (index == state.tree.cursor, focused)
                                                 {
-                                                    (true, true) => theme.chrome.selection,
-                                                    (true, false) => theme.background,
-                                                    (false, _) => theme.surface,
+                                                    (true, true) => hsla(theme.chrome.selection),
+                                                    (true, false) => hsla(theme.background),
+                                                    (false, _) => hsla(theme.surface),
                                                 };
                                                 div()
                                             .id(index)
                                             .flex()
                                             .flex_row()
                                             .bg(bg)
-                                            .hover(|style| style.bg(theme.chrome.hover))
+                                            .hover(|style| style.bg(hsla(theme.chrome.hover)))
                                             .pl(px(4.0 + INDENT * row.depth as f32))
                                             .pr_2()
                                             .text_color(color)
@@ -1348,7 +1438,7 @@ impl Workspace {
                                                     this.changed(cx);
                                                 },
                                             ))
-                                            .child(div().text_color(theme.text_muted).child(icon))
+                                            .child(div().text_color(hsla(theme.muted)).child(icon))
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -1357,7 +1447,7 @@ impl Workspace {
                                             )
                                             .child(
                                                 div()
-                                                    .text_color(theme.chrome.unsaved)
+                                                    .text_color(hsla(theme.chrome.unsaved))
                                                     .child(unsaved),
                                             )
                                             })
@@ -1382,6 +1472,7 @@ impl Workspace {
     fn tree_menu(&self, cx: &mut Context<Self>) -> Option<Deferred> {
         let menu = self.tree_menu.as_ref()?;
         let theme = &self.theme;
+        let fonts = &self.fonts;
         let target = menu.target;
         const ITEMS: [(TreeAction, &str); 4] = [
             (TreeAction::NewFile, "New File"),
@@ -1393,7 +1484,7 @@ impl Workspace {
             TreeTarget::Row(_) => ITEMS.len(),
             TreeTarget::Root => 2,
         };
-        let hover = theme.chrome.hover;
+        let hover = hsla(theme.chrome.hover);
         let items = ITEMS[..shown].iter().map(|&(action, label)| {
             div()
                 .id(label)
@@ -1418,13 +1509,13 @@ impl Workspace {
                         .p_1()
                         .flex()
                         .flex_col()
-                        .bg(theme.surface)
+                        .bg(hsla(theme.surface))
                         .border_1()
-                        .border_color(theme.chrome.border)
+                        .border_color(hsla(theme.chrome.border))
                         .rounded_md()
-                        .font(theme.ui.clone())
-                        .text_size(theme.ui_size)
-                        .text_color(theme.text)
+                        .font(fonts.ui.clone())
+                        .text_size(fonts.ui_size)
+                        .text_color(hsla(theme.text))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.tree_menu = None;
                             cx.notify();
@@ -1441,6 +1532,7 @@ impl Workspace {
             return None;
         };
         let theme = &self.theme;
+        let fonts = &self.fonts;
         let previewed = match picker.items {
             Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Backlinks(_) => true,
             Items::Commands => false,
@@ -1502,8 +1594,8 @@ impl Workspace {
                             }
                         };
                         let bg = match row == picker.cursor {
-                            true => theme.chrome.selection,
-                            false => theme.surface,
+                            true => hsla(theme.chrome.selection),
+                            false => hsla(theme.surface),
                         };
                         div()
                             .id(row)
@@ -1511,14 +1603,14 @@ impl Workspace {
                             .flex_row()
                             .px_2()
                             .bg(bg)
-                            .hover(|style| style.bg(theme.chrome.hover))
+                            .hover(|style| style.bg(hsla(theme.chrome.hover)))
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 panes::click_picker(&mut this.state, row, &mut this.effects);
                                 window.focus(&this.focus, cx);
                                 this.changed(cx);
                             }))
                             .child(div().flex_1().overflow_hidden().child(label))
-                            .child(div().text_color(theme.text_muted).child(detail))
+                            .child(div().text_color(hsla(theme.muted)).child(detail))
                     })
                     .collect()
             }),
@@ -1545,9 +1637,9 @@ impl Workspace {
                     .h_full()
                     .overflow_hidden()
                     .pl_2()
-                    .bg(theme.background)
+                    .bg(hsla(theme.background))
                     .border_l_1()
-                    .border_color(theme.chrome.border)
+                    .border_color(hsla(theme.chrome.border))
                     .child(PreviewElement {
                         workspace: cx.entity(),
                     }),
@@ -1578,11 +1670,11 @@ impl Workspace {
                         .h(viewport.height * 0.7)
                         .flex()
                         .flex_col()
-                        .bg(theme.surface)
+                        .bg(hsla(theme.surface))
                         .border_1()
-                        .border_color(theme.chrome.accent)
-                        .font(theme.ui.clone())
-                        .text_size(theme.ui_size)
+                        .border_color(hsla(theme.chrome.accent))
+                        .font(fonts.ui.clone())
+                        .text_size(fonts.ui_size)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
@@ -1590,9 +1682,9 @@ impl Workspace {
                                 .flex_row()
                                 .px_2()
                                 .border_b_1()
-                                .border_color(theme.chrome.border)
+                                .border_color(hsla(theme.chrome.border))
                                 .child(div().flex_1().child(format!("> {}", picker.query)))
-                                .child(div().text_color(theme.text_muted).child(status)),
+                                .child(div().text_color(hsla(theme.muted)).child(status)),
                         )
                         .child(body),
                 ),
@@ -1671,15 +1763,15 @@ impl EntityInputHandler for Workspace {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let state = &self.state;
-        let shown = state.layout.panes.get(state.layout.focus)?.active()?;
+        let shown = state.layout.focused().active()?;
         let view = shown.text();
-        let doc = match &state.buffers.get(view.buffer())?.content {
+        let doc = match &state.buffers[view.buffer()].content {
             Content::Text { doc, .. } => doc,
             Content::Loading { .. } => return None,
         };
         let text = doc.text.slice(..);
         let (padding, gutter_lines) = match shown {
-            View::Rendered(_) => return None,
+            View::Document(_) | View::Pages(_) => return None,
             View::Text(_) => (conflict::padding(doc), text.len_lines()),
             View::Diff(diff) => (
                 diff.align.sides[RIGHT].padding(),
@@ -1701,7 +1793,7 @@ impl EntityInputHandler for Workspace {
         )
         .ok()?;
         let row = pos.row as isize - view.scroll.rows;
-        let cell = self.theme.cell;
+        let cell = self.fonts.cell;
         let col = Gutter::new(gutter_lines).cols as usize + pos.col;
         Some(Bounds::new(
             point(
@@ -1746,21 +1838,28 @@ impl Render for Workspace {
         // Typst pages are sized from the viewport their list was last laid out in.
         for cache in self.rendered.values_mut() {
             let size = cache.list.viewport_bounds().size;
-            match (cache.measured.fit, cache.measured.height == size.height) {
-                (Fit::Width, _) | (Fit::Page, true) => {}
-                (Fit::Page, false) => cache.list.remeasure(),
+            match (&cache.measured.shape, cache.measured.height == size.height) {
+                (Shape::Pages { fit: Fit::Page, .. }, false) => cache.list.remeasure(),
+                (Shape::Pages { fit: Fit::Page, .. }, true)
+                | (
+                    Shape::Pages {
+                        fit: Fit::Width, ..
+                    }
+                    | Shape::Document { .. },
+                    _,
+                ) => {}
             }
             cache.measured.width = size.width;
             cache.measured.height = size.height;
         }
         let State {
             tree,
-            root,
+            project,
             buffers,
             ..
         } = &mut self.state;
-        tree::sync_unsaved(&mut tree.unsaved, root.path(), buffers);
-        let panes = &self.state.layout.panes;
+        tree::sync_unsaved(&mut tree.unsaved, project.root.path(), buffers);
+        let panes = &self.state.layout.panes();
         self.tab_scroll.retain(|pane, _| panes.contains_key(pane));
         for pane in panes.keys() {
             match self.tab_scroll.contains_key(pane) {
@@ -1772,70 +1871,82 @@ impl Render for Workspace {
         }
         let state = &self.state;
         let relative = |path: &std::path::Path| {
-            path.strip_prefix(state.root.path())
+            path.strip_prefix(state.project.root.path())
                 .unwrap_or(path)
                 .display()
                 .to_string()
         };
-        let bottom = match (
-            &state.overlay,
-            &state.tree.edit,
-            &state.confirm,
-            &state.notice,
-        ) {
+        let bottom = match (&state.overlay, &state.sidebar, &state.notice) {
             (Overlay::Prompt(_), ..) => String::new(),
             (
-                _,
-                TreeEdit::Create {
+                Overlay::Confirm(Confirm::Discard {
+                    path,
+                    how: Discard::Checkout,
+                }),
+                ..,
+            ) => format!("discard changes to {}? y/n", relative(path)),
+            (
+                Overlay::Confirm(Confirm::Discard {
+                    path,
+                    how: Discard::Delete(_),
+                }),
+                ..,
+            ) => format!("delete untracked {}? y/n", relative(path)),
+            (Overlay::Confirm(Confirm::Create(path)), ..) => format!("create {path}? y/n"),
+            (
+                Overlay::None | Overlay::Picker(_),
+                Sidebar::Files(Files::Edit(TreeEdit::Create {
                     line,
                     kind: NewEntry::Infer,
-                },
-                ..,
+                })),
+                _,
             ) => {
                 format!("new file (end with / for a folder): {line}")
             }
             (
-                _,
-                TreeEdit::Create {
+                Overlay::None | Overlay::Picker(_),
+                Sidebar::Files(Files::Edit(TreeEdit::Create {
                     line,
                     kind: NewEntry::Folder,
-                },
-                ..,
+                })),
+                _,
             ) => {
                 format!("new folder: {line}")
             }
-            (_, TreeEdit::Rename { from, line }, ..) => format!("rename {from} to: {line}"),
-            (_, TreeEdit::Delete { path, line, .. }, ..) => {
+            (
+                Overlay::None | Overlay::Picker(_),
+                Sidebar::Files(Files::Edit(TreeEdit::Rename { from, line })),
+                _,
+            ) => {
+                format!("rename {from} to: {line}")
+            }
+            (
+                Overlay::None | Overlay::Picker(_),
+                Sidebar::Files(Files::Edit(TreeEdit::Delete { path, line, .. })),
+                _,
+            ) => {
                 format!("delete {path}? type y to confirm: {line}")
             }
             (
-                _,
-                TreeEdit::None,
-                Some(Confirm::Discard {
-                    path,
-                    how: Discard::Checkout,
-                }),
-                _,
-            ) => format!("discard changes to {}? y/n", relative(path)),
+                Overlay::None | Overlay::Picker(_),
+                Sidebar::Hidden | Sidebar::Files(Files::Editor | Files::Tree) | Sidebar::Changes(_),
+                Some(notice),
+            ) => notice.to_string(),
             (
-                _,
-                TreeEdit::None,
-                Some(Confirm::Discard {
-                    path,
-                    how: Discard::Delete(_),
-                }),
-                _,
-            ) => format!("delete untracked {}? y/n", relative(path)),
-            (_, TreeEdit::None, Some(Confirm::Create(path)), _) => format!("create {path}? y/n"),
-            (Overlay::None | Overlay::Picker(_), TreeEdit::None, None, Some(notice)) => {
-                notice.to_string()
-            }
-            (Overlay::None | Overlay::Picker(_), TreeEdit::None, None, None) => String::new(),
+                Overlay::None | Overlay::Picker(_),
+                Sidebar::Hidden | Sidebar::Files(Files::Editor | Files::Tree) | Sidebar::Changes(_),
+                None,
+            ) => String::new(),
         };
         let line_height = window.line_height();
         let main = div().flex_1().flex().flex_row().min_h_0();
-        let main = match state.sidebar {
-            Sidebar::Files(focus) | Sidebar::Changes(focus) => main.child(self.sidebar(focus, cx)),
+        let main = match &state.sidebar {
+            Sidebar::Files(Files::Tree | Files::Edit(_)) | Sidebar::Changes(Focus::Sidebar) => {
+                main.child(self.sidebar(Focus::Sidebar, window.viewport_size().width, cx))
+            }
+            Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor) => {
+                main.child(self.sidebar(Focus::Editor, window.viewport_size().width, cx))
+            }
             Sidebar::Hidden => main,
         };
         let areas = self.areas.clone();
@@ -1854,7 +1965,7 @@ impl Render for Workspace {
                 .absolute()
                 .size_full(),
             )
-            .child(self.node(&self.state.layout.root, &mut path, cx));
+            .child(self.node(&self.state.layout.root(), &mut path, cx));
         let main = main.child(editor);
         let entity = cx.entity();
         let input_focus = self.focus.clone();
@@ -1875,10 +1986,10 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(self.theme.background)
-            .text_color(self.theme.text)
-            .font(self.theme.mono[0].clone())
-            .text_size(self.theme.mono_size)
+            .bg(hsla(self.theme.background))
+            .text_color(hsla(self.theme.text))
+            .font(self.fonts.mono[0].clone())
+            .text_size(self.fonts.mono_size)
             // Fallback input handler so the prompt takes text when no text pane is focused.
             .child(
                 canvas(
@@ -1905,6 +2016,7 @@ impl Render for Workspace {
             .children(crate::prompt::prompt(
                 &self.state.overlay,
                 &self.theme,
+                &self.fonts,
                 line_height,
             ));
         self.decorations(content, window, cx)
@@ -1920,8 +2032,8 @@ fn row_button(
     command: ChangesCommand,
     cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
-    let hover = theme.chrome.hover;
-    let text = theme.text;
+    let hover = hsla(theme.chrome.hover);
+    let text = hsla(theme.text);
     div()
         .id(id)
         .flex_none()
@@ -1929,7 +2041,7 @@ fn row_button(
         .flex()
         .justify_center()
         .rounded_sm()
-        .text_color(theme.text_muted)
+        .text_color(hsla(theme.muted))
         .invisible()
         .group_hover("change-row", |style| style.visible())
         .hover(move |style| style.bg(hover).text_color(text))
@@ -1940,4 +2052,9 @@ fn row_button(
             this.changed(cx);
         }))
         .child(glyph)
+}
+
+/// Fits a sidebar width between its minimum and the window, as zed fits its docks.
+fn fit_sidebar(width: Pixels, fonts: &Fonts, window: Pixels) -> Pixels {
+    width.min(window - DIVIDER).max(fonts.ui_size * SIDEBAR_MIN)
 }

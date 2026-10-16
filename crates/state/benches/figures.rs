@@ -16,7 +16,7 @@ const LOOK: Look = Look {
         g: 0xd0,
         b: 0xd0,
     },
-    prose_size: model::typeset::Pt(12.0),
+    prose_size: model::units::Pt(12.0),
     palette: Palette(
         [Rgb {
             r: 0x80,

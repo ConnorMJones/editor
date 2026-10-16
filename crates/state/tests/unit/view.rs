@@ -7,8 +7,8 @@ use crate::harness::Harness;
 fn numbered(rows: u16) -> Harness {
     let text: String = (0..100).map(|i| format!("{i}\n")).collect();
     let mut h = Harness::with("n.txt", &format!("#[0|]#{}", &text[1..]));
-    let focus = h.state.layout.focus;
-    scroll::set_viewport(&mut h.state, focus, Viewport { rows, cols: 80 });
+    let focus = h.state.layout.focus();
+    scroll::measured(&mut h.state, focus, Viewport { rows, cols: 80 });
     h
 }
 
@@ -90,8 +90,8 @@ fn scroll_lines_and_sticky_view_mode() {
 fn visual_line_motion_follows_soft_wrap() {
     let line = "a".repeat(30);
     let mut h = Harness::with("w.txt", &format!("#[a|]#{}\nb\n", &line[1..]));
-    let focus = h.state.layout.focus;
-    scroll::set_viewport(&mut h.state, focus, Viewport { rows: 10, cols: 12 });
+    let focus = h.state.layout.focus();
+    scroll::measured(&mut h.state, focus, Viewport { rows: 10, cols: 12 });
     h.keys("j");
     let (cursor_line, _) = lines(&h);
     assert_eq!(cursor_line, 0);
@@ -104,9 +104,9 @@ fn edits_elsewhere_shift_other_views_anchor() {
     let mut h = numbered(10);
     h.keys("51Gzt");
     let before = h.view().scroll.anchor;
-    let original = h.state.layout.focus;
+    let original = h.state.layout.focus();
     h.keys("<C-w>vggxd");
-    match h.state.layout.panes[original].active() {
+    match h.state.layout.panes()[original].active() {
         Some(view) => assert_eq!(view.text().scroll.anchor, before - 2),
         None => panic!("no view"),
     }

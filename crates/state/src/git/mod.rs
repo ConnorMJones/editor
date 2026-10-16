@@ -1,7 +1,9 @@
-pub mod changes;
 pub mod conflict;
 pub mod diff;
 pub mod diffview;
+pub mod navigate;
+pub mod stage;
+pub mod track;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,10 +11,12 @@ use std::path::{Path, PathBuf};
 use git2::build::CheckoutBuilder;
 use git2::{ErrorCode, IndexEntry, IndexTime, ObjectType, Oid, Repository, Status, StatusOptions};
 use helix_core::Rope;
+use model::command::Direction;
 use model::git::{Change, GitStatus, Group, Kind};
 
+use crate::Repo;
 use crate::git::diff::{Base, BaseRead};
-use crate::project::path::RelPath;
+use crate::project::path::{Folder, RelPath, RelPathError};
 
 /// Change of every non-clean path under the root, plus the status each directory inherits.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -20,9 +24,20 @@ pub struct GitSnapshot {
     /// As reported by git; ignored directories appear once without their contents.
     pub paths: HashMap<RelPath, Change>,
     /// Most urgent non-ignored status among each directory's descendants.
-    pub dirs: HashMap<RelPath, GitStatus>,
+    pub dirs: HashMap<Folder, GitStatus>,
     /// Changed files in sidebar order: by group, then path; a partly staged file appears twice.
     pub changes: Vec<Changed>,
+    pub unlisted: Vec<Unlisted>,
+}
+
+/// A change git reported that has no path under the root to list it by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unlisted {
+    NotUtf8(Vec<u8>),
+    /// The root folder itself, as when it is untracked inside a larger repository.
+    Root(Change),
+    /// A path with `.` or `..` components.
+    Invalid(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,7 +47,7 @@ pub struct Changed {
 }
 
 impl GitSnapshot {
-    pub fn new(paths: HashMap<RelPath, Change>) -> GitSnapshot {
+    pub fn new(paths: HashMap<RelPath, Change>, unlisted: Vec<Unlisted>) -> GitSnapshot {
         let mut changes: Vec<Changed> = paths
             .iter()
             .flat_map(|(path, change)| {
@@ -47,11 +62,30 @@ impl GitSnapshot {
             dirs: aggregate(&paths),
             paths,
             changes,
+            unlisted,
+        }
+    }
+
+    /// The changed file after or before `current` in sidebar order, wrapping around; a partly
+    /// staged file is visited at its first group.
+    pub fn neighbour(&self, current: Option<&RelPath>, direction: Direction) -> Option<&Changed> {
+        let order = self
+            .changes
+            .iter()
+            .filter(|changed| self.paths[&changed.path].groups().first() == Some(&changed.group));
+        let at = current.and_then(|current| order.clone().position(|c| c.path == *current));
+        match (direction, at) {
+            (Direction::Forward, Some(at)) => {
+                order.clone().nth(at + 1).or_else(|| order.clone().next())
+            }
+            (Direction::Forward, None) => order.clone().next(),
+            (Direction::Backward, Some(0) | None) => order.clone().next_back(),
+            (Direction::Backward, Some(at)) => order.clone().nth(at - 1),
         }
     }
 
     pub fn get(&self, path: &RelPath) -> Option<GitStatus> {
-        match (self.paths.get(path), self.dirs.get(path)) {
+        match (self.paths.get(path), self.dirs.get(path.as_str())) {
             (Some(change), _) => Some(change.status()),
             (None, Some(&status)) => Some(status),
             (None, None) => path
@@ -65,8 +99,8 @@ impl GitSnapshot {
 }
 
 /// Recomputes after every refresh so parents always agree with `paths`.
-pub fn aggregate(paths: &HashMap<RelPath, Change>) -> HashMap<RelPath, GitStatus> {
-    let mut dirs: HashMap<RelPath, GitStatus> = HashMap::new();
+pub fn aggregate(paths: &HashMap<RelPath, Change>) -> HashMap<Folder, GitStatus> {
+    let mut dirs: HashMap<Folder, GitStatus> = HashMap::new();
     for (path, change) in paths {
         let status = match change.status() {
             GitStatus::Ignored => continue,
@@ -81,7 +115,7 @@ pub fn aggregate(paths: &HashMap<RelPath, Change>) -> HashMap<RelPath, GitStatus
                 Some(existing) if *existing >= status => break,
                 Some(existing) => *existing = status,
                 None => {
-                    dirs.insert(RelPath(ancestor.to_owned()), status);
+                    dirs.insert(Folder::of(ancestor), status);
                 }
             }
         }
@@ -145,8 +179,10 @@ pub fn status(root: &Path) -> Result<Option<Found>, git2::Error> {
     let workdir = workdir
         .canonicalize()
         .map_err(|e| git2::Error::from_str(&e.to_string()))?;
-    let Ok(prefix) = RelPath::new(&workdir, root) else {
-        return Ok(None);
+    let prefix = match RelPath::new(&workdir, root) {
+        Ok(path) => Folder::Sub(path),
+        Err(RelPathError::Root) => Folder::Root,
+        Err(RelPathError::Outside(_) | RelPathError::NotUtf8(_)) => return Ok(None),
     };
     let mut options = StatusOptions::new();
     options
@@ -157,31 +193,46 @@ pub fn status(root: &Path) -> Result<Option<Found>, git2::Error> {
         .exclude_submodules(true);
     let statuses = repo.statuses(Some(&mut options))?;
     let mut paths = HashMap::with_capacity(statuses.len());
+    let mut unlisted = Vec::new();
     for entry in statuses.iter() {
-        let (Ok(path), Some(change)) = (entry.path(), classify(entry.status())) else {
+        let Some(change) = classify(entry.status()) else {
             continue;
         };
-        let path = path.trim_end_matches('/');
-        let relative = match prefix.is_root() {
-            true => Some(path),
-            false => path
-                .strip_prefix(prefix.as_str())
-                .and_then(|rest| rest.strip_prefix('/')),
+        let path = match entry.path() {
+            Ok(path) => path.trim_end_matches('/'),
+            Err(_) => {
+                unlisted.push(Unlisted::NotUtf8(entry.path_bytes().to_owned()));
+                continue;
+            }
         };
-        match relative {
-            Some(relative) => match RelPath::parse(relative) {
-                Ok(relative) if !relative.is_root() => {
-                    paths.insert(relative, change);
-                }
-                Ok(_) | Err(_) => {}
+        // `None` for a change elsewhere in the repository.
+        let relative = match &prefix {
+            Folder::Root => Some(path),
+            Folder::Sub(prefix) => match path.strip_prefix(prefix.as_str()) {
+                Some("") => Some(""),
+                Some(rest) => rest.strip_prefix('/'),
+                None => None,
             },
+        };
+        match relative.map(RelPath::parse) {
             None => {}
+            Some(Ok(relative)) => {
+                paths.insert(relative, change);
+            }
+            Some(Err(RelPathError::Root)) => unlisted.push(Unlisted::Root(change)),
+            Some(Err(RelPathError::Outside(_) | RelPathError::NotUtf8(_))) => {
+                unlisted.push(Unlisted::Invalid(path.to_owned()))
+            }
         }
+    }
+    match unlisted.as_slice() {
+        [] => {}
+        unlisted => tracing::warn!(?unlisted, "git changes without a path to list"),
     }
     Ok(Some(Found {
         git_dir: repo.path().to_owned(),
         workdir,
-        snapshot: GitSnapshot::new(paths),
+        snapshot: GitSnapshot::new(paths, unlisted),
     }))
 }
 
@@ -212,10 +263,10 @@ pub fn read_bases(
         (None, Some(_)) => head,
         (None, None) => None,
     };
-    let read = |oid: Option<Oid>, known: Option<Oid>| match (oid, oid == known) {
-        (_, true) => Ok(BaseRead::Kept),
-        (None, false) => Ok(BaseRead::Fresh(Base::Absent)),
-        (Some(oid), false) => repo.find_blob(oid).map(|blob| {
+    let read = |oid: Option<Oid>, known: Option<Oid>| match oid {
+        None => Ok(BaseRead::Fresh(Base::Absent)),
+        Some(oid) if known == Some(oid) => Ok(BaseRead::Kept(oid)),
+        Some(oid) => repo.find_blob(oid).map(|blob| {
             BaseRead::Fresh(Base::Blob {
                 oid,
                 text: Rope::from(String::from_utf8_lossy(blob.content()).as_ref()),
@@ -332,3 +383,15 @@ pub fn change_index(git_dir: &Path, path: &RepoPath, op: &IndexOp) -> Result<(),
 /// A `/`-separated path relative to the repository's worktree, which may lie above the root.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RepoPath(pub RelPath);
+
+/// Git dir and repository path of `path`; `None` outside the repository's worktree.
+pub(crate) fn locate(repo: &Repo, path: &Path) -> Option<(PathBuf, RepoPath)> {
+    match repo {
+        Repo::Found {
+            git_dir, workdir, ..
+        } => RelPath::new(workdir, path)
+            .ok()
+            .map(|file| (git_dir.clone(), RepoPath(file))),
+        Repo::Unknown | Repo::None => None,
+    }
+}

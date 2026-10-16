@@ -58,21 +58,21 @@ dimmed. Clicking the strip puts the text cursor on the error.
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space v` | normal, select, rendered | Open a rendered view of the file in a split to the right that follows the text pane; again (from either side) closes it. Focus stays in the text. |
-| `space V` | normal, select, rendered | Toggle the tab between the file's text and its rendered view in place, keeping the position. |
-| `j` / `k`, down / up | rendered | Scroll a little. |
-| `C-d` / `C-u` | rendered | Scroll half a page. |
-| `C-f` / `C-b`, pagedown / pageup, `space space` | rendered | Scroll a page. |
-| `gg` / `ge` / `G`, home / end | rendered | Top / bottom. |
-| `]]` / `[[` | rendered | Next / previous top-level heading. |
-| `esc` | rendered | Back to the text pane it follows; a standalone view toggles back to text. |
-| `f` | rendered | Typst preview: fit pages to the pane width, or each page whole. |
-| `+` / `-` / `=` | rendered | Typst preview: zoom pages in / out from the fit, or back to it. |
-| `h` / `l`, left / right | rendered | Typst preview: pan sideways across pages wider than the pane. |
+| `space v` | normal, select, document, pages | Open a rendered view of the file in a split to the right that follows the text pane; again (from either side) closes it. Focus stays in the text. |
+| `space V` | normal, select, document, pages | Toggle the tab between the file's text and its rendered view in place, keeping the position. |
+| `j` / `k`, down / up | document, pages | Scroll a little. |
+| `C-d` / `C-u` | document, pages | Scroll half a page. |
+| `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Scroll a page. |
+| `gg` / `ge` / `G`, home / end | document, pages | Top / bottom. |
+| `]]` / `[[` | document | Next / previous top-level heading. |
+| `esc` | document, pages | Back to the text pane it follows; a standalone view toggles back to text. |
+| `f` | pages | Fit pages to the pane width, or each page whole. |
+| `+` / `-` / `=` | pages | Zoom pages in / out from the fit, or back to it. |
+| `h` / `l`, left / right | pages | Pan sideways across pages wider than the pane. |
 | `:export-pdf` | typst file | Compile the focused typst file to `<file>.pdf` beside it (also in the `space ?` palette). Markdown export is not supported yet. |
-| mouse | rendered | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
+| mouse | document, pages | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there (in the text pane it follows). Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
 | `gf` | normal, select | Follow the link under the cursor: a wikilink, a markdown link or a URL in a markdown file; elsewhere the URL or file path under the cursor (or the selected text), relative to the file's folder, then the root, as in helix. |
-| `space l` | normal, select, rendered | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
+| `space l` | normal, select, document, pages | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
 | `y` / `n` / `esc` | confirm | Create the note an unresolved link names, or not. |
 
 A following view scrolls to the block under the text cursor, or under the text's top line
@@ -788,39 +788,100 @@ vault; `![[note]]` shows a box naming the resolved note that opens it when click
 | `esc` | `Confirm(No)` |
 | `C-c` | `Confirm(No)` |
 
-## Rendered
+## Document
 
 | Keys | Command |
 | --- | --- |
-| `j` | `Rendered(Scroll(Forward, Lines))` |
-| `down` | `Rendered(Scroll(Forward, Lines))` |
-| `k` | `Rendered(Scroll(Backward, Lines))` |
-| `up` | `Rendered(Scroll(Backward, Lines))` |
-| `C-d` | `Rendered(Scroll(Forward, HalfPageCursor))` |
-| `C-u` | `Rendered(Scroll(Backward, HalfPageCursor))` |
-| `C-f` | `Rendered(Scroll(Forward, Page))` |
-| `pagedown` | `Rendered(Scroll(Forward, Page))` |
-| `space space` | `Rendered(Scroll(Forward, Page))` |
-| `C-b` | `Rendered(Scroll(Backward, Page))` |
-| `pageup` | `Rendered(Scroll(Backward, Page))` |
-| `g g` | `Rendered(Top)` |
-| `home` | `Rendered(Top)` |
-| `g e` | `Rendered(Bottom)` |
-| `G` | `Rendered(Bottom)` |
-| `end` | `Rendered(Bottom)` |
-| `] ]` | `Rendered(Heading(Forward))` |
-| `[ [` | `Rendered(Heading(Backward))` |
-| `esc` | `Rendered(Leave)` |
-| `f` | `Rendered(Fit)` |
-| `+` | `Rendered(Zoom(In))` |
-| `-` | `Rendered(Zoom(Out))` |
-| `=` | `Rendered(Zoom(Reset))` |
-| `h` | `Rendered(Pan(Backward))` |
-| `left` | `Rendered(Pan(Backward))` |
-| `l` | `Rendered(Pan(Forward))` |
-| `right` | `Rendered(Pan(Forward))` |
+| `j` | `Read(Move(Scroll(Forward, Lines)))` |
+| `down` | `Read(Move(Scroll(Forward, Lines)))` |
+| `k` | `Read(Move(Scroll(Backward, Lines)))` |
+| `up` | `Read(Move(Scroll(Backward, Lines)))` |
+| `C-d` | `Read(Move(Scroll(Forward, HalfPageCursor)))` |
+| `C-u` | `Read(Move(Scroll(Backward, HalfPageCursor)))` |
+| `C-f` | `Read(Move(Scroll(Forward, Page)))` |
+| `pagedown` | `Read(Move(Scroll(Forward, Page)))` |
+| `space space` | `Read(Move(Scroll(Forward, Page)))` |
+| `C-b` | `Read(Move(Scroll(Backward, Page)))` |
+| `pageup` | `Read(Move(Scroll(Backward, Page)))` |
+| `g g` | `Read(Move(Top))` |
+| `home` | `Read(Move(Top))` |
+| `g e` | `Read(Move(Bottom))` |
+| `G` | `Read(Move(Bottom))` |
+| `end` | `Read(Move(Bottom))` |
+| `esc` | `Read(Leave)` |
 | `:` | `CommandMode` |
 | `C-k C-s` | `WriteAll` |
+| `] ]` | `Document(Heading(Forward))` |
+| `[ [` | `Document(Heading(Backward))` |
+| `space v` | `RenderedSplit` |
+| `space V` | `ToggleRendered` |
+| `space l` | `Picker(Open(Backlinks))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |
+
+## Pages
+
+| Keys | Command |
+| --- | --- |
+| `j` | `Read(Move(Scroll(Forward, Lines)))` |
+| `down` | `Read(Move(Scroll(Forward, Lines)))` |
+| `k` | `Read(Move(Scroll(Backward, Lines)))` |
+| `up` | `Read(Move(Scroll(Backward, Lines)))` |
+| `C-d` | `Read(Move(Scroll(Forward, HalfPageCursor)))` |
+| `C-u` | `Read(Move(Scroll(Backward, HalfPageCursor)))` |
+| `C-f` | `Read(Move(Scroll(Forward, Page)))` |
+| `pagedown` | `Read(Move(Scroll(Forward, Page)))` |
+| `space space` | `Read(Move(Scroll(Forward, Page)))` |
+| `C-b` | `Read(Move(Scroll(Backward, Page)))` |
+| `pageup` | `Read(Move(Scroll(Backward, Page)))` |
+| `g g` | `Read(Move(Top))` |
+| `home` | `Read(Move(Top))` |
+| `g e` | `Read(Move(Bottom))` |
+| `G` | `Read(Move(Bottom))` |
+| `end` | `Read(Move(Bottom))` |
+| `esc` | `Read(Leave)` |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `f` | `Pages(Fit)` |
+| `+` | `Pages(Zoom(In))` |
+| `-` | `Pages(Zoom(Out))` |
+| `=` | `Pages(Zoom(Reset))` |
+| `h` | `Pages(Pan(Backward))` |
+| `left` | `Pages(Pan(Backward))` |
+| `l` | `Pages(Pan(Forward))` |
+| `right` | `Pages(Pan(Forward))` |
 | `space v` | `RenderedSplit` |
 | `space V` | `ToggleRendered` |
 | `space l` | `Picker(Open(Backlinks))` |

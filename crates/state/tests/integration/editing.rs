@@ -41,10 +41,10 @@ fn save_all_in_insert_mode_keeps_editing() {
     );
     assert_eq!(h.doc().text.to_string(), "abc");
     assert!(h.doc().is_modified());
-    assert_eq!(
+    assert!(matches!(
         disk_of(h.state.buffers.values().next().unwrap()),
-        Disk::Synced
-    );
+        Disk::Synced { .. }
+    ));
 }
 
 #[test]

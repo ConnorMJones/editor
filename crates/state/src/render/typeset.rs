@@ -10,15 +10,18 @@ use helix_core::Rope;
 use model::color::{Palette, Rgb};
 use model::notice::Notice;
 use model::typeset::{
-    Compilation, Diagnostic, DocumentError, Jump, Origin, PagePoint, Pt, SourceFile, Svg,
+    Compilation, Diagnostic, DocumentError, Jump, Origin, PagePoint, SourceFile, Svg,
 };
+use model::units::Pt;
 use slotmap::SlotMap;
 
 use crate::job::Job;
+use crate::render::document::Documents;
 #[cfg(feature = "typeset")]
 use crate::render::markdown::FigureKind;
 use crate::render::markdown::{Block, BlockKind, Figure, Format, SpanKind};
-use crate::render::rendered::{self, Parsed, Preview, Previews, Scroll};
+use crate::render::pages::{self, Compiles, PagesScroll};
+use crate::render::source::Link;
 use crate::text::buffer::{Buffer, BufferId, Content};
 use crate::view::layout::{PaneId, View};
 use crate::{Effect, State};
@@ -68,6 +71,10 @@ pub enum Request {
     },
 }
 
+/// typst named a place that could not be resolved; the typesetter logged why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClickFailed;
+
 pub enum Done {
     Figure {
         figure: Figure,
@@ -89,7 +96,7 @@ pub enum Done {
     },
     Clicked {
         pane: PaneId,
-        jump: Option<Jump>,
+        jump: Result<Option<Jump>, ClickFailed>,
     },
 }
 
@@ -222,7 +229,7 @@ pub fn each_figure(blocks: &[Block], mut f: impl FnMut(Figure, &str)) {
 
 /// Marks the figures of every parse live, requests the new ones and evicts the oldest
 /// unreferenced ones beyond `SPARE`.
-pub fn mark(figures: &mut Figures, previews: &Previews, out: &mut Vec<Effect>) {
+pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>) {
     figures.clock += 1;
     let Figures {
         look,
@@ -230,10 +237,7 @@ pub fn mark(figures: &mut Figures, previews: &Previews, out: &mut Vec<Effect>) {
         clock,
         generation,
     } = figures;
-    for preview in previews.values() {
-        let Preview::Markdown(Parsed { markdown, .. }) = preview else {
-            continue;
-        };
+    for markdown in documents.values().map(|parsed| &parsed.markdown) {
         each_figure(&markdown.blocks, |figure, source| {
             match entries.get_mut(&figure) {
                 Some(entry) => entry.used = *clock,
@@ -283,7 +287,7 @@ pub fn mark(figures: &mut Figures, previews: &Previews, out: &mut Vec<Effect>) {
 
 /// Starts a compile of each shown typst document whose version has none yet, unless one runs.
 pub fn request_pages(
-    previews: &mut Previews,
+    compiles: &mut Compiles,
     buffers: &SlotMap<BufferId, Buffer>,
     root: &Path,
     shown: &[BufferId],
@@ -295,8 +299,8 @@ pub fn request_pages(
                 path,
                 content: Content::Text { doc, .. },
             }),
-            Some(Preview::Typst(typst)),
-        ) = (buffers.get(id), previews.get_mut(id))
+            Some(typst),
+        ) = (buffers.get(id), compiles.get_mut(id))
         else {
             continue;
         };
@@ -320,19 +324,21 @@ pub fn request_pages(
 
 /// `:export-pdf`: compiles the focused typst buffer to `<file>.pdf` beside it.
 pub fn export_pdf(state: &mut State, out: &mut Vec<Effect>) {
-    let focus = state.layout.focus;
-    let Some(view) = state.layout.panes.get(focus).and_then(|pane| pane.active()) else {
+    let focus = state.layout.focus();
+    let Some(view) = state
+        .layout
+        .panes()
+        .get(focus)
+        .and_then(|pane| pane.active())
+    else {
         state.notice = Some(Notice::NoBuffer);
         return;
     };
-    let Some(Buffer { path, content }) = state.buffers.get(view.buffer()) else {
-        state.notice = Some(Notice::NoBuffer);
-        return;
-    };
+    let Buffer { path, content } = &state.buffers[view.buffer()];
     let notice = match (Format::of(path), content) {
         (Some(Format::Typst), Content::Text { doc, .. }) => {
             out.push(Effect::Typeset(Request::Pdf {
-                root: root_of(state.root.path(), path).to_owned(),
+                root: root_of(state.project.root.path(), path).to_owned(),
                 main: path.clone(),
                 text: doc.text.clone(),
                 out: path.with_extension("pdf"),
@@ -386,7 +392,7 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
         } => {
             let State {
                 buffers,
-                previews,
+                compiles,
                 notice,
                 ..
             } = state;
@@ -395,8 +401,8 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                     path,
                     content: Content::Text { doc, .. },
                 }),
-                Some(Preview::Typst(typst)),
-            ) = (buffers.get(buffer), previews.get_mut(buffer))
+                Some(typst),
+            ) = (buffers.get(buffer), compiles.get_mut(buffer))
             else {
                 return;
             };
@@ -410,8 +416,8 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                         version,
                         sizes: (pages.pages.iter())
                             .map(|page| {
-                                u64::from(page.width_pt.to_bits()) << 32
-                                    | u64::from(page.height_pt.to_bits())
+                                u64::from(page.width.0.to_bits()) << 32
+                                    | u64::from(page.height.0.to_bits())
                             })
                             .collect(),
                         pages: pages.pages,
@@ -438,11 +444,11 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
             let State {
                 layout,
                 buffers,
-                previews,
+                compiles,
                 ..
             } = state;
-            let (Some(Buffer { path, .. }), Some(Preview::Typst(typst))) =
-                (buffers.get(buffer), previews.get_mut(buffer))
+            let (Some(Buffer { path, .. }), Some(typst)) =
+                (buffers.get(buffer), compiles.get_mut(buffer))
             else {
                 return;
             };
@@ -458,35 +464,41 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                 Locate::Running | Locate::Idle => Locate::Idle,
             };
             // Views waiting on a source line, or following their source, go to where it landed.
-            for pane in layout.panes.values_mut() {
-                let Some(View::Rendered(view)) = pane.active_mut() else {
+            for pane in layout.panes_mut().map(|(_, pane)| pane) {
+                let Some(View::Pages(view)) = pane.active_mut() else {
                     continue;
                 };
-                match (view.text.buffer() == buffer, view.scroll, view.link, at) {
-                    (true, Scroll::Line(_), _, None) => view.scroll = Scroll::item(0),
-                    (true, Scroll::Line(_), _, Some(at))
-                    | (true, _, rendered::Link::Follows { .. }, Some(at)) => {
-                        view.scroll = Scroll::Point(at)
+                match (
+                    view.source.text.buffer() == buffer,
+                    view.scroll,
+                    view.source.link,
+                    at,
+                ) {
+                    (true, PagesScroll::Line(_), _, None) => view.scroll = PagesScroll::page(0),
+                    (true, PagesScroll::Line(_), _, Some(at))
+                    | (true, _, Link::Follows { .. }, Some(at)) => {
+                        view.scroll = PagesScroll::Point(at)
                     }
                     (true, _, _, _) | (false, _, _, _) => {}
                 }
             }
         }
         Done::Clicked { pane, jump } => match jump {
-            Some(Jump::Source {
+            Ok(Some(Jump::Source {
                 file: SourceFile::Project(path),
                 at,
-            }) => rendered::goto_source(state, pane, path, at, out),
-            Some(Jump::Url(url)) => out.push(Effect::OpenUrl(url)),
-            Some(Jump::Page(at)) => match state.layout.rendered_mut(pane) {
-                Some(view) => view.scroll = Scroll::Point(at),
+            })) => pages::goto_source(state, pane, path, at, out),
+            Ok(Some(Jump::Source {
+                file: file @ (SourceFile::Embedded(_) | SourceFile::Package(_)),
+                ..
+            })) => state.notice = Some(Notice::OutsideProject { file }),
+            Ok(Some(Jump::Url(url))) => out.push(Effect::OpenUrl(url)),
+            Ok(Some(Jump::Page(at))) => match state.layout.pages_mut(pane) {
+                Some(view) => view.scroll = PagesScroll::Point(at),
                 None => {}
             },
-            Some(Jump::Source {
-                file: SourceFile::Embedded(_),
-                ..
-            })
-            | None => {}
+            Ok(None) => {}
+            Err(ClickFailed) => state.notice = Some(Notice::JumpFailed),
         },
         Done::Pdf { out: path, result } => match result {
             Ok(bytes) => out.push(Effect::Job(Job::Export { path, bytes })),
@@ -566,7 +578,10 @@ pub fn run(typesetter: &mut ::typeset::Typesetter, request: Request, text: &mut 
         },
         Request::Click { pane, main, at } => Done::Clicked {
             pane,
-            jump: typesetter.click(&main, at),
+            jump: typesetter.click(&main, at).map_err(|error| {
+                tracing::warn!(%error, "typst click");
+                ClickFailed
+            }),
         },
         Request::Pdf {
             root,
@@ -583,14 +598,10 @@ pub fn run(typesetter: &mut ::typeset::Typesetter, request: Request, text: &mut 
     }
 }
 
-/// Typst previews that read one of `paths` compile again.
-pub fn invalidate(previews: &mut Previews, paths: &[PathBuf]) {
-    for preview in previews.values_mut() {
-        match preview {
-            Preview::Typst(typst) if typst.deps.iter().any(|dep| paths.contains(dep)) => {
-                typst.requested = None
-            }
-            Preview::Typst(_) | Preview::Markdown(_) => {}
-        }
+/// Compiles that read one of `paths` run again.
+pub fn invalidate(compiles: &mut Compiles, paths: &[PathBuf]) {
+    let read = |typst: &&mut Typst| typst.deps.iter().any(|dep| paths.contains(dep));
+    for typst in compiles.values_mut().filter(read) {
+        typst.requested = None;
     }
 }

@@ -21,8 +21,8 @@ fn multi_page_document_gives_each_page() {
     assert_eq!(pages.pages.len(), 3);
     for page in &pages.pages {
         assert_valid(page);
-        assert!((page.width_pt - 283.46).abs() < 0.1, "{}", page.width_pt);
-        assert!((page.height_pt - 170.08).abs() < 0.1, "{}", page.height_pt);
+        assert!((page.width.0 - 283.46).abs() < 0.1, "{}", page.width.0);
+        assert!((page.height.0 - 170.08).abs() < 0.1, "{}", page.height.0);
     }
 }
 

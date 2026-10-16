@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use helix_core::SmallVec;
@@ -11,40 +11,18 @@ use helix_stdx::rope::RopeSliceExt;
 use model::config::OpenAs;
 use model::notice::Notice;
 
-use crate::apply::{self, focused};
-use crate::git::changes::Arrive;
-use crate::project::files::Files;
-use crate::project::path::RelPath;
+use crate::apply::{self, focused_text};
+use crate::git::navigate::Arrive;
+use crate::project::files::FileIndex;
+use crate::project::path::{Folder, RelPath};
 use crate::render::markdown::{self, BlockKind, Format, LinkTarget, Markdown, WikiLink};
 use crate::text::buffer::{BufferId, Target, TextDoc};
-use crate::view::layout::PaneId;
-use crate::{Confirm, Effect, State};
-
-pub struct Vault {
-    /// Bumped whenever the set of indexed files changes.
-    pub generation: u64,
-    /// Built on first use after the generation moved.
-    pub index: Option<Index>,
-}
-
-impl Vault {
-    pub const fn new() -> Vault {
-        Vault {
-            generation: 1,
-            index: None,
-        }
-    }
-}
-
-impl Default for Vault {
-    fn default() -> Vault {
-        Vault::new()
-    }
-}
+use crate::view::layout::{NotInLayout, PaneId};
+use crate::{Confirm, Effect, Overlay, State};
 
 /// File names of the file index, for resolving links by name.
 pub struct Index {
-    /// The `Vault::generation` it was built for.
+    /// The `Indexed::generation` it was built for.
     pub generation: u64,
     pub files: Arc<Vec<RelPath>>,
     /// Lowercased file name to positions in `files`.
@@ -66,24 +44,6 @@ impl Index {
             names,
         }
     }
-}
-
-/// The index for the current generation, built from the file index when missing.
-pub fn index<'a>(vault: &'a mut Vault, files: &Files) -> &'a Index {
-    let Vault { generation, index } = vault;
-    index.get_or_insert_with(|| {
-        let files = match files {
-            Files::Ready(files) => files.clone(),
-            Files::Loading => Arc::default(),
-        };
-        Index::new(*generation, files)
-    })
-}
-
-/// The file index changed: links resolve again on next use.
-pub fn invalidate(vault: &mut Vault) {
-    vault.generation += 1;
-    vault.index = None;
 }
 
 /// A link's file part as written, without heading or alias.
@@ -121,17 +81,17 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
     match dest {
         Dest::Wiki(name) => {
             let name = name.trim().trim_start_matches('/');
-            let path = match RelPath::parse(name) {
-                Ok(path) if !path.is_root() => path,
-                Ok(_) | Err(_) => return Resolution::Invalid,
+            let Ok(path) = RelPath::parse(name) else {
+                return Resolution::Invalid;
             };
             match lookup(index, dir, path.as_str()) {
                 Some(found) => Resolution::File(found),
                 None => {
                     let note = with_md(path.as_str());
-                    Resolution::Missing(match path.parent() {
-                        Some("") | None => RelPath(dir.to_owned()).join(&note),
-                        Some(_) => RelPath(note),
+                    // A bare name is created beside the linking note.
+                    Resolution::Missing(match path.folder() {
+                        Folder::Root => Folder::of(dir).join(&note),
+                        Folder::Sub(_) => RelPath(note),
                     })
                 }
             }
@@ -141,9 +101,8 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
                 Some(rest) => ("", rest),
                 None => (dir, path),
             };
-            let relative = match normalize(base, rest) {
-                Some(relative) if !relative.is_root() => relative,
-                Some(_) | None => return Resolution::Invalid,
+            let Some(relative) = normalize(base, rest) else {
+                return Resolution::Invalid;
             };
             let exists = |path: &RelPath| index.files.binary_search(path).is_ok();
             let note = match Path::new(relative.as_str()).extension() {
@@ -152,7 +111,7 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
             };
             let from_root = match base.is_empty() {
                 true => None,
-                false => normalize("", rest).filter(|path| !path.is_root()),
+                false => normalize("", rest),
             };
             let direct = [Some(&relative), note.as_ref(), from_root.as_ref()]
                 .into_iter()
@@ -198,7 +157,7 @@ fn lookup(index: &Index, dir: &str, wanted: &str) -> Option<RelPath> {
                 (
                     *case,
                     path.as_str().matches('/').count(),
-                    path.parent() != Some(dir),
+                    path.folder_path() != dir,
                     path.as_str().len(),
                     path.as_str(),
                 )
@@ -224,7 +183,8 @@ fn with_md(name: &str) -> String {
     }
 }
 
-/// `rest` applied to folder `base`; `None` when `..` climbs out of the vault.
+/// `rest` applied to folder `base`; `None` when `..` climbs out of the vault or it lands on the
+/// root itself.
 fn normalize(base: &str, rest: &str) -> Option<RelPath> {
     let mut parts: SmallVec<[&str; 8]> = base.split('/').filter(|part| !part.is_empty()).collect();
     for part in rest.split('/') {
@@ -236,7 +196,7 @@ fn normalize(base: &str, rest: &str) -> Option<RelPath> {
             part => parts.push(part),
         }
     }
-    Some(RelPath(parts.join("/")))
+    (!parts.is_empty()).then(|| RelPath(parts.join("/")))
 }
 
 /// Groups links by the file name they name, case-folded and without `.md`: only a file with
@@ -317,7 +277,7 @@ enum Fence {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     Text(PaneId),
-    Rendered(PaneId),
+    Document(PaneId),
 }
 
 /// Follows `target` of note `note`: URLs open in the browser, headings move within the note,
@@ -331,11 +291,11 @@ pub fn follow(
 ) {
     let (pane, arrive) = match origin {
         Origin::Text(pane) => (pane, Arrive::Text),
-        Origin::Rendered(pane) => (pane, Arrive::Rendered),
+        Origin::Document(pane) => (pane, Arrive::Document),
     };
-    match state.layout.panes.contains_key(pane) {
-        true => state.layout.focus = pane,
-        false => return,
+    match state.layout.set_focus(pane) {
+        Ok(()) => {}
+        Err(NotInLayout(_)) => return,
     }
     let (dest, heading) = match target {
         LinkTarget::Url(url) => return out.push(Effect::OpenUrl(url.clone())),
@@ -357,22 +317,28 @@ pub fn follow(
     let note = state
         .buffers
         .get(note)
-        .and_then(|b| RelPath::new(state.root.path(), &b.path).ok());
-    let dir = note.as_ref().and_then(RelPath::parent).unwrap_or("");
-    let index = index(&mut state.vault, &state.files);
-    match resolve(index, dir, dest) {
+        .and_then(|b| RelPath::new(state.project.root.path(), &b.path).ok());
+    let dir = note.as_ref().map_or("", RelPath::folder_path);
+    let FileIndex::Ready(indexed) = &mut state.project.index else {
+        return state.notice = Some(Notice::IndexLoading);
+    };
+    match resolve(indexed.links().0, dir, dest) {
         Resolution::Invalid => {
             let (Dest::Wiki(target) | Dest::Path(target)) = dest;
             state.notice = Some(Notice::LinkNotFound {
                 target: target.to_owned(),
             })
         }
-        Resolution::Missing(path) => state.confirm = Some(Confirm::Create(path)),
+        Resolution::Missing(path) => state.overlay = Overlay::Confirm(Confirm::Create(path)),
         Resolution::File(path) => {
-            let full = path.to_path(state.root.path());
+            let full = path.to_path(state.project.root.path());
+            // A link followed from a rendered view opens the target rendered too, when it can be.
             let arrive = match (arrive, Format::of(&full)) {
-                (Arrive::Rendered, Some(_)) => Arrive::Rendered,
-                (Arrive::Rendered | Arrive::Text | Arrive::Diff, _) => Arrive::Text,
+                (Arrive::Document | Arrive::Pages, Some(Format::Markdown)) => Arrive::Document,
+                (Arrive::Document | Arrive::Pages, Some(Format::Typst)) => Arrive::Pages,
+                (Arrive::Document | Arrive::Pages, None) | (Arrive::Text | Arrive::Diff, _) => {
+                    Arrive::Text
+                }
             };
             // Block references (`#^id`) only open the note.
             let to = heading
@@ -472,14 +438,12 @@ const LOOKAROUND: usize = 1000;
 /// `gf`: follows the link under the primary cursor of a markdown buffer, else opens the URL
 /// or file path under it (or the selected text) relative to the buffer's folder or the root.
 pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
-    let pane = state.layout.focus;
-    let (buffer, rope, range) = match focused(&mut state.layout, &mut state.buffers) {
-        Some((view, doc)) => (view.buffer(), doc.text.clone(), view.selection.primary()),
-        None => {
-            state.notice = Some(Notice::NoBuffer);
-            return;
-        }
-    };
+    let pane = state.layout.focus();
+    let (buffer, rope, range) =
+        match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
+            Some((view, doc)) => (view.buffer(), doc.text.clone(), view.selection.primary()),
+            None => return,
+        };
     let text = rope.slice(..);
     let cursor = text.char_to_byte(range.cursor(text));
     let line = text.byte_to_line(cursor);
@@ -497,9 +461,8 @@ pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
         Some(link) => return follow(state, buffer, &link, Origin::Text(pane), out),
         None => {}
     }
-    let picked = match range.len() > 1 {
-        true => range.fragment(text).trim().to_owned(),
-        false => {
+    let picked = match range.len() {
+        0 | 1 => {
             let start = line_start.max(text.floor_char_boundary(cursor.saturating_sub(LOOKAROUND)));
             let end = text
                 .line_to_byte((line + 1).min(text.len_lines()))
@@ -509,26 +472,29 @@ pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
                 .take_while(|found| start + found.start <= cursor + 1)
                 .find(|found| cursor <= start + found.end)
                 .map(|found| String::from(around.byte_slice(found)))
-                .unwrap_or_default()
         }
+        _ => Some(range.fragment(text).trim().to_owned()).filter(|picked| !picked.is_empty()),
     };
-    match (
-        picked.is_empty(),
-        picked.contains("://") || picked.starts_with("mailto:"),
-    ) {
-        (true, _) => state.notice = Some(Notice::NothingToFollow),
-        (false, true) => out.push(Effect::OpenUrl(picked)),
-        (false, false) => {
+    let Some(picked) = picked else {
+        return state.notice = Some(Notice::NothingToFollow);
+    };
+    match (picked.split_once("://"), picked.strip_prefix("mailto:")) {
+        (Some(_), _) | (_, Some(_)) => out.push(Effect::OpenUrl(picked)),
+        (None, None) => {
             let expanded = helix_stdx::path::expand(&picked).into_owned();
-            let dir = path.parent().map(Path::to_owned);
-            let candidates: [Option<PathBuf>; 2] = match expanded.is_absolute() {
-                true => [Some(expanded), None],
-                false => [
-                    dir.map(|dir| dir.join(&expanded)),
-                    Some(state.root.path().join(&expanded)),
-                ],
+            let found = match expanded.is_absolute() {
+                true => Some(expanded).filter(|path| path.is_file()),
+                false => {
+                    let dir = path.parent().expect("a buffer path names a file");
+                    [
+                        dir.join(&expanded),
+                        state.project.root.path().join(&expanded),
+                    ]
+                    .into_iter()
+                    .find(|path| path.is_file())
+                }
             };
-            match candidates.into_iter().flatten().find(|path| path.is_file()) {
+            match found {
                 Some(found) => {
                     apply::open(state, found, Arrive::Text, None, OpenAs::Permanent, out)
                 }

@@ -13,7 +13,7 @@ pub fn typesetter() -> Typesetter {
 /// Parses the SVG with usvg and checks it has a drawable, non-empty size.
 pub fn assert_valid(svg: &Svg) -> usvg::Tree {
     assert!(
-        svg.width_pt > 0.0 && svg.height_pt > 0.0,
+        svg.width.0 > 0.0 && svg.height.0 > 0.0,
         "empty size: {svg:?}"
     );
     let tree =

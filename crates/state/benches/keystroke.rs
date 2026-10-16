@@ -33,7 +33,7 @@ fn keystroke(c: &mut Criterion) {
         model::config::TabsConfig::default(),
         state::render::typeset::Look {
             text: model::color::Rgb { r: 0, g: 0, b: 0 },
-            prose_size: model::typeset::Pt(12.0),
+            prose_size: model::units::Pt(12.0),
             palette: model::color::Palette([model::color::Rgb { r: 0, g: 0, b: 0 }; 16]),
         },
     )

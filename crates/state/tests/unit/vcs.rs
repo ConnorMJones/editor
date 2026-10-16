@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use git2::Status;
 use model::git::{Change, GitStatus, Group, Kind};
-use state::git::{Changed, GitSnapshot, aggregate, classify};
-use state::project::path::RelPath;
+use state::git::{Changed, GitSnapshot, Unlisted, aggregate, classify};
+use state::project::path::{Folder, RelPath};
 
 fn p(path: &str) -> RelPath {
     RelPath::parse(path).unwrap()
@@ -28,13 +28,16 @@ fn most_urgent_status_bubbles_to_every_ancestor() {
 
 #[test]
 fn ignored_dirs_cover_their_contents() {
-    let snapshot = GitSnapshot::new(HashMap::from([
-        (p("target"), Change::Ignored),
-        (p("a.rs"), Change::Unstaged(Kind::Deleted)),
-    ]));
+    let snapshot = GitSnapshot::new(
+        HashMap::from([
+            (p("target"), Change::Ignored),
+            (p("a.rs"), Change::Unstaged(Kind::Deleted)),
+        ]),
+        Vec::new(),
+    );
     assert_eq!(snapshot.get(&p("target/debug/x")), Some(GitStatus::Ignored));
     assert_eq!(snapshot.get(&p("a.rs")), Some(GitStatus::Deleted));
-    assert_eq!(snapshot.get(&RelPath::ROOT), Some(GitStatus::Deleted));
+    assert_eq!(snapshot.dirs.get(&Folder::Root), Some(&GitStatus::Deleted));
     assert_eq!(snapshot.get(&p("clean.rs")), None);
 }
 
@@ -94,19 +97,22 @@ fn tree_colour_matches_the_old_single_status() {
 
 #[test]
 fn changes_list_in_sidebar_order() {
-    let snapshot = GitSnapshot::new(HashMap::from([
-        (p("z.rs"), Change::Untracked),
-        (p("b.rs"), Change::Unstaged(Kind::Modified)),
-        (
-            p("a.rs"),
-            Change::Both {
-                staged: Kind::Modified,
-                unstaged: Kind::Modified,
-            },
-        ),
-        (p("m.rs"), Change::Conflicted),
-        (p("target"), Change::Ignored),
-    ]));
+    let snapshot = GitSnapshot::new(
+        HashMap::from([
+            (p("z.rs"), Change::Untracked),
+            (p("b.rs"), Change::Unstaged(Kind::Modified)),
+            (
+                p("a.rs"),
+                Change::Both {
+                    staged: Kind::Modified,
+                    unstaged: Kind::Modified,
+                },
+            ),
+            (p("m.rs"), Change::Conflicted),
+            (p("target"), Change::Ignored),
+        ]),
+        Vec::new(),
+    );
     let order: Vec<(Group, &str)> = snapshot
         .changes
         .iter()
@@ -122,4 +128,19 @@ fn changes_list_in_sidebar_order() {
             (Group::Changes, "z.rs"),
         ]
     );
+}
+
+#[test]
+fn a_root_the_enclosing_repository_ignores_is_unlisted_not_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "sub/\n").unwrap();
+    let root = dir.path().join("sub");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "a").unwrap();
+    let found = state::git::status(&root.canonicalize().unwrap())
+        .unwrap()
+        .expect("inside a repository");
+    assert!(found.snapshot.paths.is_empty());
+    assert_eq!(found.snapshot.unlisted, [Unlisted::Root(Change::Ignored)]);
 }
