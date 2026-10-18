@@ -78,6 +78,7 @@
             '';
             meta = {
               description = "A helix-style editor with source review, markdown and typst";
+              license = pkgs.lib.licenses.gpl3Plus;
               mainProgram = "edt";
               platforms = systems;
             };
