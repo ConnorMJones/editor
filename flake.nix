@@ -1,5 +1,5 @@
 {
-  description = "Editor development environment";
+  description = "edt: a helix-style editor with source review, markdown and typst";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -7,41 +7,30 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Must match the vendored helix-core revision so runtime queries compile.
+    # The vendored helix-core revision; vendor/grammars/sources.nix reads its grammar pins and queries.
     helix-src = {
       url = "github:helix-editor/helix/ba40e547426b0f9896c8bdc699a4ab11f2b37dbc";
       flake = false;
     };
   };
 
-  outputs = { nixpkgs, rust-overlay, helix-src, ... }:
+  outputs = { nixpkgs, rust-overlay, ... }:
     let
       systems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
 
-      forAllSystems = nixpkgs.lib.genAttrs systems;
-    in
-    {
-      devShells = forAllSystems (system:
+      perSystem = f: nixpkgs.lib.genAttrs systems (system:
         let
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+        in
+        f {
+          inherit pkgs;
           toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          # perl fails to compile under GCC 15.
-          helixGrammars = pkgs.callPackage "${helix-src}/grammars.nix" {
-            includeGrammarIf = grammar: grammar.name != "perl";
-          };
-          helixRuntime = pkgs.runCommand "helix-runtime" { } ''
-            mkdir -p $out
-            ln -s ${helix-src}/runtime/* $out
-            rm -r $out/grammars
-            ln -s ${helixGrammars} $out/grammars
-          '';
-
           # Loaded with dlopen at runtime by gpui (wgpu, wayland, x11).
           runtimeLibs = with pkgs; [
             wayland
@@ -56,31 +45,66 @@
             libxrandr
             libxcb
           ];
+          buildLibs = with pkgs; [
+            zstd
+            openssl
+            libgit2
+            alsa-lib
+          ];
+        });
+    in
+    {
+      packages = perSystem ({ pkgs, toolchain, runtimeLibs, buildLibs }:
+        let
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+          edt = rustPlatform.buildRustPackage {
+            pname = "edt";
+            version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+            src = pkgs.lib.cleanSource ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+            cargoBuildFlags = [ "-p" "editor" ];
+            # The suites need a display and the `integration` feature; run them from the dev shell.
+            doCheck = false;
+            nativeBuildInputs = with pkgs; [ pkg-config cmake clang makeWrapper ];
+            buildInputs = runtimeLibs ++ buildLibs;
+            postFixup = ''
+              wrapProgram $out/bin/edt --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtimeLibs}
+            '';
+            meta = {
+              description = "A helix-style editor with source review, markdown and typst";
+              mainProgram = "edt";
+              platforms = systems;
+            };
+          };
         in
         {
-          default = pkgs.mkShell {
-            packages = [
-              toolchain
-              pkgs.pkg-config
-              pkgs.cmake
-              pkgs.clang
-              pkgs.mold
-              pkgs.perl
-              pkgs.cargo-criterion
-              pkgs.cargo-show-asm
-              helixRuntime
-            ];
-
-            buildInputs = runtimeLibs ++ (with pkgs; [
-              zstd
-              openssl
-              libgit2
-              alsa-lib
-            ]);
-
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
-            HELIX_RUNTIME = "${helixRuntime}";
-          };
+          inherit edt;
+          default = edt;
         });
+
+      devShells = perSystem ({ pkgs, toolchain, runtimeLibs, buildLibs }: {
+        default = pkgs.mkShell {
+          packages = [
+            toolchain
+            pkgs.pkg-config
+            pkgs.cmake
+            pkgs.clang
+            pkgs.mold
+            pkgs.perl
+            pkgs.cargo-criterion
+            pkgs.cargo-show-asm
+          ];
+
+          buildInputs = runtimeLibs ++ buildLibs;
+
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
+        };
+      });
     };
 }

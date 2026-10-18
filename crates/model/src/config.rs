@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-
 use serde::Deserialize;
 
 use crate::color::Rgb;
+use crate::fonts;
+use crate::scheme::Scheme;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -17,7 +17,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ThemeConfig {
-    pub palette: PathBuf,
+    pub scheme: Scheme,
     /// Replaces base00 as the editor background when set.
     pub background: Option<Rgb>,
     pub diff: DiffColors,
@@ -26,7 +26,7 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         ThemeConfig {
-            palette: PathBuf::from("/etc/stylix/palette.json"),
+            scheme: Scheme::Default,
             background: None,
             diff: DiffColors::default(),
         }
@@ -46,11 +46,11 @@ impl Default for FontConfig {
     fn default() -> Self {
         FontConfig {
             mono: FontSpec {
-                family: "Iosevka Nerd Font".to_owned(),
+                family: fonts::MONO.to_owned(),
                 size_px: 16.0,
             },
             ui: FontSpec {
-                family: "DejaVu Sans".to_owned(),
+                family: fonts::SANS.to_owned(),
                 size_px: 14.0,
             },
             prose: ProseFont::Ui,
@@ -84,7 +84,7 @@ impl FontConfig {
     }
 }
 
-/// `family` must name an installed font; startup fails otherwise.
+/// `family` must name a bundled or installed font; startup fails otherwise.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FontSpec {

@@ -200,7 +200,7 @@ fn rust_captures_fall_back_to_theme_prefixes() {
     );
     assert!(
         doc.highlight.syntax().is_some(),
-        "rust grammar missing from HELIX_RUNTIME"
+        "rust grammar is compiled in"
     );
     let mut frame = Frame::default();
     display::layout(

@@ -75,8 +75,14 @@ merman = { version = "=0.8.0-alpha.5", default-features = false, features = ["sv
 helix-core = { path = "vendor/helix-core" }
 helix-loader = { path = "vendor/helix-loader" }
 helix-stdx = { path = "vendor/helix-stdx" }
+# Grammars and queries compiled into the binary.
+grammars = { path = "vendor/grammars" }
 ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 tree-house = { version = "0.4", default-features = false }
+# Lets tree-house build grammars from the compiled-in parsers.
+tree-house-bindings = { version = "0.3.2", default-features = false, features = ["tree-sitter-language"] }
+tree-sitter-language = "0.1.9"
+cc = "1.8.0"
 nucleo = "0.5.0"
 foldhash = "0.2"
 etcetera = "0.11"

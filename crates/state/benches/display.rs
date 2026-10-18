@@ -25,7 +25,7 @@ fn display(c: &mut Criterion) {
     let doc = TextDoc::new(text, Path::new("window.rs"), &loader);
     assert!(
         doc.highlight.syntax().is_some(),
-        "rust grammar missing from HELIX_RUNTIME"
+        "rust grammar is compiled in"
     );
     let viewport = Viewport {
         rows: 60,

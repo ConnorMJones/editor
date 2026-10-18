@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use helix_core::syntax::HighlighterError;
+use helix_core::syntax::{HighlighterError, LanguageData};
 use helix_core::{Rope, Selection, Transaction};
 use model::notice::Notice;
 use state::text::buffer::{Highlight, ParseJob, TextDoc};
@@ -73,4 +73,35 @@ fn an_unparsed_doc_waits_for_its_tree() {
     ));
     assert!(matches!(doc.highlight.tree(), Err(Notice::SyntaxPending)));
     assert!(doc.highlight.language().is_some());
+}
+
+#[test]
+fn every_compiled_in_grammar_compiles_its_queries() {
+    let loader = helix_core::config::default_lang_loader();
+    let mut compiled = Vec::new();
+    for config in loader.language_configs() {
+        let name = &config.language_id;
+        match grammars::language(config.grammar.as_deref().unwrap_or(name)) {
+            Some(_) => {}
+            None => continue,
+        }
+        let syntax = LanguageData::compile_syntax_config(config, &loader)
+            .unwrap_or_else(|error| panic!("{name}: {error:#}"))
+            .expect("the grammar is compiled in");
+        LanguageData::compile_indent_query(syntax.grammar, config)
+            .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        LanguageData::compile_textobject_query(syntax.grammar, config)
+            .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        compiled.push(name.clone());
+    }
+    for expected in [
+        "rust",
+        "markdown",
+        "markdown.inline",
+        "typst",
+        "tsx",
+        "git-commit",
+    ] {
+        assert!(compiled.iter().any(|name| name == expected), "{expected}");
+    }
 }

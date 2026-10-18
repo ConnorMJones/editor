@@ -56,6 +56,60 @@ pub enum RootError {
     Resolve { path: PathBuf, source: io::Error },
     #[error("{0:?} is not a directory")]
     NotDirectory(PathBuf),
+    #[error("{0:?} is neither a file nor a directory")]
+    NotFileOrDirectory(PathBuf),
+    #[error("cannot look for a repository around {path:?}: {source}")]
+    Repository { path: PathBuf, source: git2::Error },
+}
+
+/// What the editor was started on; a file's root is its repository, else its folder.
+#[derive(Debug)]
+pub enum Launch {
+    Folder(Root),
+    File { root: Root, file: PathBuf },
+}
+
+impl Launch {
+    pub fn resolve(path: &Path) -> Result<Launch, RootError> {
+        let canonical = path.canonicalize().map_err(|source| RootError::Resolve {
+            path: path.to_owned(),
+            source,
+        })?;
+        let kind = canonical
+            .metadata()
+            .map_err(|source| RootError::Resolve {
+                path: canonical.clone(),
+                source,
+            })?
+            .file_type();
+        match kind {
+            kind if kind.is_dir() => Ok(Launch::Folder(Root(canonical))),
+            kind if kind.is_file() => {
+                let folder = canonical
+                    .parent()
+                    .expect("a canonical file has a parent")
+                    .to_owned();
+                let root = match git2::Repository::discover(&folder) {
+                    Ok(repo) => match repo.workdir() {
+                        Some(workdir) => Root::open(workdir)?,
+                        None => Root(folder),
+                    },
+                    Err(error) if error.code() == git2::ErrorCode::NotFound => Root(folder),
+                    Err(source) => {
+                        return Err(RootError::Repository {
+                            path: folder,
+                            source,
+                        });
+                    }
+                };
+                Ok(Launch::File {
+                    root,
+                    file: canonical,
+                })
+            }
+            _ => Err(RootError::NotFileOrDirectory(canonical)),
+        }
+    }
 }
 
 impl Root {

@@ -3,18 +3,13 @@ use typeset::TypesetError;
 
 use crate::{assert_valid, typesetter};
 
-fn palette() -> Palette {
-    serde_json::from_str(include_str!("../../../model/tests/fixtures/palette.json"))
-        .expect("valid palette")
-}
-
 #[test]
 fn flowchart_renders() {
     let mut typesetter = typesetter();
     let svg = typesetter
         .mermaid(
             "flowchart TD\n  A[Start] --> B{Ok?}\n  B -->|yes| C[Done]\n  B -->|no| A",
-            &palette(),
+            &Palette::DEFAULT,
         )
         .expect("flowchart");
     assert_valid(&svg);
@@ -30,7 +25,7 @@ fn sequence_diagram_renders() {
     let svg = typesetter
         .mermaid(
             "sequenceDiagram\n  Alice->>Bob: Hello\n  Bob-->>Alice: Hi\n  Note over Alice,Bob: done",
-            &palette(),
+            &Palette::DEFAULT,
         )
         .expect("sequence diagram");
     assert_valid(&svg);
@@ -39,7 +34,7 @@ fn sequence_diagram_renders() {
 #[test]
 fn palette_change_rebuilds_the_renderer() {
     let mut typesetter = typesetter();
-    let mut palette = palette();
+    let mut palette = Palette::DEFAULT;
     let first = typesetter
         .mermaid("flowchart LR\n  A --> B", &palette)
         .expect("first");
@@ -58,9 +53,9 @@ fn palette_change_rebuilds_the_renderer() {
 #[test]
 fn prose_is_not_a_diagram() {
     let mut typesetter = typesetter();
-    let result = typesetter.mermaid("just some words", &palette());
+    let result = typesetter.mermaid("just some words", &Palette::DEFAULT);
     assert!(result.is_err(), "{result:?}");
-    let result = typesetter.mermaid("flowchart TD\n  A -->", &palette());
+    let result = typesetter.mermaid("flowchart TD\n  A -->", &Palette::DEFAULT);
     assert!(
         matches!(result, Err(TypesetError::Mermaid(_))),
         "{result:?}"
@@ -71,7 +66,7 @@ fn prose_is_not_a_diagram() {
 fn background_is_transparent() {
     let mut typesetter = typesetter();
     let svg = typesetter
-        .mermaid("graph TD\n  A --> B\n", &palette())
+        .mermaid("graph TD\n  A --> B\n", &Palette::DEFAULT)
         .expect("flowchart");
     let text = String::from_utf8_lossy(&svg.bytes);
     let root = &text[..text.find('>').expect("root tag")];

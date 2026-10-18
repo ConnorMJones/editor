@@ -1,6 +1,7 @@
 pub mod color;
 pub mod command;
 pub mod config;
+pub mod fonts;
 pub mod git;
 pub mod job;
 pub mod key;
@@ -8,6 +9,7 @@ pub mod markdown;
 pub mod mode;
 pub mod notice;
 pub mod register;
+pub mod scheme;
 pub mod theme;
 pub mod typeset;
 pub mod units;

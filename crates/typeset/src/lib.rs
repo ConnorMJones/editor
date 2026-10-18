@@ -24,7 +24,7 @@ use typst::introspection::{PagedPosition, Tag};
 use typst::layout::{Abs, Frame, FrameItem, Point, Size};
 use typst::math::EquationElem;
 use typst::syntax::{FileId, RealizeError, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{FontVariant, FontVariations};
+use typst::text::{Font, FontVariant, FontVariations};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_kit::fonts::{self, FontStore};
@@ -36,9 +36,9 @@ use crate::world::{Disk, EMBEDDED, EMBEDDED_NAMESPACE, Slot, TypesetWorld, embed
 const CACHE_AGE: usize = 30;
 
 pub enum FontSource {
-    /// Only typst's bundled fonts (Libertinus, New Computer Modern, DejaVu Sans Mono).
+    /// Only the bundled fonts: typst's (Libertinus, New Computer Modern, DejaVu Sans Mono) and ours.
     Embedded,
-    /// Fonts found through fontconfig, plus typst's bundled fonts.
+    /// Fonts found through fontconfig, plus the bundled fonts.
     SystemAndEmbedded,
 }
 
@@ -104,6 +104,12 @@ impl Typesetter {
     pub fn new(fonts: FontSource, prose: &str) -> Result<Typesetter, TypesetError> {
         let mut store = FontStore::new();
         store.extend(fonts::embedded());
+        store.extend(model::fonts::BUNDLED.into_iter().flat_map(|data| {
+            Font::iter(Bytes::new(data)).map(|font| {
+                let info = font.info().clone();
+                (font, info)
+            })
+        }));
         match fonts {
             FontSource::Embedded => {}
             FontSource::SystemAndEmbedded => store.extend(fonts::system()),

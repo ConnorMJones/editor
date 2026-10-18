@@ -137,9 +137,7 @@ fn markdown_math_renders() {
 
 #[test]
 fn markdown_mermaid_renders() {
-    let palette: Palette =
-        serde_json::from_str(include_str!("../../../model/tests/fixtures/palette.json"))
-            .expect("valid palette");
+    let palette = Palette::DEFAULT;
     let mut typesetter = typesetter();
     let mut count = 0;
     for (path, text) in notes() {

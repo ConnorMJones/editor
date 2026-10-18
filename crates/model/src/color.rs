@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Index;
 use std::str::FromStr;
 
@@ -19,6 +20,16 @@ pub enum RgbError {
     Digit(String),
 }
 
+impl Rgb {
+    pub const fn hex(value: u32) -> Rgb {
+        Rgb {
+            r: (value >> 16) as u8,
+            g: (value >> 8) as u8,
+            b: value as u8,
+        }
+    }
+}
+
 impl FromStr for Rgb {
     type Err = RgbError;
 
@@ -26,11 +37,7 @@ impl FromStr for Rgb {
         let hex = s.strip_prefix('#').unwrap_or(s);
         match hex.len() {
             6 => u32::from_str_radix(hex, 16)
-                .map(|v| Rgb {
-                    r: (v >> 16) as u8,
-                    g: (v >> 8) as u8,
-                    b: v as u8,
-                })
+                .map(Rgb::hex)
                 .map_err(|_| RgbError::Digit(s.to_owned())),
             _ => Err(RgbError::Length(s.to_owned())),
         }
@@ -67,50 +74,62 @@ pub enum Base16 {
     Base0F,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(from = "PaletteFile")]
+impl Base16 {
+    pub const ALL: [Base16; 16] = [
+        Base16::Base00,
+        Base16::Base01,
+        Base16::Base02,
+        Base16::Base03,
+        Base16::Base04,
+        Base16::Base05,
+        Base16::Base06,
+        Base16::Base07,
+        Base16::Base08,
+        Base16::Base09,
+        Base16::Base0A,
+        Base16::Base0B,
+        Base16::Base0C,
+        Base16::Base0D,
+        Base16::Base0E,
+        Base16::Base0F,
+    ];
+}
+
+impl fmt::Display for Base16 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "base{:02X}", *self as u8)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette(pub [Rgb; 16]);
+
+impl Palette {
+    /// The built-in `default` scheme.
+    pub const DEFAULT: Palette = Palette([
+        Rgb::hex(0x061229),
+        Rgb::hex(0x2a3448),
+        Rgb::hex(0x4d5666),
+        Rgb::hex(0x717885),
+        Rgb::hex(0x9a99a3),
+        Rgb::hex(0xb8bbc2),
+        Rgb::hex(0xdbdde0),
+        Rgb::hex(0xffffff),
+        Rgb::hex(0xd07346),
+        Rgb::hex(0xf0a000),
+        Rgb::hex(0xfbd461),
+        Rgb::hex(0x99bf52),
+        Rgb::hex(0x72b9bf),
+        Rgb::hex(0x5299bf),
+        Rgb::hex(0x9989cc),
+        Rgb::hex(0xb08060),
+    ]);
+}
 
 impl Index<Base16> for Palette {
     type Output = Rgb;
 
     fn index(&self, slot: Base16) -> &Rgb {
         &self.0[slot as usize]
-    }
-}
-
-/// Layout of stylix's `palette.json`; non-colour keys are ignored.
-#[derive(Deserialize)]
-struct PaletteFile {
-    base00: Rgb,
-    base01: Rgb,
-    base02: Rgb,
-    base03: Rgb,
-    base04: Rgb,
-    base05: Rgb,
-    base06: Rgb,
-    base07: Rgb,
-    base08: Rgb,
-    base09: Rgb,
-    #[serde(rename = "base0A")]
-    base0a: Rgb,
-    #[serde(rename = "base0B")]
-    base0b: Rgb,
-    #[serde(rename = "base0C")]
-    base0c: Rgb,
-    #[serde(rename = "base0D")]
-    base0d: Rgb,
-    #[serde(rename = "base0E")]
-    base0e: Rgb,
-    #[serde(rename = "base0F")]
-    base0f: Rgb,
-}
-
-impl From<PaletteFile> for Palette {
-    fn from(f: PaletteFile) -> Self {
-        Palette([
-            f.base00, f.base01, f.base02, f.base03, f.base04, f.base05, f.base06, f.base07,
-            f.base08, f.base09, f.base0a, f.base0b, f.base0c, f.base0d, f.base0e, f.base0f,
-        ])
     }
 }

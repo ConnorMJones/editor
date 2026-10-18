@@ -7,6 +7,7 @@ mod tabs;
 mod text;
 mod workspace;
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
@@ -15,15 +16,16 @@ use gpui::{
     App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowDecorations,
     WindowOptions, font, px, size,
 };
-use model::color::Palette;
+use model::command::Command;
 use model::config::{Config, Restore};
 use model::notice::Notice;
+use model::scheme;
 use model::theme::Theme;
 use model::units::{Pt, Px};
 use state::job::JobResult;
 use state::render::typeset::{Look, Request};
 use state::view::panes::{self as commands, Close};
-use state::{Root, State, project::session, project::watch};
+use state::{Launch, State, project::session, project::watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -40,29 +42,29 @@ static ALLOCATOR: tracy_client::ProfiledAllocator<std::alloc::System> =
 
 fn main() -> anyhow::Result<()> {
     let registry = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_env("EDITOR_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer());
     #[cfg(feature = "tracy")]
     let registry = registry.with(tracing_tracy::TracyLayer::default());
     registry.init();
 
     let args = cli::Args::parse();
-    let root = Root::open(&args.path)?;
-    let config = match args.config {
-        Some(path) => read_config(&path)?,
-        None => match xdg_dir("XDG_CONFIG_HOME", ".config")?.join("editor/config.toml") {
-            path if path.exists() => read_config(&path)?,
-            _ => Config::default(),
+    let (root, file) = match Launch::resolve(&args.path)? {
+        Launch::Folder(root) => (root, None),
+        Launch::File { root, file } => (root, Some(file)),
+    };
+    let (config, config_path) = match args.config {
+        Some(path) => (read_config(&path)?, path),
+        None => match xdg_dir("XDG_CONFIG_HOME", ".config")?.join("edt/config.toml") {
+            path if path.exists() => (read_config(&path)?, path),
+            path => (Config::default(), path),
         },
     };
-    let palette_bytes = std::fs::read(&config.theme.palette)
-        .with_context(|| format!("reading palette {:?}", config.theme.palette))?;
-    let palette: Palette = serde_json::from_slice(&palette_bytes)
-        .with_context(|| format!("parsing palette {:?}", config.theme.palette))?;
+    let palette = scheme::load(&config.theme.scheme, &config_path.with_file_name("schemes"))?;
     let session_file = match config.session.restore {
         Restore::Off => SessionFile::Disabled,
         Restore::Last => SessionFile::At(session::file(
-            &xdg_dir("XDG_STATE_HOME", ".local/state")?.join("editor/sessions"),
+            &xdg_dir("XDG_STATE_HOME", ".local/state")?.join("edt/sessions"),
             root.path(),
         )),
     };
@@ -99,6 +101,16 @@ fn main() -> anyhow::Result<()> {
     .context("starting file watcher")?;
 
     gpui_platform::application().run(move |cx: &mut App| {
+        match cx
+            .text_system()
+            .add_fonts(model::fonts::BUNDLED.map(Cow::Borrowed).to_vec())
+        {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::error!(%error, "cannot load the bundled fonts");
+                std::process::exit(1);
+            }
+        }
         let installed = cx.text_system().all_font_names();
         let missing: Vec<&str> = [&config.font.mono, &config.font.ui, config.font.prose()]
             .into_iter()
@@ -156,7 +168,7 @@ fn main() -> anyhow::Result<()> {
                     title: Some(title.into()),
                     ..Default::default()
                 }),
-                app_id: Some("editor".to_owned()),
+                app_id: Some("edt".to_owned()),
                 window_decorations: Some(WindowDecorations::Client),
                 window_min_size: Some(size(px(360.), px(240.))),
                 ..Default::default()
@@ -213,6 +225,14 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         SessionFile::Disabled => {}
+                    }
+                    match file {
+                        Some(file) => state::apply::apply(
+                            &mut workspace.state,
+                            Command::Open(file),
+                            &mut workspace.effects,
+                        ),
+                        None => {}
                     }
                     workspace.flush(cx);
                     cx.spawn(async move |this, cx| {

@@ -8,6 +8,7 @@ mod examples;
 mod harness;
 mod insert;
 mod keymap;
+mod launch;
 mod layout;
 mod markdown;
 mod movement;

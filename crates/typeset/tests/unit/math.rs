@@ -136,6 +136,13 @@ fn system_fonts_load() {
 }
 
 #[test]
+fn the_bundled_fonts_need_no_system_fonts() {
+    for family in [model::fonts::MONO, model::fonts::SANS] {
+        Typesetter::new(typeset::FontSource::Embedded, family).expect("bundled font has an x");
+    }
+}
+
+#[test]
 fn typesetter_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<Typesetter>();

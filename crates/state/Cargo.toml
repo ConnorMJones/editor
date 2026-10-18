@@ -33,6 +33,7 @@ typeset = { workspace = true, optional = true }
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+grammars.workspace = true
 
 [[test]]
 name = "integration"

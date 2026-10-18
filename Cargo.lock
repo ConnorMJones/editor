@@ -1011,9 +1011,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.6.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
+checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1980,7 +1980,6 @@ dependencies = [
  "gpui_platform",
  "helix-core",
  "model",
- "serde_json",
  "slotmap",
  "state",
  "toml 1.1.6+spec-1.1.0",
@@ -2994,6 +2993,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grammars"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "granit-parser"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3304,18 +3311,18 @@ name = "helix-loader"
 version = "25.7.1"
 dependencies = [
  "anyhow",
- "cc",
  "etcetera",
  "globset",
+ "grammars",
  "helix-stdx",
  "log",
  "parking_lot",
  "serde",
  "sha2 0.11.0",
  "tempfile",
- "threadpool",
  "toml 1.1.6+spec-1.1.0",
  "tree-house",
+ "tree-house-bindings",
 ]
 
 [[package]]
@@ -4788,7 +4795,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "serde",
- "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
 ]
@@ -7257,6 +7264,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "git2",
+ "grammars",
  "helix-core",
  "helix-stdx",
  "ignore",
@@ -7716,15 +7724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threadpool"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
-dependencies = [
- "num_cpus",
-]
-
-[[package]]
 name = "tiff"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8079,7 +8078,14 @@ dependencies = [
  "regex-cursor",
  "ropey",
  "thiserror 2.0.21",
+ "tree-sitter-language",
 ]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
 
 [[package]]
 name = "ttf-parser"
