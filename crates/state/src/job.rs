@@ -9,30 +9,23 @@ use git2::Oid;
 use helix_core::regex::bytes::Regex;
 use helix_core::syntax::HighlighterError;
 use helix_core::syntax::Loader;
-use helix_core::{Language, Range, Rope, Syntax};
-use model::command::{Command, Dirs};
-use model::notice::Notice;
+use helix_core::{Language, Rope, Syntax};
+use model::command::Dirs;
 
-use crate::apply::map_views;
-use crate::git::diff::{Base, BaseRead, Diff, Lines, Outcome, Stamp};
+use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
-use crate::project::files::{self, Changed, FileIndex, Indexed, OnIndexed, Rescan, Walked};
-use crate::text::buffer::{BufferId, Content, Disk, Jump, TextDoc};
-use crate::text::highlight;
-
-use crate::input::picker::{self, Hit, Items, Preview, Search};
+use crate::input::picker::{self, Hit, Preview, Search};
+use crate::project::files::{self, Rescan, Walked};
 use crate::project::path::{Folder, RelPath};
-use crate::sidebar::tree::{self, Dir, Entry, EntryKind, Fold, Listing};
-use crate::{
-    Effect, Exit, Overlay, Refresh, Repo, State, git::stage, git::track, project::backlinks,
-    project::watch, render::typeset, request_git,
-};
+use crate::sidebar::tree::{self, Entry, EntryKind};
+use crate::text::buffer::{BufferId, Disk, ReadId, TextDoc};
+use crate::text::highlight;
+use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 
 /// Blocking work run off the UI thread.
 pub enum Job {
-    /// Reads a new buffer's file and builds its document, including the first parse.
     Open {
-        buffer: BufferId,
+        read: ReadId,
         path: PathBuf,
         languages: Arc<Loader>,
     },
@@ -43,13 +36,11 @@ pub enum Job {
         revision: usize,
         dirs: Dirs,
     },
-    /// Writes a typeset export, such as a PDF.
     Export {
         path: PathBuf,
         bytes: Vec<u8>,
     },
 
-    // Workspace: file index, tree, git, disk sync, file operations, search.
     Index {
         root: PathBuf,
     },
@@ -93,7 +84,6 @@ pub enum Job {
         stamp: u64,
     },
 
-    // Git diffs and index changes.
     /// Reads a buffer's HEAD and index blobs, skipping sides still at `known`.
     DiffBase {
         buffer: BufferId,
@@ -117,7 +107,6 @@ pub enum Job {
         path: PathBuf,
         op: IndexOp,
     },
-    /// Parses an opened buffer's text at `version`.
     Parse {
         buffer: BufferId,
         version: u64,
@@ -145,6 +134,21 @@ pub enum ReloadPolicy {
     Discard,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnChange {
+    Replace,
+    Flag,
+}
+
+impl ReloadPolicy {
+    pub fn on_change(self, doc: &TextDoc) -> OnChange {
+        match (self, doc.is_modified()) {
+            (ReloadPolicy::KeepEdits, true) => OnChange::Flag,
+            (ReloadPolicy::KeepEdits, false) | (ReloadPolicy::Discard, _) => OnChange::Replace,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FsOp {
     Create { path: RelPath, kind: EntryKind },
@@ -154,8 +158,8 @@ pub enum FsOp {
 
 pub enum JobResult {
     Opened {
-        buffer: BufferId,
-        read: OpenRead,
+        read: ReadId,
+        result: OpenRead,
     },
     Written {
         buffer: BufferId,
@@ -228,7 +232,6 @@ pub enum JobResult {
     },
 }
 
-/// When a reload reads the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReloadIf {
     ChangedSince(SystemTime),
@@ -261,31 +264,35 @@ fn modified(path: &Path) -> io::Result<SystemTime> {
 }
 
 pub fn run(job: Job) -> JobResult {
+    let kind = match &job {
+        Job::Open { .. } => "open",
+        Job::Write { .. } => "write",
+        Job::Export { .. } => "export",
+        Job::Index { .. } => "index",
+        Job::ListDir { .. } => "list dir",
+        Job::Rescan { .. } => "rescan",
+        Job::GitStatus { .. } => "git status",
+        Job::Reload { .. } => "reload",
+        Job::Fs { .. } => "fs",
+        Job::Grep { .. } => "grep",
+        Job::Preview { .. } => "preview",
+        Job::Links { .. } => "links",
+        Job::DiffBase { .. } => "diff base",
+        Job::Diff { .. } => "diff",
+        Job::GitIndex { .. } => "git index",
+        Job::Parse { .. } => "parse",
+        Job::ParseHead { .. } => "parse head",
+    };
+    let _span = tracing::info_span!("job", kind).entered();
     match job {
         Job::Open {
-            buffer,
+            read,
             path,
             languages,
-        } => {
-            let _span = tracing::info_span!("open job", ?path).entered();
-            let read = match std::fs::read(&path) {
-                Ok(bytes) => match (String::from_utf8(bytes), modified(&path)) {
-                    (Ok(text), Ok(mtime)) => OpenRead::Text {
-                        doc: TextDoc::unparsed(Rope::from(text), &path, &languages),
-                        disk: Disk::Synced { mtime },
-                    },
-                    (Err(_), _) => OpenRead::NotUtf8,
-                    (Ok(_), Err(error)) => OpenRead::Failed(error),
-                },
-                Err(error) if error.kind() == io::ErrorKind::NotFound => OpenRead::Text {
-                    doc: TextDoc::unparsed(Rope::new(), &path, &languages),
-                    disk: Disk::New,
-                },
-                Err(error) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
-                Err(error) => OpenRead::Failed(error),
-            };
-            JobResult::Opened { buffer, read }
-        }
+        } => JobResult::Opened {
+            read,
+            result: read_file(&path, &languages),
+        },
         Job::Write {
             buffer,
             path,
@@ -501,388 +508,55 @@ pub fn run(job: Job) -> JobResult {
     }
 }
 
-/// Applies a finished job.
 pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
+    let kind = match &result {
+        JobResult::Opened { .. } => "opened",
+        JobResult::Written { .. } => "written",
+        JobResult::Exported { .. } => "exported",
+        JobResult::Typeset(_) => "typeset",
+        JobResult::Indexed(_) => "indexed",
+        JobResult::Listed { .. } => "listed",
+        JobResult::Rescanned(_) => "rescanned",
+        JobResult::Git(_) => "git",
+        JobResult::Reloaded { .. } => "reloaded",
+        JobResult::Fs { .. } => "fs",
+        JobResult::Grepped { .. } => "grepped",
+        JobResult::Previewed { .. } => "previewed",
+        JobResult::Linked { .. } => "linked",
+        JobResult::Bases { .. } => "bases",
+        JobResult::Diffed { .. } => "diffed",
+        JobResult::GitIndexed { .. } => "git indexed",
+        JobResult::Parsed { .. } => "parsed",
+        JobResult::HeadParsed { .. } => "head parsed",
+    };
+    let _span = tracing::info_span!("complete", kind).entered();
     match result {
-        JobResult::Opened { buffer, read } => {
-            let Some(entry) = state.buffers.get_mut(buffer) else {
-                return;
-            };
-            let jump = match &mut entry.content {
-                Content::Loading { jump } => jump.take(),
-                Content::Text { .. } => return,
-            };
-            let notice = match read {
-                OpenRead::Text { mut doc, disk } => {
-                    let len = doc.text.len_chars();
-                    out.extend(highlight::job(buffer, &mut doc, &state.languages).map(Effect::Job));
-                    entry.content = Content::Text {
-                        doc,
-                        disk,
-                        diff: Diff::LOADING,
-                    };
-                    track::request_bases(state, buffer, out);
-                    // Views restored from a session were placed before the length was known.
-                    for pane in state.layout.panes_mut().map(|(_, pane)| pane) {
-                        for item in pane.items_mut() {
-                            let view = item.tab.text_mut();
-                            match view.buffer() == buffer {
-                                true => {
-                                    view.selection = view.selection.clone().transform(|range| {
-                                        Range::new(range.anchor.min(len), range.head.min(len))
-                                    });
-                                    view.scroll.anchor = view.scroll.anchor.min(len);
-                                }
-                                false => {}
-                            }
-                        }
-                    }
-                    match jump {
-                        Some(Jump { pane, to }) => crate::apply::place(state, pane, buffer, to),
-                        None => {}
-                    }
-                    return;
-                }
-                OpenRead::NotUtf8 => Notice::NotUtf8 {
-                    path: entry.path.clone(),
-                },
-                OpenRead::NotAFile => Notice::NotAFile {
-                    path: entry.path.clone(),
-                },
-                OpenRead::Failed(error) => Notice::OpenFailed {
-                    path: entry.path.clone(),
-                    error,
-                },
-            };
-            state.notice = Some(notice);
-            crate::apply::remove_buffer(state, buffer);
-        }
-        JobResult::Previewed { path, preview } => match &mut state.overlay {
-            Overlay::Picker(picker) => {
-                let waiting = picker.previews.slots.iter_mut().find(|slot| match slot {
-                    Some((cached, Preview::Loading)) => *cached == path,
-                    Some(_) | None => false,
-                });
-                match waiting {
-                    Some(slot) => *slot = Some((path, preview)),
-                    None => {}
-                }
-            }
-            Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
-        },
+        JobResult::Opened { read, result } => apply::opened(state, read, result, out),
         JobResult::Written {
             buffer,
             path,
             revision,
-            result: Ok(Written { bytes, mtime }),
-        } => {
-            match state
-                .buffers
-                .get_mut(buffer)
-                .map(|entry| &mut entry.content)
-            {
-                Some(Content::Text { doc, disk, .. }) => {
-                    doc.saved_revision = revision;
-                    *disk = Disk::Synced { mtime };
-                }
-                Some(Content::Loading { .. }) | None => {}
-            }
-            state.notice = Some(Notice::Written { path, bytes });
-            request_git(state, out);
-            if let Exit::AfterWrite { buffers } = &mut state.exit {
-                buffers.retain(|waiting| *waiting != buffer);
-                if buffers.is_empty() {
-                    state.exit = Exit::Running;
-                    crate::apply::apply(state, Command::Quit, out);
-                }
-            }
-        }
-        JobResult::Written {
-            buffer,
-            path,
-            result: Err(error),
-            ..
-        } => {
-            tracing::warn!(?path, %error, "write failed");
-            state.notice = Some(Notice::WriteFailed { path, error });
-            match &state.exit {
-                Exit::AfterWrite { buffers } if buffers.contains(&buffer) => {
-                    state.exit = Exit::Running;
-                }
-                Exit::AfterWrite { .. } | Exit::Running => {}
-            }
-        }
-
-        JobResult::Indexed(walked) => {
-            let root = state.project.root.path();
-            let dirs = walked.dirs.iter().map(|dir| dir.to_path(root));
-            out.push(Effect::Watch(
-                std::iter::once(root.to_owned()).chain(dirs).collect(),
-            ));
-            let files = Arc::new(walked.files);
-            match &mut state.overlay {
-                Overlay::Picker(picker) => match &mut picker.items {
-                    Items::Files(items) => {
-                        *items = files.clone();
-                        picker::filter(picker, &mut state.matcher, picker::Narrowing::All);
-                    }
-                    Items::Buffers(_) | Items::Commands | Items::Grep(_) | Items::Backlinks(_) => {}
-                },
-                Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
-            }
-            let then = match &mut state.project.index {
-                FileIndex::Loading { then } => {
-                    let then = *then;
-                    state.project.index = FileIndex::Ready(Indexed::new(files));
-                    then
-                }
-                // A second walk keeps what the first built and resolves links again.
-                FileIndex::Ready(indexed) => {
-                    indexed.files = files;
-                    indexed.changed();
-                    OnIndexed::Nothing
-                }
-            };
-            match then {
-                OnIndexed::Nothing => backlinks::reconcile(state, out),
-                OnIndexed::BuildBacklinks => backlinks::ensure(state, out),
-            }
-            crate::view::panes::request_preview(state, out);
-        }
-        JobResult::Listed { dir, result } => {
-            let entries = match result {
-                Ok(entries) => entries,
-                Err(error) => {
-                    tracing::warn!(%error, %dir, "cannot list directory");
-                    state.tree.dirs.remove(&dir);
-                    tree::rebuild(&mut state.tree);
-                    return;
-                }
-            };
-            out.push(Effect::Watch(vec![dir.to_path(state.project.root.path())]));
-            // Forget expansion state of subdirectories that disappeared.
-            state.tree.dirs.retain(|folder, _| match folder {
-                Folder::Sub(path) if path.folder_path() == dir.as_str() => entries
-                    .iter()
-                    .any(|e| e.kind == EntryKind::Dir && e.name == path.name()),
-                Folder::Sub(_) | Folder::Root => true,
-            });
-            match state.tree.dirs.get_mut(&dir) {
-                Some(existing) => existing.listing = Listing::Loaded(entries),
-                None => {
-                    state.tree.dirs.insert(
-                        dir,
-                        Dir {
-                            fold: Fold::Collapsed,
-                            listing: Listing::Loaded(entries),
-                        },
-                    );
-                }
-            }
-            tree::rebuild(&mut state.tree);
-        }
-        JobResult::Rescanned(rescan) => {
-            let root = state.project.root.path();
-            let new_dirs: Vec<PathBuf> = rescan
-                .subtrees
-                .iter()
-                .flat_map(|(dir, walked)| std::iter::once(dir).chain(&walked.dirs))
-                .map(|dir| dir.to_path(root))
-                .collect();
-            match new_dirs.is_empty() {
-                true => {}
-                false => out.push(Effect::Watch(new_dirs)),
-            }
-            // Before the first walk ends, the walk itself sees these changes.
-            let FileIndex::Ready(indexed) = &mut state.project.index else {
-                return;
-            };
-            match files::apply_rescan(Arc::make_mut(&mut indexed.files), rescan) {
-                Changed::Yes => {
-                    indexed.changed();
-                    backlinks::reconcile(state, out);
-                }
-                Changed::No => {}
-            }
-        }
-        JobResult::Git(result) => {
-            match result {
-                Ok(Some(git::Found {
-                    git_dir,
-                    workdir,
-                    snapshot,
-                })) => {
-                    match &state.project.git {
-                        Repo::Found { git_dir: known, .. } if *known == git_dir => {}
-                        // Commits move refs and the reflog without touching the git dir itself.
-                        Repo::Found { .. } | Repo::None | Repo::Unknown => out.push(Effect::Watch(
-                            [
-                                git_dir.clone(),
-                                git_dir.join("refs/heads"),
-                                git_dir.join("logs"),
-                            ]
-                            .into_iter()
-                            .filter(|dir| dir.is_dir())
-                            .collect(),
-                        )),
-                    }
-                    state.project.git = Repo::Found {
-                        git_dir,
-                        workdir,
-                        snapshot,
-                    };
-                    track::request_all_bases(state, out);
-                }
-                Ok(None) => {
-                    state.project.git = Repo::None;
-                    track::request_all_bases(state, out);
-                }
-                Err(error) => tracing::warn!(%error, "git status failed"),
-            }
-            match state.project.refresh {
-                Refresh::Queued => {
-                    state.project.refresh = Refresh::Idle;
-                    request_git(state, out);
-                }
-                Refresh::Running | Refresh::Idle => state.project.refresh = Refresh::Idle,
-            }
-        }
+            result,
+        } => apply::written(state, buffer, path, revision, result, out),
+        JobResult::Exported { path, result } => typeset::exported(state, path, result),
+        JobResult::Typeset(done) => typeset::finish(state, done, out),
+        JobResult::Indexed(walked) => files::indexed(state, walked, out),
+        JobResult::Listed { dir, result } => tree::listed(state, dir, result, out),
+        JobResult::Rescanned(rescan) => files::rescanned(state, rescan, out),
+        JobResult::Git(result) => crate::git_refreshed(state, result, out),
         JobResult::Reloaded {
             buffer,
             read,
             policy,
-        } => {
-            let State {
-                buffers,
-                layout,
-                languages,
-                notice,
-                ..
-            } = state;
-            let Some(entry) = buffers.get_mut(buffer) else {
-                return;
-            };
-            // The pending open reads the file itself.
-            let Content::Text { doc, disk, .. } = &mut entry.content else {
-                return;
-            };
-            let keep = match (doc.is_modified(), policy) {
-                (true, ReloadPolicy::KeepEdits) => true,
-                (false, _) | (true, ReloadPolicy::Discard) => false,
-            };
-            match (read, keep) {
-                (DiskRead::Unchanged, _) => {}
-                (DiskRead::Missing, _) => {
-                    *disk = Disk::Deleted;
-                    *notice = Some(Notice::DeletedOnDisk {
-                        path: entry.path.clone(),
-                    });
-                }
-                (DiskRead::NotUtf8, _) => {
-                    *notice = Some(Notice::NotUtf8 {
-                        path: entry.path.clone(),
-                    })
-                }
-                (DiskRead::Failed(error), _) => {
-                    tracing::warn!(%error, path = ?entry.path, "reload failed");
-                    *notice = Some(Notice::ReloadFailed {
-                        path: entry.path.clone(),
-                        error,
-                    });
-                }
-                (DiskRead::Changed { mtime, .. }, true) => {
-                    *disk = Disk::ChangedExternally { mtime };
-                    *notice = Some(Notice::ChangedOnDisk {
-                        path: entry.path.clone(),
-                    });
-                }
-                (DiskRead::Changed { text, mtime }, false) => {
-                    let tx = helix_core::diff::compare_ropes(&doc.text, &text);
-                    let selection = layout.selection_of(buffer);
-                    // Unsaved edits stay their own undo step below the reload.
-                    doc.commit(&selection);
-                    doc.apply(&tx, &selection, languages);
-                    map_views(layout, buffer, tx.changes(), doc.text.slice(..));
-                    doc.commit(&selection.map(tx.changes()));
-                    doc.saved_revision = doc.history.current_revision();
-                    *disk = Disk::Synced { mtime };
-                }
-            }
-        }
-        JobResult::Fs {
-            op,
-            result: Err(error),
-        } => {
-            let path = match &op {
-                FsOp::Create { path, .. } | FsOp::Remove { path, .. } => path,
-                FsOp::Rename { from, .. } => from,
-            };
-            state.notice = Some(Notice::FileOpFailed {
-                path: path.to_path(state.project.root.path()),
-                error,
-            });
-        }
-        JobResult::Fs { op, result: Ok(()) } => {
-            let root = state.project.root.path().to_owned();
-            let changed = match op {
-                FsOp::Create { path, kind } => {
-                    let changed = vec![path.to_path(&root)];
-                    match kind {
-                        EntryKind::File => {
-                            crate::apply::apply(state, Command::Open(path.to_path(&root)), out);
-                            crate::view::panes::focus_editor(state);
-                        }
-                        EntryKind::Dir => {}
-                    }
-                    changed
-                }
-                FsOp::Rename { from, to } => {
-                    for buffer in state.buffers.values_mut() {
-                        let Ok(rel) = RelPath::new(&root, &buffer.path) else {
-                            continue;
-                        };
-                        match rel.is_within(&from) {
-                            true => buffer.path = rel.rebase(&from, &to).to_path(&root),
-                            false => {}
-                        }
-                    }
-                    let moved: Vec<(RelPath, Dir)> = (state.tree.dirs)
-                        .extract_if(
-                            |folder, _| matches!(folder, Folder::Sub(dir) if dir.is_within(&from)),
-                        )
-                        .filter_map(|(folder, entry)| match folder {
-                            Folder::Sub(dir) => Some((dir.rebase(&from, &to), entry)),
-                            Folder::Root => None,
-                        })
-                        .collect();
-                    for (dir, entry) in moved {
-                        state.tree.dirs.insert(Folder::Sub(dir), entry);
-                    }
-                    vec![from.to_path(&root), to.to_path(&root)]
-                }
-                FsOp::Remove { path, .. } => {
-                    state.tree.dirs.retain(
-                        |folder, _| !matches!(folder, Folder::Sub(dir) if dir.is_within(&path)),
-                    );
-                    vec![path.to_path(&root)]
-                }
-            };
-            tree::rebuild(&mut state.tree);
-            watch::changed(state, changed, out);
-        }
+        } => apply::reloaded(state, buffer, read, policy),
+        JobResult::Fs { op, result } => tree::fs_done(state, op, result, out),
+        JobResult::Grepped {
+            generation,
+            hits,
+            search,
+        } => picker::grepped(state, generation, hits, search, out),
+        JobResult::Previewed { path, preview } => picker::previewed(state, path, preview),
         JobResult::Linked { stamp, reads } => backlinks::linked(state, stamp, reads, out),
-        JobResult::Typeset(done) => typeset::finish(state, done, out),
-        JobResult::Exported {
-            path,
-            result: Ok(bytes),
-        } => state.notice = Some(Notice::Exported { path, bytes }),
-        JobResult::Exported {
-            path,
-            result: Err(error),
-        } => {
-            tracing::warn!(?path, %error, "export failed");
-            state.notice = Some(Notice::WriteFailed { path, error });
-        }
         JobResult::Bases {
             buffer,
             path,
@@ -899,33 +573,30 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             buffer,
             version,
             result,
-        } => highlight::parsed(state, buffer, version, result, out),
+        } => highlight::parsed(state, buffer, version, result),
         JobResult::HeadParsed { buffer, oid, doc } => {
             crate::git::diffview::head_parsed(state, buffer, oid, doc)
         }
-        JobResult::Grepped {
-            generation,
-            hits,
-            search,
-        } => {
-            match &mut state.overlay {
-                Overlay::Picker(picker) => match &mut picker.items {
-                    Items::Grep(grep) if grep.generation == generation => {
-                        grep.hits = hits;
-                        grep.search = search;
-                        picker.matches.clear();
-                        picker.matches.extend(0..grep.hits.len() as u32);
-                        picker.cursor = 0;
-                    }
-                    Items::Grep(_)
-                    | Items::Files(_)
-                    | Items::Buffers(_)
-                    | Items::Commands
-                    | Items::Backlinks(_) => {}
-                },
-                Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
-            }
-            crate::view::panes::request_preview(state, out);
-        }
+    }
+}
+
+/// Reads `path` into a document; a missing file opens empty, to be created on write.
+pub fn read_file(path: &Path, languages: &Loader) -> OpenRead {
+    let _span = tracing::info_span!("read", ?path).entered();
+    match std::fs::read(path) {
+        Ok(bytes) => match (String::from_utf8(bytes), modified(path)) {
+            (Ok(text), Ok(mtime)) => OpenRead::Text {
+                doc: TextDoc::unparsed(Rope::from(text), path, languages),
+                disk: Disk::Synced { mtime },
+            },
+            (Err(_), _) => OpenRead::NotUtf8,
+            (Ok(_), Err(error)) => OpenRead::Failed(error),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => OpenRead::Text {
+            doc: TextDoc::unparsed(Rope::new(), path, languages),
+            disk: Disk::New,
+        },
+        Err(error) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
+        Err(error) => OpenRead::Failed(error),
     }
 }

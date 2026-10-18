@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use git2::build::CheckoutBuilder;
 use git2::{ErrorCode, IndexEntry, IndexTime, ObjectType, Oid, Repository, Status, StatusOptions};
-use helix_core::Rope;
+use helix_core::{Rope, SmallVec, smallvec};
 use model::command::Direction;
 use model::git::{Change, GitStatus, Group, Kind};
 
@@ -40,10 +40,77 @@ pub enum Unlisted {
     Invalid(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// One Changes row; a partly staged file has a row under Staged and one under Changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Changed {
-    pub group: Group,
     pub path: RelPath,
+    pub entry: Entry,
+}
+
+/// What a row lists of its file's change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    Conflict,
+    /// The index's change; `unstaged` is the worktree's change on top of it.
+    Staged {
+        kind: Kind,
+        unstaged: Option<Kind>,
+    },
+    Unstaged(Work),
+}
+
+/// A worktree change the index does not hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Work {
+    Untracked,
+    /// The worktree's change; `staged` is the index's change beneath it.
+    Changed {
+        kind: Kind,
+        staged: Option<Kind>,
+    },
+}
+
+impl Entry {
+    /// The rows listing `change`, in group order; an ignored path has none.
+    pub fn of(change: Change) -> SmallVec<[Entry; 2]> {
+        match change {
+            Change::Ignored => smallvec![],
+            Change::Conflicted => smallvec![Entry::Conflict],
+            Change::Staged(kind) => smallvec![Entry::Staged {
+                kind,
+                unstaged: None
+            }],
+            Change::Unstaged(kind) => {
+                smallvec![Entry::Unstaged(Work::Changed { kind, staged: None })]
+            }
+            Change::Untracked => smallvec![Entry::Unstaged(Work::Untracked)],
+            Change::Both { staged, unstaged } => smallvec![
+                Entry::Staged {
+                    kind: staged,
+                    unstaged: Some(unstaged)
+                },
+                Entry::Unstaged(Work::Changed {
+                    kind: unstaged,
+                    staged: Some(staged)
+                }),
+            ],
+        }
+    }
+
+    pub fn group(self) -> Group {
+        match self {
+            Entry::Conflict => Group::Conflicts,
+            Entry::Staged { .. } => Group::Staged,
+            Entry::Unstaged(_) => Group::Changes,
+        }
+    }
+}
+
+impl Changed {
+    /// Sidebar order, and what the list cursor keeps across refreshes.
+    pub fn key(&self) -> (Group, &RelPath) {
+        (self.entry.group(), &self.path)
+    }
 }
 
 impl GitSnapshot {
@@ -55,13 +122,13 @@ impl GitSnapshot {
         let mut changes: Vec<Changed> = paths
             .iter()
             .flat_map(|(path, change)| {
-                change.groups().iter().map(|&group| Changed {
-                    group,
+                Entry::of(*change).into_iter().map(|entry| Changed {
                     path: path.clone(),
+                    entry,
                 })
             })
             .collect();
-        changes.sort_unstable();
+        changes.sort_unstable_by(|a, b| a.key().cmp(&b.key()));
         GitSnapshot {
             dirs: aggregate(&paths),
             paths,
@@ -71,13 +138,14 @@ impl GitSnapshot {
         }
     }
 
-    /// The changed file after or before `current` in sidebar order, wrapping around; a partly
-    /// staged file is visited at its first group.
+    /// Wraps around; a partly staged file is visited at its first group.
     pub fn neighbour(&self, current: Option<&RelPath>, direction: Direction) -> Option<&Changed> {
-        let order = self
-            .changes
-            .iter()
-            .filter(|changed| self.paths[&changed.path].groups().first() == Some(&changed.group));
+        let order = self.changes.iter().filter(|changed| match changed.entry {
+            Entry::Unstaged(Work::Changed {
+                staged: Some(_), ..
+            }) => false,
+            Entry::Conflict | Entry::Staged { .. } | Entry::Unstaged(_) => true,
+        });
         let at = current.and_then(|current| order.clone().position(|c| c.path == *current));
         match (direction, at) {
             (Direction::Forward, Some(at)) => {
@@ -164,7 +232,6 @@ pub fn classify(status: Status) -> Option<Change> {
     }
 }
 
-/// A repository holding the root.
 pub struct Found {
     pub git_dir: PathBuf,
     /// Canonical, so buffer paths strip it directly.
@@ -243,8 +310,7 @@ pub fn status(root: &Path) -> Result<Option<Found>, git2::Error> {
     }))
 }
 
-/// Reads `path`'s HEAD and index blobs; a side whose id is still `known` is not read again.
-/// A conflicted path compares its index side against HEAD.
+/// A side still at `known` is not read again; a conflicted path compares its index to HEAD.
 pub fn read_bases(
     git_dir: &Path,
     path: &RepoPath,

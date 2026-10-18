@@ -10,7 +10,6 @@ use state::git::diff::{Base, BaseRead, Bases, Diff, Hunk, Stage, Tracked, stage}
 use state::git::stage::Discard;
 use state::git::{RepoPath, track};
 use state::project::path::RelPath;
-use state::text::buffer::Content;
 
 use crate::harness::Harness;
 
@@ -63,17 +62,9 @@ pub fn staged_text(repo: &Repository, name: &str) -> Option<String> {
 }
 
 fn tracked(h: &Harness) -> &Tracked {
-    match &h.state.buffers[h.view().buffer()].content {
-        Content::Text {
-            diff:
-                Diff {
-                    bases: Bases::Tracked(tracked),
-                    ..
-                },
-            ..
-        } => tracked,
-        Content::Text { .. } => panic!("buffer is not tracked"),
-        Content::Loading { .. } => panic!("buffer is still loading"),
+    match &h.state.buffers[h.view().buffer()].diff.bases {
+        Bases::Tracked(tracked) => tracked,
+        Bases::NoRepo | Bases::Loading { .. } | Bases::Untracked => panic!("buffer is not tracked"),
     }
 }
 
@@ -299,20 +290,15 @@ fn diff_refreshes_after_an_external_commit() {
     assert_eq!(tracked(&h).hunks.len(), 1);
     commit(&repo, "external");
     assert!(
-        h.wait_for_events(
-            |state| match &state.buffers.values().next().unwrap().content {
-                Content::Text {
-                    doc,
-                    diff:
-                        Diff {
-                            bases: Bases::Tracked(tracked),
-                            ..
-                        },
-                    ..
-                } => tracked.is_fresh(doc.version) && tracked.hunks.is_empty(),
-                Content::Text { .. } | Content::Loading { .. } => false,
+        h.wait_for_events(|state| {
+            let buffer = state.buffers.values().next().unwrap();
+            match &buffer.diff.bases {
+                Bases::Tracked(tracked) => {
+                    tracked.is_fresh(buffer.doc.version) && tracked.hunks.is_empty()
+                }
+                Bases::NoRepo | Bases::Loading { .. } | Bases::Untracked => false,
             }
-        ),
+        }),
         "the commit's ref and index updates refresh the bases"
     );
 }
@@ -332,10 +318,10 @@ fn new_file_in_the_index_is_one_staged_hunk() {
     assert_eq!(staged_text(&repo, "n.txt").unwrap(), "");
 
     h.keys(":o u.txt<ret>");
-    match &h.state.buffers[h.view().buffer()].content {
-        Content::Text { diff, .. } => assert!(matches!(diff.bases, Bases::Untracked)),
-        Content::Loading { .. } => panic!("still loading"),
-    }
+    assert!(matches!(
+        h.state.buffers[h.view().buffer()].diff.bases,
+        Bases::Untracked
+    ));
     h.keys("<space>hs");
     assert!(matches!(h.state.notice, Some(Notice::NotTracked { .. })));
 }

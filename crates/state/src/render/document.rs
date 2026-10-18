@@ -12,7 +12,7 @@ use crate::project::files::FileIndex;
 use crate::project::path::RelPath;
 use crate::render::markdown::{self, Base, BlockKind, Callout, CalloutFold, Markdown};
 use crate::render::{Opening, Rendering, step, typeset};
-use crate::text::buffer::{Buffer, BufferId, Content, TextDoc};
+use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::panes;
 use crate::view::tab::{Beside, BesideMut, Showing, Tab};
@@ -199,13 +199,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             break;
         };
         let index = indexed.links().0;
-        let Buffer {
-            path,
-            content: Content::Text { doc, .. },
-        } = &buffers[entry.buffer]
-        else {
-            continue;
-        };
+        let Buffer { path, doc, .. } = &buffers[entry.buffer];
         match documents.get(entry.buffer) {
             Some(parsed)
                 if parsed.version == doc.version && parsed.generation == index.generation => {}
@@ -239,13 +233,13 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         Parses::Changed => typeset::mark(figures, documents, out),
     }
     for entry in &shown {
-        let doc = buffers[entry.buffer].doc();
+        let doc = &buffers[entry.buffer].doc;
         let Some((text, view, beside)) = layout.document_mut(entry.pane) else {
             continue;
         };
-        let (doc, markdown) = match (doc, documents.get(entry.buffer)) {
-            (Some(doc), Some(parsed)) if parsed.version == doc.version => (doc, &parsed.markdown),
-            (_, Some(_) | None) => continue,
+        let markdown = match documents.get(entry.buffer) {
+            Some(parsed) if parsed.version == doc.version => &parsed.markdown,
+            Some(_) | None => continue,
         };
         let last = markdown.roots.len().saturating_sub(1);
         let remap = reparsed.contains(&entry.buffer);
@@ -307,9 +301,7 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
         BesideMut::Source(..) | BesideMut::Alone => return,
     };
     let buffer = text.buffer();
-    let Some(doc) = buffers[buffer].doc() else {
-        return;
-    };
+    let doc = &buffers[buffer].doc;
     let Some(line) =
         markdown(documents, buffer, doc).and_then(|markdown| markdown.item_line(to.item))
     else {
@@ -325,14 +317,7 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
 }
 
 /// A scroll key on the focused document view; moves wait for the line to resolve into a place.
-pub fn moved(state: &mut State, motion: ReadMove) {
-    let focus = state.layout.focus();
-    let State {
-        layout, documents, ..
-    } = state;
-    let Some((text, view, _)) = layout.document_mut(focus) else {
-        return;
-    };
+pub fn moved(view: &mut DocumentState, parsed: Option<&Parsed>, motion: ReadMove) {
     let Some(from) = view.scroll.anchor() else {
         return;
     };
@@ -353,8 +338,7 @@ pub fn moved(state: &mut State, motion: ReadMove) {
         }
         ReadMove::Top => DocumentScroll::item(0),
         ReadMove::Bottom => {
-            let items =
-                (documents.get(text.buffer())).map_or(0, |parsed| parsed.markdown.roots.len());
+            let items = parsed.map_or(0, |parsed| parsed.markdown.roots.len());
             DocumentScroll::item(items.saturating_sub(1))
         }
     };
@@ -413,32 +397,28 @@ pub fn click(state: &mut State, pane: PaneId, click: BlockClick) {
     let State {
         layout, buffers, ..
     } = state;
-    let Some((text, _, _)) = layout.document_mut(pane) else {
+    // Closed or left the mode since the frame drew the block.
+    let Some((text, view, beside)) = layout.document_mut(pane) else {
         return;
     };
-    let buffer = text.buffer();
-    let Some(doc) = buffers[buffer]
-        .doc()
-        .filter(|doc| doc.version == click.version)
-    else {
-        return;
-    };
+    let doc = &buffers[text.buffer()].doc;
+    match doc.version == click.version {
+        true => {}
+        false => return,
+    }
     text.selection = Selection::point(doc.text.line_to_char(click.line));
+    match beside {
+        BesideMut::Source(seen @ Some(_), _) => {
+            let rope = doc.text.slice(..);
+            *seen = (view.scroll.anchor()).map(|at| DocumentSeen {
+                cursor: click.line,
+                top: rope.char_to_line(text.scroll.anchor.min(rope.len_chars())),
+                item: at.item,
+            });
+        }
+        BesideMut::Source(None, _) | BesideMut::Alone => {}
+    }
     panes::focus_pane(state, pane);
-    let State {
-        layout, buffers, ..
-    } = state;
-    let (Some((text, view, BesideMut::Source(seen @ Some(_), _))), Some(doc)) =
-        (layout.document_mut(pane), buffers[buffer].doc())
-    else {
-        return;
-    };
-    let rope = doc.text.slice(..);
-    *seen = (view.scroll.anchor()).map(|at| DocumentSeen {
-        cursor: click.line,
-        top: rope.char_to_line(text.scroll.anchor.min(rope.len_chars())),
-        item: at.item,
-    });
 }
 
 /// Flips the task checkbox whose `[` sits at byte `marker` of `buffer` at `version`, as one
@@ -450,8 +430,8 @@ pub fn toggle_task(state: &mut State, buffer: BufferId, version: u64, marker: us
         languages,
         ..
     } = state;
-    let Some(doc) =
-        (buffers.get_mut(buffer).and_then(Buffer::doc_mut)).filter(|doc| doc.version == version)
+    let Some(doc) = (buffers.get_mut(buffer).map(|buffer| &mut buffer.doc))
+        .filter(|doc| doc.version == version)
     else {
         return;
     };

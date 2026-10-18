@@ -3,7 +3,7 @@ use std::path::Path;
 use helix_core::syntax::HighlighterError;
 use helix_core::{Rope, Selection, Transaction};
 use model::notice::Notice;
-use state::text::buffer::{Highlight, TextDoc};
+use state::text::buffer::{Highlight, ParseJob, TextDoc};
 
 /// Top-level node kinds and the root's byte length.
 fn shape(doc: &TextDoc) -> (Vec<String>, u32) {
@@ -13,7 +13,7 @@ fn shape(doc: &TextDoc) -> (Vec<String>, u32) {
 }
 
 #[test]
-fn a_failed_parse_is_retried_on_the_next_edit() {
+fn a_failed_parse_waits_for_a_background_parse_on_the_next_edit() {
     let loader = helix_core::config::default_lang_loader();
     let mut doc = TextDoc::new(Rope::from("fn a() {}\n"), Path::new("a.rs"), &loader);
     let language = doc.highlight.language().expect("rust");
@@ -25,13 +25,13 @@ fn a_failed_parse_is_retried_on_the_next_edit() {
 
     let tx = Transaction::change(&doc.text, [(0, 0, Some("struct B;\n".into()))].into_iter());
     doc.apply(&tx, &Selection::point(0), &loader);
-    assert_eq!(
-        shape(&doc),
-        (
-            vec!["struct_item".to_owned(), "function_item".to_owned()],
-            20
-        )
-    );
+    assert!(matches!(
+        doc.highlight,
+        Highlight::Parsing {
+            job: ParseJob::Wanted,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -66,7 +66,10 @@ fn an_unparsed_doc_waits_for_its_tree() {
     let doc = TextDoc::unparsed(Rope::from("fn a() {}\n"), Path::new("a.rs"), &loader);
     assert!(matches!(
         doc.highlight,
-        Highlight::Parsing { version: 0, .. }
+        Highlight::Parsing {
+            job: ParseJob::Wanted,
+            ..
+        }
     ));
     assert!(matches!(doc.highlight.tree(), Err(Notice::SyntaxPending)));
     assert!(doc.highlight.language().is_some());

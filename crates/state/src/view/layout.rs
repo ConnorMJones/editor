@@ -14,13 +14,11 @@ new_key_type! {
     pub struct PaneId;
 }
 
-/// Panes arranged in a split tree.
 pub struct Layout {
     // Private: the leaves of `root` are exactly the keys of `panes`, and `focus` is one of them.
     panes: SlotMap<PaneId, Pane>,
     root: Node,
     focus: PaneId,
-    /// Last stamp handed to an activated tab.
     pub clock: Tick,
 }
 
@@ -166,7 +164,7 @@ impl Layout {
         &mut self.panes[self.focus]
     }
 
-    /// A pane the caller knows is live: the focus, or a link's pane.
+    /// A pane the caller knows is live, such as the focus.
     pub fn pane(&mut self, pane: PaneId) -> &mut Pane {
         &mut self.panes[pane]
     }
@@ -174,6 +172,13 @@ impl Layout {
     /// A pane id kept from earlier, such as the host's last frame; `None` once it closed.
     pub fn find_pane(&mut self, pane: PaneId) -> Option<&mut Pane> {
         self.panes.get_mut(pane)
+    }
+
+    /// The tab of `buffer` in `pane`, while both are open.
+    pub fn tab_of(&mut self, pane: PaneId, buffer: BufferId) -> Option<&mut Tab> {
+        let pane = self.panes.get_mut(pane)?;
+        let index = pane.tabs.as_ref()?.find(buffer)?;
+        Some(&mut pane.items_mut()[index].tab)
     }
 
     /// Every pane, for edits that leave the tree as it is.
@@ -208,8 +213,7 @@ impl Layout {
         self.clock
     }
 
-    /// The selection of the first view showing `buffer`, for history to restore; the start of
-    /// the text when no view shows it.
+    /// For history to restore: the first view's selection, else the start of the text.
     pub fn selection_of(&self, buffer: BufferId) -> Selection {
         (self.panes.values())
             .flat_map(Pane::items)
@@ -218,7 +222,6 @@ impl Layout {
             .map_or_else(|| Selection::point(0), |view| view.selection.clone())
     }
 
-    /// `pane`'s active tab with its text, when it shows a rendered document.
     pub fn document(&self, pane: PaneId) -> Option<(&TextView, &DocumentState)> {
         match self.panes.get(pane)?.active()?.showing() {
             Showing::Document(text, state, _) => Some((text, state)),
@@ -226,7 +229,6 @@ impl Layout {
         }
     }
 
-    /// As `document`, with where the rendering sits.
     pub fn document_mut(
         &mut self,
         pane: PaneId,
@@ -241,7 +243,6 @@ impl Layout {
         }
     }
 
-    /// `pane`'s active tab with its text, when it shows rendered pages.
     pub fn pages(&self, pane: PaneId) -> Option<(&TextView, &PagesState)> {
         match self.panes.get(pane)?.active()?.showing() {
             Showing::Pages(text, state, _) => Some((text, state)),
@@ -249,7 +250,6 @@ impl Layout {
         }
     }
 
-    /// As `pages`, with where the rendering sits.
     pub fn pages_mut(
         &mut self,
         pane: PaneId,
@@ -316,7 +316,6 @@ impl Layout {
         Some(item)
     }
 
-    /// Keeps only the focused pane; views following any other become standalone.
     pub fn only(&mut self) {
         let focus = self.focus;
         self.panes.retain(|id, _| id == focus);
@@ -343,8 +342,7 @@ impl Layout {
         out
     }
 
-    /// Moves the divider after child `divider` of the split at `path` to `at`, a fraction of
-    /// the editor area along the split's axis; stale paths are ignored.
+    /// `at` is a fraction of the editor area along the split's axis; stale paths are ignored.
     pub fn drag_divider(&mut self, path: &[usize], divider: usize, at: f32) {
         let mut area = Rect::FULL;
         let mut node = &mut self.root;
@@ -464,8 +462,7 @@ fn split_node(node: &mut Node, target: PaneId, axis: Axis, new: PaneId) -> bool 
     }
 }
 
-/// Removes `target` under `node`, evening out the split it leaves, and returns the pane now
-/// beside where it was.
+/// Evens out the split `target` leaves; returns the pane now beside where it was.
 fn remove_node(node: &mut Node, target: PaneId) -> Option<PaneId> {
     let Node::Split { axis, children } = node else {
         return None;
@@ -531,7 +528,6 @@ fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
     }
 }
 
-/// Areas of a split's children, in order.
 pub fn child_rects(axis: Axis, children: &[Child], area: Rect) -> impl Iterator<Item = Rect> {
     let total: f32 = children.iter().map(|child| child.flex.0).sum();
     children.iter().scan(0.0f32, move |offset, child| {
@@ -610,7 +606,6 @@ pub struct Preview {
     pub kind: PreviewKind,
 }
 
-/// How a preview tab came to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewKind {
     /// Opened as a preview, from the tree or a picker.
@@ -750,13 +745,11 @@ impl Tabs {
         }
     }
 
-    /// Makes the preview tab, if any, permanent.
     pub fn keep(&mut self) {
         self.preview = None;
     }
 
-    /// Zed's rule: activates an open item, replaces an active preview in place, else inserts
-    /// after the active tab; returns the displaced preview.
+    /// Zed's rule: activate an open item, replace an active preview, else insert after the active.
     pub(crate) fn open(&mut self, tab: Tab, open: OpenAs, now: Tick) -> Option<Item> {
         let item = Item { tab, used: now };
         match (self.find(item.tab.buffer()), open, self.preview) {
@@ -772,8 +765,7 @@ impl Tabs {
                 self.activate(index, now);
                 None
             }
-            // A split's copy only stands in until the pane is given something to show, so any
-            // open replaces it; ordinary previews keep zed's rule and stay beside permanent opens.
+            // A split's copy only stands in until the pane gets something, so any open replaces it.
             (
                 None,
                 OpenAs::Permanent,
@@ -827,8 +819,7 @@ impl Tabs {
         index
     }
 
-    /// Removes tab `index`, activating the most recently used tab if it was active; `None`
-    /// once empty.
+    /// Activates the most recently used tab when the active one goes; `None` once empty.
     fn remove(mut self, index: usize, now: Tick) -> (Option<Tabs>, Item) {
         let item = self.items.remove(index);
         self.preview = match self.preview {
@@ -856,8 +847,7 @@ impl Tabs {
     }
 }
 
-/// Visible window of a text view: the top row lies `rows` below `anchor`'s visual row, like
-/// helix's `vertical_offset`, and is negative only inside filler rows above the first line.
+/// The top row lies `rows` below `anchor`'s visual row; negative only inside leading fillers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scroll {
     pub anchor: usize,

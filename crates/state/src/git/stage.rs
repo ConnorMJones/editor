@@ -14,7 +14,6 @@ use crate::job::{FsOp, Job};
 use crate::project::path::RelPath;
 use crate::project::watch;
 use crate::sidebar::tree::EntryKind;
-use crate::text::buffer::Content;
 use crate::view::layout::Pane;
 use crate::view::tab::Tab;
 use crate::{Confirm, Effect, Overlay, Repo, State, request_git};
@@ -56,26 +55,19 @@ pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
         return;
     };
     let entry = &state.buffers[view.buffer()];
-    let (doc, tracked) = match &entry.content {
-        Content::Loading { .. } => {
-            state.notice = Some(Notice::StillLoading {
+    let doc = &entry.doc;
+    let tracked = match &entry.diff.bases {
+        Bases::Tracked(tracked) if tracked.is_fresh(doc.version) => tracked,
+        Bases::Tracked(_) | Bases::Loading { .. } => {
+            state.notice = Some(Notice::DiffPending);
+            return;
+        }
+        Bases::NoRepo | Bases::Untracked => {
+            state.notice = Some(Notice::NotTracked {
                 path: entry.path.clone(),
             });
             return;
         }
-        Content::Text { doc, diff, .. } => match &diff.bases {
-            Bases::Tracked(tracked) if tracked.is_fresh(doc.version) => (doc, tracked),
-            Bases::Tracked(_) | Bases::Loading { .. } => {
-                state.notice = Some(Notice::DiffPending);
-                return;
-            }
-            Bases::NoRepo | Bases::Untracked => {
-                state.notice = Some(Notice::NotTracked {
-                    path: entry.path.clone(),
-                });
-                return;
-            }
-        },
     };
     let lines = view.selection.line_ranges(doc.text.slice(..));
     let picked: Vec<Hunk> = match op {

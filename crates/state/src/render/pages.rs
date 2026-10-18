@@ -3,13 +3,14 @@
 use helix_core::SmallVec;
 use model::command::{Direction, PagesCommand, ReadMove, Shown, ZoomBy};
 use model::config::OpenAs;
+use model::job::Busy;
 use model::notice::Notice;
 use model::typeset::{LineColumn, Origin, PagePoint, SourceFile};
 use model::units::Px;
 use slotmap::SecondaryMap;
 
 use crate::project::Project;
-use crate::render::typeset::{self, Compiled, Locate, Outcome, Typst};
+use crate::render::typeset::{self, Compiled, Outcome, Typst};
 use crate::render::{Opening, Rendering, step};
 use crate::text::buffer::{Buffer, BufferId, Position, Target};
 use crate::view::layout::{Pane, PaneId};
@@ -59,7 +60,6 @@ pub struct PagesMotion {
     pub columns: i32,
 }
 
-/// How pages scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fit {
     /// Pages span the pane width.
@@ -129,8 +129,7 @@ impl PagesScroll {
     }
 }
 
-/// Keeps compiles for open pages tabs, compiles the shown ones and finds their source lines on
-/// the pages.
+/// Keeps compiles for open pages tabs, compiles the shown ones and locates source lines.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     let State {
         layout,
@@ -165,9 +164,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
     typeset::request_pages(compiles, buffers, root.path(), &wanted, out);
     for &(pane, buffer) in &shown {
-        let Some(doc) = buffers[buffer].doc() else {
-            continue;
-        };
+        let doc = &buffers[buffer].doc;
         let (Some((text, view, beside)), Some(typst)) =
             (layout.pages_mut(pane), compiles.get_mut(buffer))
         else {
@@ -176,34 +173,31 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         let rope = doc.text.slice(..);
         let at = text.selection.primary().cursor(rope);
         let cursor = rope.char_to_line(at);
-        // Lines are found on the pages by the typesetter, once there are pages; beside the source
-        // the pages follow its cursor.
+        // Beside the source the pages follow its cursor, seen once its lookup starts.
         let wanted = match (&typst.pages, view.scroll, beside) {
             (None, _, _) => None,
-            (Some(_), PagesScroll::Line(line), _) => {
-                Some(doc.text.line_to_byte(line.min(doc.text.len_lines() - 1)))
-            }
+            (Some(_), PagesScroll::Line(line), _) => Some((
+                doc.text.line_to_byte(line.min(doc.text.len_lines() - 1)),
+                None,
+            )),
             (Some(_), _, BesideMut::Source(Some(seen), _)) if seen.cursor == cursor => None,
-            (Some(_), _, BesideMut::Source(seen, _)) => {
-                *seen = Some(PagesSeen { cursor });
-                Some(rope.char_to_byte(at))
-            }
+            (Some(_), _, BesideMut::Source(seen, _)) => Some((rope.char_to_byte(at), Some(seen))),
             (Some(_), _, BesideMut::Alone) => None,
         };
-        let main = &buffers[buffer].path;
         match (wanted, typst.locate) {
-            (None, _) => {}
-            (Some(cursor), Locate::Idle) => {
-                typst.locate = Locate::Running;
+            (Some((byte, seen)), Busy::Idle) => {
+                typst.locate = Busy::Running;
+                match seen {
+                    Some(seen) => *seen = Some(PagesSeen { cursor }),
+                    None => {}
+                }
                 out.push(Effect::Typeset(typeset::Request::Locate {
                     buffer,
-                    main: main.clone(),
-                    cursor,
+                    main: buffers[buffer].path.clone(),
+                    cursor: byte,
                 }));
             }
-            (Some(cursor), Locate::Running | Locate::Queued(_)) => {
-                typst.locate = Locate::Queued(cursor)
-            }
+            (Some(_), Busy::Running) | (None, _) => {}
         }
     }
 }
@@ -216,16 +210,8 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: PagesAt) {
     }
 }
 
-/// A scroll key on the focused pages view; moves wait for the line or point to resolve into a
-/// place.
-pub fn moved(state: &mut State, motion: ReadMove) {
-    let focus = state.layout.focus();
-    let State {
-        layout, compiles, ..
-    } = state;
-    let Some((text, view, _)) = layout.pages_mut(focus) else {
-        return;
-    };
+/// Moves wait for the line or point to resolve into a place.
+pub fn moved(view: &mut PagesState, typst: Option<&Typst>, motion: ReadMove) {
     let Some(from) = view.scroll.anchor() else {
         return;
     };
@@ -241,15 +227,13 @@ pub fn moved(state: &mut State, motion: ReadMove) {
         }
         ReadMove::Top => PagesScroll::page(0),
         ReadMove::Bottom => {
-            let pages = (compiles.get(text.buffer()))
-                .and_then(|typst| typst.pages.as_ref())
+            let pages = (typst.and_then(|typst| typst.pages.as_ref()))
                 .map_or(0, |compiled| compiled.pages.len());
             PagesScroll::page(pages.saturating_sub(1))
         }
     };
 }
 
-/// Adds `step` to the keys' motion so far from `from`.
 fn moved_by(scroll: PagesScroll, from: PagesAt, step: PagesMotion) -> PagesScroll {
     let before = match scroll {
         PagesScroll::Moved { by, .. } => by,
@@ -265,7 +249,6 @@ fn moved_by(scroll: PagesScroll, from: PagesAt, step: PagesMotion) -> PagesScrol
     }
 }
 
-/// Keys only pages views have.
 pub fn command(state: &mut State, command: PagesCommand) {
     let focus = state.layout.focus();
     let Some((_, view, _)) = state.layout.pages_mut(focus) else {
@@ -313,8 +296,7 @@ pub fn click_page(state: &mut State, pane: PaneId, at: PagePoint, out: &mut Vec<
     }));
 }
 
-/// A click on the diagnostic strip of `pane`'s pages view: the first error, else the first
-/// warning, opens at its place.
+/// The first error, else the first warning, opens at its place.
 pub fn goto_diagnostic(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     let Some((text, _)) = state.layout.pages(pane) else {
         return;

@@ -35,8 +35,13 @@ fn components() {
     assert!(path.is_within(&p("a/b")));
     assert!(!p("ab/c").is_within(&p("a")));
     assert!(Folder::Root.contains(&path));
-    assert_eq!(path.rebase(&p("a"), &p("z")).as_str(), "z/b/c.rs");
-    assert_eq!(p("a").rebase(&p("a"), &p("z")).as_str(), "z");
+    assert_eq!(path.rebased(&p("a"), &p("z")), Some(p("z/b/c.rs")));
+    assert_eq!(p("a").rebased(&p("a"), &p("z")), Some(p("z")));
+    assert_eq!(p("ab/c").rebased(&p("a"), &p("z")), None);
+    assert_eq!(
+        Folder::Sub(p("a/b")).moved(&p("a"), &p("z")),
+        Folder::Sub(p("z/b"))
+    );
 }
 
 #[test]

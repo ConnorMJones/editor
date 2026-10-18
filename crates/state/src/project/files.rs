@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ignore::WalkBuilder;
 
-use crate::project::backlinks::Backlinks;
+use crate::input::picker::{self, Items};
+use crate::project::Project;
+use crate::project::backlinks::{self, Backlinks};
 use crate::project::links::Index;
 use crate::project::path::{Folder, RelPath};
+use crate::{Effect, Overlay, State};
 
 /// What is known of the files under the root.
 pub enum FileIndex {
@@ -68,7 +71,7 @@ pub struct Walked {
     pub dirs: Vec<RelPath>,
 }
 
-/// Lists the folder `dir` honouring gitignore and hidden-file rules; `depth` 1 lists direct children only.
+/// Honours gitignore and hidden-file rules; `depth` 1 lists direct children only.
 pub fn walk(root: &Path, dir: &Folder, depth: Option<usize>) -> Walked {
     let mut walked = Walked::default();
     let start = dir.to_path(root);
@@ -142,7 +145,6 @@ pub fn rescan(root: &Path, paths: &[RelPath]) -> Rescan {
     rescan
 }
 
-/// Whether a rescan changed the set of indexed files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Changed {
     Yes,
@@ -175,4 +177,68 @@ pub fn apply_rescan(files: &mut Vec<RelPath>, rescan: Rescan) -> Changed {
     files.sort_unstable();
     files.dedup();
     changed
+}
+
+/// Takes a finished walk of the root: watches its folders and refills a file picker.
+pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
+    let root = state.project.root.path();
+    let dirs = walked.dirs.iter().map(|dir| dir.to_path(root));
+    out.push(Effect::Watch(
+        std::iter::once(root.to_owned()).chain(dirs).collect(),
+    ));
+    let files = Arc::new(walked.files);
+    match &mut state.overlay {
+        Overlay::Picker(picker) => match &mut picker.items {
+            Items::Files(items) => {
+                *items = files.clone();
+                picker::filter(picker, &mut state.matcher, picker::Narrowing::All);
+            }
+            Items::Buffers(_) | Items::Commands | Items::Grep(_) | Items::Backlinks(_) => {}
+        },
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
+    }
+    let Project { root, index, .. } = &mut state.project;
+    match index {
+        FileIndex::Loading { then } => {
+            let then = *then;
+            *index = FileIndex::Ready(Indexed::new(files));
+            match then {
+                OnIndexed::Nothing => {}
+                OnIndexed::BuildBacklinks => backlinks::ensure(state, out),
+            }
+        }
+        // A second walk keeps what the first built and resolves links again.
+        FileIndex::Ready(indexed) => {
+            indexed.files = files;
+            indexed.changed();
+            backlinks::reconcile(indexed, root.path(), out);
+        }
+    }
+    crate::view::panes::request_preview(state, out);
+}
+
+/// Takes a rescan of paths the watcher reported.
+pub fn rescanned(state: &mut State, rescan: Rescan, out: &mut Vec<Effect>) {
+    let root = state.project.root.path();
+    let new_dirs: Vec<PathBuf> = rescan
+        .subtrees
+        .iter()
+        .flat_map(|(dir, walked)| std::iter::once(dir).chain(&walked.dirs))
+        .map(|dir| dir.to_path(root))
+        .collect();
+    match new_dirs.is_empty() {
+        true => {}
+        false => out.push(Effect::Watch(new_dirs)),
+    }
+    // Before the first walk ends, the walk itself sees these changes.
+    let FileIndex::Ready(indexed) = &mut state.project.index else {
+        return;
+    };
+    match apply_rescan(Arc::make_mut(&mut indexed.files), rescan) {
+        Changed::Yes => {
+            indexed.changed();
+            backlinks::reconcile(indexed, root, out);
+        }
+        Changed::No => {}
+    }
 }

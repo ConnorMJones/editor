@@ -102,7 +102,7 @@ fn modified_previews_are_kept_and_never_replaced() {
     assert_eq!(h.focused_tabs(), ["a.txt"]);
     tree_click(&mut h, "b.txt", Click::Single);
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
-    assert!(h.state.buffers[h.buffer("a.txt")].content.is_modified());
+    assert!(h.state.buffers[h.buffer("a.txt")].doc.is_modified());
 
     // A modified buffer opened from the tree in another pane opens permanently.
     h.keys("<C-w>v");

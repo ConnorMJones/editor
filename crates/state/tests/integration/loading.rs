@@ -6,10 +6,10 @@ use model::command::{Command, PickerCommand, PickerKind};
 use model::notice::Notice;
 use state::apply::apply;
 use state::job::{self, Job};
-use state::text::buffer::{Content, Disk, Jump, Position, Target};
+use state::text::buffer::{Disk, Position, Target};
 use state::{Effect, State};
 
-use crate::harness::{Harness, disk_of};
+use crate::harness::Harness;
 
 fn canonical(dir: &Path, rel: &str) -> std::path::PathBuf {
     dir.canonicalize().unwrap().join(rel)
@@ -54,67 +54,55 @@ fn finish(h: &mut Harness, effects: Vec<Effect>) {
 }
 
 #[test]
-fn open_reads_and_parses_in_a_job() {
+fn open_reads_in_a_job_and_shows_the_file_once_read() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
     let mut h = Harness::new(dir.path());
 
     let held = apply_held(&mut h.state, Command::Open("a.rs".into()));
     assert_eq!(open_jobs(&held), 1);
-    let id = h.state.buffers.keys().next().unwrap();
-    assert!(matches!(
-        h.state.buffers[id].content,
-        Content::Loading { jump: None }
-    ));
-    assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.rs")));
+    assert!(
+        h.state.buffers.is_empty(),
+        "a buffer exists once its file is read"
+    );
+    assert_eq!(h.focused_path(), None);
 
-    // Opening it again reuses the loading buffer.
+    // Opening it again waits on the same read.
     let again = apply_held(&mut h.state, Command::Open("a.rs".into()));
     assert_eq!(jobs(&again), 0);
-    assert_eq!(h.state.buffers.len(), 1);
+    assert_eq!(h.state.reads.len(), 1);
 
     finish(&mut h, held);
-    match &h.state.buffers[id].content {
-        Content::Text { doc, disk, .. } => {
-            assert_eq!(doc.text, "fn a() {}\n");
-            assert!(doc.highlight.syntax().is_some(), "parsed off the UI thread");
-            assert!(matches!(disk, Disk::Synced { .. }));
-        }
-        Content::Loading { .. } => panic!("still loading"),
-    }
+    assert!(h.state.reads.is_empty());
+    assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.rs")));
+    assert_eq!(h.focused_tabs(), ["a.rs"]);
+    let buffer = h.state.buffers.values().next().unwrap();
+    assert_eq!(buffer.doc.text, "fn a() {}\n");
+    assert!(
+        buffer.doc.highlight.syntax().is_some(),
+        "parsed off the UI thread"
+    );
+    assert!(matches!(buffer.disk, Disk::Synced { .. }));
 }
 
 #[test]
-fn loading_buffers_ignore_edits_and_cannot_be_written() {
+fn commands_before_the_read_lands_act_on_what_the_pane_shows() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "disk\n").unwrap();
     let mut h = Harness::new(dir.path());
     let held = apply_held(&mut h.state, Command::Open("a.txt".into()));
 
-    for command in [
-        Command::InsertMode,
-        Command::InsertChar('x'),
-        Command::NormalMode,
-        Command::Move(model::command::Motion::LineDown),
-        Command::Undo,
-        Command::Reload,
-    ] {
+    for command in [Command::Write, Command::Reload] {
         let effects = apply_held(&mut h.state, command);
         assert_eq!(jobs(&effects), 0);
+        assert!(matches!(h.state.notice, Some(Notice::NoBuffer)));
     }
-    let write = apply_held(&mut h.state, Command::Write);
-    assert_eq!(jobs(&write), 0);
-    assert!(matches!(h.state.notice, Some(Notice::StillLoading { .. })));
     let write_as = apply_held(
         &mut h.state,
         Command::WriteAs("b.txt".into(), model::command::Dirs::Existing),
     );
     assert_eq!(jobs(&write_as), 0);
-    assert_eq!(
-        h.state.buffers.values().next().unwrap().path,
-        canonical(dir.path(), "a.txt")
-    );
-    // Nothing is modified, so quitting is allowed while loading.
+    // Nothing is modified, so quitting is allowed while a read is in flight.
     let quit = apply_held(&mut h.state, Command::Quit);
     assert!(quit.iter().any(|effect| matches!(effect, Effect::Quit)));
 
@@ -130,11 +118,11 @@ fn missing_files_open_as_new() {
     let mut h = Harness::new(dir.path());
     h.keys(":o new.txt<ret>");
     assert_eq!(h.doc().text, "");
-    assert_eq!(disk_of(h.state.buffers.values().next().unwrap()), Disk::New);
+    assert_eq!(h.state.buffers.values().next().unwrap().disk, Disk::New);
 }
 
 #[test]
-fn failed_open_drops_the_buffer_and_restores_the_pane() {
+fn a_failed_read_leaves_the_pane_as_it_was() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "a\n").unwrap();
     fs::write(dir.path().join("bad.bin"), [0xff, 0xfe, 0x00]).unwrap();
@@ -142,13 +130,13 @@ fn failed_open_drops_the_buffer_and_restores_the_pane() {
     h.keys(":o a.txt<ret>");
 
     let held = apply_held(&mut h.state, Command::Open("bad.bin".into()));
-    assert_eq!(h.state.buffers.len(), 2);
-    assert_eq!(h.focused_path(), Some(canonical(dir.path(), "bad.bin")));
+    assert_eq!(h.state.buffers.len(), 1);
+    assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
     finish(&mut h, held);
 
     assert!(matches!(h.state.notice, Some(Notice::NotUtf8 { .. })));
     assert_eq!(h.state.buffers.len(), 1);
-    assert_eq!(h.state.buffers.len(), 1);
+    assert!(h.state.reads.is_empty());
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "a.txt")));
 }
 
@@ -161,6 +149,7 @@ fn directories_are_refused_before_any_job() {
     assert_eq!(jobs(&held), 0);
     assert!(matches!(h.state.notice, Some(Notice::NotAFile { .. })));
     assert!(h.state.buffers.is_empty());
+    assert!(h.state.reads.is_empty());
 }
 
 #[test]
@@ -172,16 +161,12 @@ fn grep_jump_waits_for_the_text() {
 
     let held = apply_held(&mut h.state, Command::Picker(PickerCommand::Submit));
     let focus = h.state.layout.focus();
-    let id = h.state.buffers.keys().next().unwrap();
+    let read = h.state.reads.values().next().expect("a read in flight");
+    assert_eq!(read.waiting.len(), 1);
+    assert_eq!(read.waiting[0].pane, focus);
     assert_eq!(
-        match &h.state.buffers[id].content {
-            Content::Loading { jump } => jump.clone(),
-            Content::Text { .. } => panic!("opened synchronously"),
-        },
-        Some(Jump {
-            pane: focus,
-            to: Target::Position(Position { line: 1, column: 4 }),
-        })
+        read.waiting[0].to,
+        Some(Target::Position(Position { line: 1, column: 4 }))
     );
     finish(&mut h, held);
     assert_eq!(h.state.layout.focus(), focus);
@@ -189,7 +174,22 @@ fn grep_jump_waits_for_the_text() {
 }
 
 #[test]
-fn picker_kinds_still_open_while_loading() {
+fn a_read_whose_pane_closed_shows_in_the_focus() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.txt<ret><C-w>v");
+    let held = apply_held(&mut h.state, Command::Open("b.txt".into()));
+    h.keys("<C-w>q");
+    let focus = h.state.layout.focus();
+    finish(&mut h, held);
+    assert_eq!(h.state.layout.focus(), focus);
+    assert_eq!(h.focused_path(), Some(canonical(dir.path(), "b.txt")));
+}
+
+#[test]
+fn picker_kinds_still_open_while_reading() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "a\n").unwrap();
     let mut h = Harness::new(dir.path());
@@ -198,19 +198,6 @@ fn picker_kinds_still_open_while_loading() {
         &mut h.state,
         Command::Picker(PickerCommand::Open(PickerKind::Buffers)),
     );
-    assert_eq!(jobs(&picker), 0, "an open buffer previews from memory");
-    finish(&mut h, held);
-}
-
-#[test]
-fn write_quit_waits_for_nothing_while_loading() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("a.txt"), "a\n").unwrap();
-    let mut h = Harness::new(dir.path());
-    let held = apply_held(&mut h.state, Command::Open("a.txt".into()));
-    let effects = apply_held(&mut h.state, Command::WriteQuit);
-    assert_eq!(jobs(&effects), 0);
-    assert_eq!(h.state.exit, state::Exit::Running);
-    assert!(matches!(h.state.notice, Some(Notice::StillLoading { .. })));
+    assert_eq!(jobs(&picker), 0);
     finish(&mut h, held);
 }

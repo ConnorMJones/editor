@@ -15,7 +15,7 @@ use crate::State;
 use crate::apply::{count_of, edit, exit_select_mode};
 use crate::git::navigate::step;
 use crate::input::keymap::{self, Context};
-use crate::text::buffer::{Content, TextDoc};
+use crate::text::buffer::TextDoc;
 use crate::view::display::{Frame, LineMark, Row, RowKind, Run, Shade};
 use crate::view::layout::TextView;
 use crate::view::scroll::Padding;
@@ -92,6 +92,13 @@ pub struct Conflicts {
 }
 
 impl Conflicts {
+    pub fn padding(&self) -> Padding<'_> {
+        Padding {
+            fillers: &self.rows,
+            lead: 0,
+        }
+    }
+
     pub const EMPTY: Conflicts = Conflicts {
         version: 0,
         list: Vec::new(),
@@ -129,8 +136,7 @@ enum Open {
     },
 }
 
-/// Fills `conflicts` from `text`. Only lines starting with a marker character are looked at;
-/// a new `<<<<<<<` abandons an unfinished conflict, as zed does, and unterminated ones are dropped.
+/// A new `<<<<<<<` abandons an unfinished conflict, as zed does; unterminated ones are dropped.
 pub fn parse(text: RopeSlice, version: u64, conflicts: &mut Conflicts) {
     let Conflicts {
         list,
@@ -293,10 +299,7 @@ pub fn refresh(doc: &mut TextDoc) {
 /// Re-parses every buffer edited since its last parse; run after each batch of commands.
 pub fn sync(state: &mut State) {
     for buffer in state.buffers.values_mut() {
-        match &mut buffer.content {
-            Content::Text { doc, .. } => refresh(doc),
-            Content::Loading { .. } => {}
-        }
+        refresh(&mut buffer.doc);
     }
 }
 
@@ -310,10 +313,7 @@ pub fn current(doc: &TextDoc) -> &Conflicts {
 
 /// Label rows as scroll padding, so cursor follow and clicks count them.
 pub fn padding(doc: &TextDoc) -> Padding<'_> {
-    Padding {
-        fillers: &current(doc).rows,
-        lead: 0,
-    }
+    current(doc).padding()
 }
 
 /// Line annotations inserting the label rows; empty without conflicts.
@@ -321,8 +321,7 @@ pub fn annotations(doc: &TextDoc) -> TextAnnotations<'_> {
     crate::view::scroll::annotations(doc.text.slice(..), padding(doc))
 }
 
-/// Writes the label text into the virtual rows `display::layout` left for `conflicts`, in a
-/// view `height` rows tall.
+/// Writes the label text into the virtual rows `display::layout` left for `conflicts`.
 pub fn label(frame: &mut Frame, text: RopeSlice, conflicts: &Conflicts, height: u16) {
     match conflicts.labels.is_empty() {
         true => return,
@@ -405,13 +404,9 @@ pub fn label(frame: &mut Frame, text: RopeSlice, conflicts: &Conflicts, height: 
 /// The focused text view and its document with conflicts parsed for the current text.
 fn focused(state: &mut State) -> Option<(&mut TextView, &TextDoc)> {
     let view = state.layout.focused_mut().active_mut()?.text_mut();
-    match &mut state.buffers[view.buffer()].content {
-        Content::Text { doc, .. } => {
-            refresh(doc);
-            Some((view, doc))
-        }
-        Content::Loading { .. } => None,
-    }
+    let doc = &mut state.buffers[view.buffer()].doc;
+    refresh(doc);
+    Some((view, doc))
 }
 
 /// `]m [m`, after `]g`: each selection steps to the count-th conflict.

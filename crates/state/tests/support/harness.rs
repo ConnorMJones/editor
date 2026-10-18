@@ -10,7 +10,7 @@ use model::command::Shown;
 use model::config::TabsConfig;
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
-use state::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
+use state::text::buffer::{BufferId, TextDoc};
 
 use state::project::watch::{self, Watcher};
 use state::render::typeset::{Look, Request};
@@ -271,10 +271,7 @@ impl Harness {
     }
 
     pub fn doc(&self) -> &TextDoc {
-        match &self.state.buffers[self.view().buffer()].content {
-            Content::Text { doc, .. } => doc,
-            Content::Loading { .. } => panic!("focused buffer is still loading"),
-        }
+        &self.state.buffers[self.view().buffer()].doc
     }
 
     pub fn focused_path(&self) -> Option<PathBuf> {
@@ -384,11 +381,4 @@ fn special(name: &str) -> Key {
         other => panic!("unknown key <{other}>"),
     };
     Key { code, mods }
-}
-
-pub fn disk_of(buffer: &Buffer) -> Disk {
-    match &buffer.content {
-        Content::Text { disk, .. } => *disk,
-        Content::Loading { .. } => panic!("buffer is still loading"),
-    }
 }

@@ -15,6 +15,7 @@ use nucleo::{Matcher, Utf32Str};
 
 use crate::project::path::RelPath;
 use crate::text::buffer::{BufferId, TextDoc};
+use crate::{Effect, Overlay, State};
 
 pub struct Picker {
     pub query: String,
@@ -122,8 +123,7 @@ impl Picker {
     }
 }
 
-/// Re-ranks `picker.matches` for its query; narrows from the current matches when
-/// `narrowing`, which holds when the query only grew and has no negations.
+/// Narrows from the current matches when the query only grew and has no negations.
 pub fn filter(picker: &mut Picker, matcher: &mut Matcher, narrowing: Narrowing) {
     matcher.config = nucleo::Config::DEFAULT;
     match picker.items.kind() {
@@ -178,8 +178,7 @@ impl Narrowing {
     }
 }
 
-/// Smart case: any uppercase character makes the search case-sensitive; falls back to a
-/// literal search when `query` is not a valid regex.
+/// Smart case, falling back to a literal search when `query` is not a valid regex.
 pub fn grep_regex(query: &str) -> Regex {
     let insensitive = !query.chars().any(char::is_uppercase);
     RegexBuilder::new(query)
@@ -403,4 +402,49 @@ pub fn preview_source(picker: &Picker) -> Option<PreviewSource<'_>> {
         }
         Items::Commands => None,
     }
+}
+
+/// Fills the preview slot still waiting for `path`.
+pub fn previewed(state: &mut State, path: RelPath, preview: Preview) {
+    match &mut state.overlay {
+        Overlay::Picker(picker) => {
+            let waiting = picker.previews.slots.iter_mut().find(|slot| match slot {
+                Some((cached, Preview::Loading)) => *cached == path,
+                Some(_) | None => false,
+            });
+            match waiting {
+                Some(slot) => *slot = Some((path, preview)),
+                None => {}
+            }
+        }
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
+    }
+}
+
+/// Takes the hits of the current grep; older searches are dropped.
+pub fn grepped(
+    state: &mut State,
+    generation: u64,
+    hits: Vec<Hit>,
+    search: Search,
+    out: &mut Vec<Effect>,
+) {
+    match &mut state.overlay {
+        Overlay::Picker(picker) => match &mut picker.items {
+            Items::Grep(grep) if grep.generation == generation => {
+                grep.hits = hits;
+                grep.search = search;
+                picker.matches.clear();
+                picker.matches.extend(0..grep.hits.len() as u32);
+                picker.cursor = 0;
+            }
+            Items::Grep(_)
+            | Items::Files(_)
+            | Items::Buffers(_)
+            | Items::Commands
+            | Items::Backlinks(_) => {}
+        },
+        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
+    }
+    crate::view::panes::request_preview(state, out);
 }

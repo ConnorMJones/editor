@@ -3,14 +3,14 @@ use std::path::PathBuf;
 
 use helix_core::unicode::segmentation::GraphemeCursor;
 use model::command::{
-    Command, Cycle, Direction, Dirs, PromptCommand, PromptMotion, SortCase, SortOrder, Take,
-    WindowCommand,
+    Command, Cycle, Direction, Dirs, PromptCommand, PromptMotion, RegexOp, SortCase, SortOrder,
+    Take, WindowCommand,
 };
 use model::notice::Notice;
 use model::register::Register;
 use model::window::Axis;
 
-use crate::apply::apply;
+use crate::apply::{apply, focused_text};
 use crate::project::Project;
 use crate::project::files::{FileIndex, Indexed};
 use crate::{Effect, Overlay, Prompt, PromptKind, State, text::registers, text::select};
@@ -108,7 +108,7 @@ pub fn open(kind: PromptKind, index: &FileIndex) -> Prompt {
     prompt
 }
 
-/// Recomputes the candidates for the line; paths come from the file index, one directory level at a time.
+/// Paths come from the file index, one directory level at a time.
 pub fn complete(prompt: &mut Prompt, index: &FileIndex) {
     let completion = &mut prompt.completion;
     completion.candidates.clear();
@@ -177,7 +177,6 @@ pub fn complete(prompt: &mut Prompt, index: &FileIndex) {
     }
 }
 
-/// Inserts typed text at the cursor.
 pub fn insert(state: &mut State, c: char) {
     match &mut state.overlay {
         Overlay::Prompt(prompt) => {
@@ -225,7 +224,6 @@ pub fn target(line: &str, cursor: usize, motion: PromptMotion) -> usize {
     }
 }
 
-/// How a prompt command changed the prompt.
 enum Change {
     Nothing,
     Typed,
@@ -351,7 +349,6 @@ pub fn remember(
     }
 }
 
-/// Parses a `:` command line into a command.
 pub fn parse(line: &str) -> Result<Command, Notice> {
     let line = line.trim();
     let (name, arg) = match line.split_once(char::is_whitespace) {
@@ -433,5 +430,75 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
         _ => Err(Notice::UnknownCommand {
             input: line.to_owned(),
         }),
+    }
+}
+
+pub fn open_regex(state: &mut State, op: RegexOp) {
+    match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
+        Some((view, _)) => {
+            let kind = PromptKind::Regex {
+                op,
+                register: state.input.register.unwrap_or(Register::SEARCH),
+                snapshot: view.selection.clone(),
+            };
+            state.overlay = Overlay::Prompt(open(kind, &state.project.index))
+        }
+        None => {}
+    }
+}
+
+pub fn cancel(state: &mut State) {
+    match std::mem::replace(&mut state.overlay, Overlay::None) {
+        Overlay::Prompt(Prompt {
+            kind: PromptKind::Regex { snapshot, .. },
+            ..
+        }) => crate::apply::select(state, |_, _, _| snapshot),
+        Overlay::Prompt(Prompt {
+            kind: PromptKind::Command,
+            ..
+        })
+        | Overlay::None
+        | Overlay::Picker(_)
+        | Overlay::Confirm(_) => {}
+    }
+}
+
+/// Enter on a chosen directory lists it instead of submitting, as in helix.
+pub fn submit(state: &mut State, out: &mut Vec<Effect>) {
+    match &mut state.overlay {
+        Overlay::Prompt(prompt)
+            if matches!(
+                prompt.completion.chosen,
+                Chosen::At(i) if matches!(prompt.completion.candidates[i], Candidate::Dir(_))
+            ) =>
+        {
+            complete(prompt, &state.project.index)
+        }
+        Overlay::Prompt(_) | Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => {
+            match std::mem::replace(&mut state.overlay, Overlay::None) {
+                Overlay::Prompt(Prompt {
+                    kind: PromptKind::Command,
+                    line,
+                    ..
+                }) => {
+                    match remember(state, Register::COMMAND, line, out).map(|line| parse(&line)) {
+                        Some(Ok(command)) => apply(state, command, out),
+                        Some(Err(notice)) => state.notice = Some(notice),
+                        None => {}
+                    }
+                }
+                Overlay::Prompt(Prompt {
+                    kind:
+                        PromptKind::Regex {
+                            op,
+                            register,
+                            snapshot,
+                        },
+                    line,
+                    ..
+                }) => select::submit_regex(state, op, register, snapshot, line, out),
+                Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => {}
+            }
+        }
     }
 }

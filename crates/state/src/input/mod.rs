@@ -52,6 +52,7 @@ const MAX_COUNT: usize = 100_000_000;
 const VIEW_PREFIX: Key = Key::char('z');
 
 pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
+    let _span = tracing::trace_span!("key", ?key).entered();
     state.notice = None;
     match (state.input.awaiting.take(), context(state)) {
         (Some(pending), context) => {

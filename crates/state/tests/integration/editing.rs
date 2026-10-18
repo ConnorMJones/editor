@@ -3,7 +3,7 @@ use std::fs;
 use model::notice::Notice;
 use state::text::buffer::Disk;
 
-use crate::harness::{Harness, disk_of};
+use crate::harness::Harness;
 
 #[test]
 fn edit_and_save_all_writes_disk() {
@@ -32,7 +32,7 @@ fn save_all_in_insert_mode_keeps_editing() {
     let mut h = Harness::new(dir.path());
 
     h.keys(":o new.txt<ret>");
-    assert_eq!(disk_of(h.state.buffers.values().next().unwrap()), Disk::New);
+    assert_eq!(h.state.buffers.values().next().unwrap().disk, Disk::New);
 
     h.keys("iab<C-k><C-s>c<esc>");
     assert_eq!(
@@ -42,7 +42,7 @@ fn save_all_in_insert_mode_keeps_editing() {
     assert_eq!(h.doc().text.to_string(), "abc");
     assert!(h.doc().is_modified());
     assert!(matches!(
-        disk_of(h.state.buffers.values().next().unwrap()),
+        h.state.buffers.values().next().unwrap().disk,
         Disk::Synced { .. }
     ));
 }

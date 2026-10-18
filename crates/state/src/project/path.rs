@@ -3,8 +3,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
-/// A file or folder under the root: `/`-separated UTF-8 with only normal components, never the
-/// root itself.
+/// `/`-separated UTF-8 under the root with only normal components; never the root itself.
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -80,7 +79,6 @@ impl RelPath {
         }
     }
 
-    /// The folder this sits in.
     pub fn folder(&self) -> Folder {
         Folder::of(self.folder_path())
     }
@@ -117,11 +115,11 @@ impl RelPath {
         root.join(&self.0)
     }
 
-    /// Replaces the `from` prefix with `to`; `self` must be within `from`.
-    pub fn rebase(&self, from: &RelPath, to: &RelPath) -> RelPath {
-        match self.0[from.0.len()..].trim_start_matches('/') {
-            "" => to.clone(),
-            rest => to.join(rest),
+    /// `self` with its `from` prefix replaced by `to`, when it is within `from`.
+    pub fn rebased(&self, from: &RelPath, to: &RelPath) -> Option<RelPath> {
+        match self.0.strip_prefix(&from.0)? {
+            "" => Some(to.clone()),
+            rest => rest.strip_prefix('/').map(|rest| to.join(rest)),
         }
     }
 }
@@ -155,6 +153,14 @@ impl Folder {
         match self {
             Folder::Root => root.to_owned(),
             Folder::Sub(path) => path.to_path(root),
+        }
+    }
+
+    /// Where this folder is once `from` has moved to `to`.
+    pub fn moved(self, from: &RelPath, to: &RelPath) -> Folder {
+        match self {
+            Folder::Sub(dir) => Folder::Sub(dir.rebased(from, to).unwrap_or(dir)),
+            Folder::Root => Folder::Root,
         }
     }
 

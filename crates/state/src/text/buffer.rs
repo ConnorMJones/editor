@@ -6,7 +6,8 @@ use helix_core::indent::{IndentStyle, auto_detect_indent_style};
 use helix_core::syntax::config::LanguageConfiguration;
 use helix_core::syntax::{HighlighterError, Loader};
 use helix_core::{
-    ChangeSet, Language, LineEnding, Rope, RopeSlice, Selection, Syntax, Transaction,
+    ChangeSet, Language, LineEnding, Range, Rope, RopeSlice, Selection, SmallVec, Syntax,
+    Transaction,
 };
 use model::notice::Notice;
 use slotmap::new_key_type;
@@ -15,32 +16,36 @@ use crate::git::conflict::{self, Conflicts};
 use crate::git::diff::Diff;
 use crate::git::navigate::Edge;
 use crate::view::layout::PaneId;
+use crate::view::panes::Arrive;
+use model::config::OpenAs;
 
 new_key_type! {
     pub struct BufferId;
+    pub struct ReadId;
 }
 
+/// A file's text; a buffer exists only once its file has been read.
 pub struct Buffer {
     /// Canonical when the file exists; root-joined and normalized for new files.
     pub path: PathBuf,
-    pub content: Content,
+    pub doc: TextDoc,
+    pub disk: Disk,
+    pub diff: Diff,
 }
 
-pub enum Content {
-    /// The first read and parse run as a job; commands skip the buffer and it cannot be written.
-    Loading { jump: Option<Jump> },
-    Text {
-        doc: TextDoc,
-        disk: Disk,
-        diff: Diff,
-    },
+/// A file being read for its first buffer, and the opens waiting for it.
+pub struct Read {
+    pub path: PathBuf,
+    pub waiting: SmallVec<[Waiter; 1]>,
 }
 
-/// Cursor placement in `pane` waiting for a loading buffer's text.
+/// An open of a file still being read: shown in `pane` once its text arrives.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Jump {
+pub struct Waiter {
     pub pane: PaneId,
-    pub to: Target,
+    pub arrive: Arrive,
+    pub open: OpenAs,
+    pub to: Option<Target>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +55,36 @@ pub enum Target {
     Hunk(Edge),
     /// A markdown heading, by its text as a link names it.
     Heading(String),
+    Saved(Saved),
+}
+
+/// A session's saved selection: at least one range, and a primary among them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Saved {
+    ranges: SmallVec<[Range; 1]>,
+    primary: usize,
+    pub scroll: usize,
+}
+
+impl Saved {
+    pub fn new(ranges: &[[usize; 2]], primary: usize, scroll: usize) -> Option<Saved> {
+        ranges.get(primary)?;
+        Some(Saved {
+            ranges: (ranges.iter())
+                .map(|&[anchor, head]| Range::new(anchor, head))
+                .collect(),
+            primary,
+            scroll,
+        })
+    }
+
+    /// The selection within `len` chars; the file may have changed since it was saved.
+    pub fn selection(&self, len: usize) -> Selection {
+        let ranges = (self.ranges.iter())
+            .map(|range| Range::new(range.anchor.min(len), range.head.min(len)))
+            .collect();
+        Selection::new(ranges, self.primary)
+    }
 }
 
 /// Zero-based line and character column.
@@ -93,14 +128,23 @@ pub struct TextDoc {
     pub conflicts: Conflicts,
 }
 
-/// What the buffer's grammar made of its text.
+/// Whether a parse runs for a buffer waiting on its tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseJob {
+    /// The next sync starts one.
+    Wanted,
+    Running {
+        version: u64,
+    },
+}
+
 pub enum Highlight {
     /// No grammar matches the file.
     Plain,
-    /// Parsed off the UI thread from the text at `version`; drawn plain until it lands.
+    /// Waiting on a parse off the UI thread; drawn plain until it lands.
     Parsing {
         language: Language,
-        version: u64,
+        job: ParseJob,
     },
     Parsed(Syntax),
     /// The grammar failed on this text; the next edit parses again from scratch.
@@ -125,7 +169,6 @@ impl Highlight {
         Highlight::of(language, Syntax::new(text, language, loader))
     }
 
-    /// The highlight a finished parse of `language` leaves.
     pub fn of(language: Language, parsed: Result<Syntax, HighlighterError>) -> Highlight {
         match parsed {
             Ok(syntax) => Highlight::Parsed(syntax),
@@ -173,11 +216,11 @@ impl TextDoc {
         })
     }
 
-    /// Leaves a file with a grammar `Parsing`, for `highlight::job` to parse in the background.
+    /// Leaves a file with a grammar for `highlight::sync` to parse in the background.
     pub fn unparsed(text: Rope, path: &std::path::Path, loader: &Loader) -> TextDoc {
         TextDoc::build(text, path, loader, |_, language| Highlight::Parsing {
             language,
-            version: 0,
+            job: ParseJob::Wanted,
         })
     }
 
@@ -274,7 +317,6 @@ impl TextDoc {
         };
     }
 
-    /// Groups staged edits into one undo revision.
     pub fn commit(&mut self, selection: &Selection) {
         match std::mem::replace(&mut self.uncommitted, Uncommitted::Clean) {
             Uncommitted::Clean => {}
@@ -285,7 +327,7 @@ impl TextDoc {
         }
     }
 
-    /// Moves through history; returns the applied transactions in order so callers can map selections.
+    /// Returns the applied transactions in order, for mapping selections.
     pub fn step_history(&mut self, step: HistoryStep, loader: &Loader) -> Vec<Transaction> {
         let txs = match step {
             HistoryStep::Undo => self.history.undo().cloned().into_iter().collect(),
@@ -302,8 +344,7 @@ impl TextDoc {
         txs
     }
 
-    /// Brings `highlight` up to the text `changes` made from `old`. A failed incremental update
-    /// may leave the tree half-edited, so it parses again from scratch.
+    /// After a failed incremental update the tree parses again in the background.
     pub fn update_highlight(&mut self, old: &Rope, changes: &ChangeSet, loader: &Loader) {
         let text = self.text.slice(..);
         self.highlight = match std::mem::replace(&mut self.highlight, Highlight::Plain) {
@@ -315,11 +356,17 @@ impl TextDoc {
                     Ok(()) => Highlight::Parsed(syntax),
                     Err(error) => {
                         tracing::warn!(?error, "syntax update failed; parsing again");
-                        Highlight::parse(text, syntax.root_language(), loader)
+                        Highlight::Parsing {
+                            language: syntax.root_language(),
+                            job: ParseJob::Wanted,
+                        }
                     }
                 }
             }
-            Highlight::Failed { language, .. } => Highlight::parse(text, language, loader),
+            Highlight::Failed { language, .. } => Highlight::Parsing {
+                language,
+                job: ParseJob::Wanted,
+            },
         };
     }
 }
@@ -330,30 +377,4 @@ pub enum HistoryStep {
     Redo,
     Earlier,
     Later,
-}
-
-impl Content {
-    pub fn is_modified(&self) -> bool {
-        match self {
-            Content::Loading { .. } => false,
-            Content::Text { doc, .. } => doc.is_modified(),
-        }
-    }
-}
-
-impl Buffer {
-    /// `None` while the file is still being read.
-    pub fn doc(&self) -> Option<&TextDoc> {
-        match &self.content {
-            Content::Text { doc, .. } => Some(doc),
-            Content::Loading { .. } => None,
-        }
-    }
-
-    pub fn doc_mut(&mut self) -> Option<&mut TextDoc> {
-        match &mut self.content {
-            Content::Text { doc, .. } => Some(doc),
-            Content::Loading { .. } => None,
-        }
-    }
 }

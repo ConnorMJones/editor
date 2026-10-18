@@ -11,6 +11,13 @@ workspace = true
 tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 # Reports every allocation too; heavier captures.
 tracy-alloc = ["tracy"]
+# Context switches and call-stack sampling of every thread; large captures.
+tracy-sampling = [
+    "tracy",
+    "tracy-client/system-tracing",
+    "tracy-client/context-switch-tracing",
+    "tracy-client/sampling",
+]
 
 [dependencies]
 anyhow.workspace = true

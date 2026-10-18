@@ -9,16 +9,18 @@ use model::notice::Notice;
 
 use crate::git::Changed;
 use crate::git::stage::file_op;
+use crate::project::path::RelPath;
 use crate::sidebar::tree::Fold;
 use crate::view::panes;
 use crate::view::panes::Arrive;
-use crate::{Effect, Focus, Repo, Sidebar, State};
+use crate::{Effect, Focus, Sidebar, State};
 
 /// Entries of each sidebar group in `changes`, which is sorted by group.
 pub fn groups(changes: &[Changed]) -> [(Group, std::ops::Range<usize>); 3] {
     let mut start = 0;
     [Group::Conflicts, Group::Staged, Group::Changes].map(|group| {
-        let end = start + changes[start..].partition_point(|changed| changed.group == group);
+        let end =
+            start + changes[start..].partition_point(|changed| changed.entry.group() == group);
         let range = start..end;
         start = end;
         (group, range)
@@ -36,27 +38,34 @@ pub enum ListRow {
     Entry(usize),
 }
 
-/// The Changes sidebar's view of the repository's changes.
 pub struct ChangesList {
-    /// Row selected, kept by value so it survives refreshes.
     pub cursor: Option<ListCursor>,
     /// Per `Group`, whether the sidebar shows its entries.
     pub folds: [Fold; Group::COUNT],
 }
 
-/// What the Changes sidebar cursor rests on.
+/// What the Changes sidebar cursor rests on, by value so it survives refreshes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListCursor {
     Header(Group),
-    Entry(Changed),
+    Entry { group: Group, path: RelPath },
+}
+
+impl ListCursor {
+    pub fn on(changed: &Changed) -> ListCursor {
+        ListCursor::Entry {
+            group: changed.entry.group(),
+            path: changed.path.clone(),
+        }
+    }
 }
 
 /// Sidebar rows a group takes: its header, plus its entries unless collapsed.
 fn group_rows(entries: &std::ops::Range<usize>, fold: Fold) -> usize {
-    match (entries.is_empty(), fold) {
-        (true, _) => 0,
-        (false, Fold::Expanded) => 1 + entries.len(),
-        (false, Fold::Collapsed) => 1,
+    match (entries.len(), fold) {
+        (0, _) => 0,
+        (count, Fold::Expanded) => 1 + count,
+        (_, Fold::Collapsed) => 1,
     }
 }
 
@@ -68,29 +77,29 @@ pub fn list_len(changes: &[Changed], folds: &[Fold; Group::COUNT]) -> usize {
         .sum()
 }
 
-pub fn list_row(changes: &[Changed], folds: &[Fold; Group::COUNT], row: usize) -> Option<ListRow> {
-    let mut row = row;
-    for (group, entries) in groups(changes) {
-        let fold = folds[group as usize];
-        let rows = group_rows(&entries, fold);
-        match (rows, row) {
-            (0, _) => {}
-            (_, 0) => {
-                return Some(ListRow::Header {
-                    group,
-                    count: entries.len(),
-                    fold,
-                });
-            }
-            (rows, row) if row < rows => return Some(ListRow::Entry(entries.start + row - 1)),
-            (rows, rest) => row = rest - rows,
-        }
-    }
-    None
+/// The rows `list_len` counts, in order.
+pub fn rows(
+    changes: &[Changed],
+    folds: &[Fold; Group::COUNT],
+) -> impl Iterator<Item = ListRow> + use<> {
+    let folds = *folds;
+    groups(changes)
+        .into_iter()
+        .flat_map(move |(group, entries)| {
+            let fold = folds[group as usize];
+            let header = match entries.len() {
+                0 => None,
+                count => Some(ListRow::Header { group, count, fold }),
+            };
+            let shown = match fold {
+                Fold::Expanded => entries,
+                Fold::Collapsed => entries.end..entries.end,
+            };
+            header.into_iter().chain(shown.map(ListRow::Entry))
+        })
 }
 
-/// Row of `cursor`: an entry of a collapsed group shows as its header, a vanished entry as the
-/// row now in its place.
+/// An entry of a collapsed group shows as its header, a vanished entry as the row in its place.
 pub fn cursor_row(
     changes: &[Changed],
     folds: &[Fold; Group::COUNT],
@@ -105,64 +114,56 @@ pub fn cursor_row(
             .map(|(other, entries)| group_rows(entries, folds[*other as usize]))
             .sum()
     };
+    let entry = |index: usize| {
+        let group = changes[index].entry.group();
+        match folds[group as usize] {
+            Fold::Collapsed => header(group),
+            Fold::Expanded => header(group) + 1 + index - groups[group as usize].1.start,
+        }
+    };
     let row = match cursor {
         Some(ListCursor::Header(group)) => header(*group),
-        // Nothing selected yet starts on the first file.
-        None | Some(ListCursor::Entry(_)) => {
-            let index = match cursor {
-                Some(ListCursor::Entry(changed)) => match changes.binary_search(changed) {
-                    Ok(index) | Err(index) => index.min(changes.len() - 1),
-                },
-                Some(ListCursor::Header(_)) | None => 0,
-            };
-            let group = changes[index].group;
-            match folds[group as usize] {
-                Fold::Collapsed => header(group),
-                Fold::Expanded => header(group) + 1 + index - groups[group as usize].1.start,
+        Some(ListCursor::Entry { group, path }) => {
+            match changes.binary_search_by(|changed| changed.key().cmp(&(*group, path))) {
+                Ok(index) | Err(index) => entry(index.min(changes.len() - 1)),
             }
         }
+        // Nothing selected yet starts on the first file.
+        None => entry(0),
     };
     Some(row.min(last))
 }
 
-/// The cursor that rests on `row`.
 pub fn cursor_at(
     changes: &[Changed],
     folds: &[Fold; Group::COUNT],
     row: usize,
 ) -> Option<ListCursor> {
-    match list_row(changes, folds, row)? {
+    match rows(changes, folds).nth(row)? {
         ListRow::Header { group, .. } => Some(ListCursor::Header(group)),
-        ListRow::Entry(index) => Some(ListCursor::Entry(changes[index].clone())),
-    }
-}
-
-fn snapshot_changes(repo: &Repo) -> &[Changed] {
-    match repo {
-        Repo::Found { snapshot, .. } => &snapshot.changes,
-        Repo::Unknown | Repo::None => &[],
+        ListRow::Entry(index) => Some(ListCursor::on(&changes[index])),
     }
 }
 
 /// Opens entry `index` in the focused pane: its diff, or its text when it has conflicts.
 pub(crate) fn open_entry(state: &mut State, index: usize, open: OpenAs, out: &mut Vec<Effect>) {
-    let Some(changed) = snapshot_changes(&state.project.git).get(index).cloned() else {
+    let Some(changed) = state.project.git.changes().get(index).cloned() else {
         return;
     };
     let path = changed.path.to_path(state.project.root.path());
-    let arrive = match changed.group {
+    let arrive = match changed.entry.group() {
         Group::Conflicts => Arrive::In(Shown::Source),
         Group::Staged | Group::Changes => Arrive::In(Shown::Diff),
     };
-    state.changes.cursor = Some(ListCursor::Entry(changed));
+    state.changes.cursor = Some(ListCursor::on(&changed));
     crate::apply::open(state, path, arrive, None, open, out);
 }
 
 pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
     let folds = state.changes.folds;
-    let changes = snapshot_changes(&state.project.git);
+    let changes = state.project.git.changes();
     let at = cursor_row(changes, &folds, state.changes.cursor.as_ref());
-    let row = at.and_then(|at| list_row(changes, &folds, at));
+    let row = at.and_then(|at| rows(changes, &folds).nth(at));
     let root = state.project.root.path();
     // Paths a file operation applies to: the entry, or every entry of a header's group.
     let paths = |row: ListRow| -> Vec<PathBuf> {
@@ -207,7 +208,7 @@ pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
             state.changes.folds[group as usize] = Fold::Collapsed
         }
         (ChangesCommand::Collapse, _, Some(ListRow::Entry(index))) => {
-            state.changes.cursor = Some(ListCursor::Header(changes[index].group))
+            state.changes.cursor = Some(ListCursor::Header(changes[index].entry.group()))
         }
         (ChangesCommand::Stage, _, Some(row)) => {
             for path in paths(row) {

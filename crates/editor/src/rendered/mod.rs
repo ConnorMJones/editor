@@ -1,5 +1,4 @@
-//! Rendered markdown and typst views: GPUI lists of blocks or pages, with typeset SVGs
-//! rasterised at their drawn device size.
+//! Rendered views: GPUI lists of blocks or pages, with SVGs rasterised at their drawn size.
 
 use gpui::{
     AnyElement, App, Context, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
@@ -95,8 +94,7 @@ enum Want<'a> {
     },
 }
 
-/// What the state holds for a list it asked to move: a place, which needs no report when the list
-/// lands there, or a motion, which always does.
+/// A place needs no report when the list lands there; a motion always does.
 enum Asked {
     At(ListAt),
     Move,
@@ -151,6 +149,7 @@ fn report(state: &mut State, pane: PaneId, at: ListAt) {
 
 /// Brings each document and pages pane's list in line with the state and carries out its scroll.
 pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let _span = tracing::trace_span!("rendered sync").entered();
     let Workspace {
         state,
         rendered,
@@ -268,7 +267,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
             None => {
                 let list = ListState::new(hashes.len(), ListAlignment::Top, *window_height);
                 let workspace = cx.weak_entity();
-                // The list scrolls itself on the wheel; the state hears of it once the list lets go.
+                // The list scrolls itself on the wheel; the state hears once the list lets go.
                 list.set_scroll_handler(move |_, window, cx| {
                     let workspace = workspace.clone();
                     window.defer(cx, move |_, cx| {

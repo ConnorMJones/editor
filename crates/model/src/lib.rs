@@ -2,6 +2,7 @@ pub mod color;
 pub mod command;
 pub mod config;
 pub mod git;
+pub mod job;
 pub mod key;
 pub mod markdown;
 pub mod mode;

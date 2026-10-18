@@ -1,6 +1,6 @@
 use std::fs;
 
-use state::project::session::{self, Session, SessionError};
+use state::project::session::{self, Session, SessionError, SessionPane};
 use state::{Files, Sidebar};
 
 use crate::harness::Harness;
@@ -94,6 +94,25 @@ fn selections_are_clamped_to_shorter_files() {
     assert!(after.view().selection.primary().head <= 3);
 }
 
+#[test]
+fn a_primary_selection_that_does_not_exist_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+
+    let mut before = Harness::new(dir.path());
+    before.keys(":o a.txt<ret>");
+    let mut saved = session::snapshot(&before.state);
+    match &mut saved.panes[0] {
+        SessionPane::Tabs { tabs, .. } => tabs[0].primary = 1,
+        SessionPane::Empty => panic!("the pane has a tab"),
+    }
+
+    let mut after = Harness::new(dir.path());
+    assert!(matches!(
+        after.run(|state, out| session::restore(state, saved, out)),
+        Err(SessionError::Selection { pane: 0, tab: 0 })
+    ));
+}
 #[test]
 fn invalid_layouts_are_rejected() {
     let dir = tempfile::tempdir().unwrap();

@@ -13,7 +13,7 @@ use model::register::{Clipboard, Register};
 use slotmap::SlotMap;
 
 use crate::git::diffview::{self, RIGHT, Right};
-use crate::text::buffer::{Buffer, BufferId, Content, TextDoc};
+use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::text::registers::ClipboardUse;
 use crate::view::display::{Fillers, Indent, text_format};
 use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, Viewport};
@@ -52,8 +52,7 @@ pub fn annotations<'a>(text: RopeSlice<'a>, padding: Padding<'a>) -> TextAnnotat
     annotations
 }
 
-/// The position `delta` rows from `anchor` and `rows`, through annotation rows and up into
-/// the `lead` rows above the first line.
+/// `delta` rows from `anchor` and `rows`, through annotation rows and into the `lead`.
 pub fn offset(
     text: RopeSlice,
     anchor: usize,
@@ -168,7 +167,7 @@ pub fn scroll(
     (moved, dragged)
 }
 
-/// The selection with the primary cursor dragged inside the scrolloff band of a view moved in `direction`.
+/// The selection with the primary cursor dragged into the scrolloff band.
 fn into_band(
     text: RopeSlice,
     selection: &Selection,
@@ -238,7 +237,6 @@ impl Unit {
         }
     }
 
-    /// The range of this unit around `pos`.
     pub fn around(self, text: RopeSlice, pos: usize) -> Range {
         match self {
             Unit::Char => Range::point(pos),
@@ -297,6 +295,27 @@ pub struct Thumb {
     pub height: f32,
 }
 
+/// Where a press on the track lands, from the thumb's point of view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OnTrack {
+    Above,
+    /// On the thumb, `grab` below its top.
+    Thumb {
+        grab: f32,
+    },
+    Below,
+}
+
+impl Thumb {
+    pub fn hit(self, y: f32) -> OnTrack {
+        match y - self.top {
+            grab if grab < 0.0 => OnTrack::Above,
+            grab if grab > self.height => OnTrack::Below,
+            grab => OnTrack::Thumb { grab },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scrollbar {
     /// The whole document is on screen.
@@ -304,7 +323,6 @@ pub enum Scrollbar {
     Shown(Thumb),
 }
 
-/// Thumb for a view showing document lines `visible` on a `track` long track.
 /// Lines stand in for visual rows, so a soft-wrapped line counts as one.
 pub fn scrollbar(
     len_lines: usize,
@@ -336,8 +354,7 @@ pub fn line_at_thumb(len_lines: usize, shown: usize, height: f32, track: f32, to
     }
 }
 
-/// The text a pane's active view scrolls: a text view, or a diff's buffer side with the
-/// diff's filler rows.
+/// A text view, or a diff's buffer side with the diff's filler rows.
 pub struct Pointed<'a> {
     pub view: &'a mut TextView,
     pub doc: &'a TextDoc,
@@ -351,10 +368,8 @@ pub(crate) fn pane_text<'a>(
     pane: PaneId,
 ) -> Option<Pointed<'a>> {
     let tab = layout.find_pane(pane)?.active_mut()?;
-    let content = &buffers[tab.buffer()].content;
-    let Content::Text { doc, .. } = content else {
-        return None;
-    };
+    let buffer = &buffers[tab.buffer()];
+    let doc = &buffer.doc;
     Some(match tab.showing_mut() {
         ShowingMut::Source(view)
         | ShowingMut::Document(view, _, BesideMut::Source(..))
@@ -368,7 +383,7 @@ pub(crate) fn pane_text<'a>(
             view,
             doc,
             padding: diff.align.sides[RIGHT].padding(),
-            right: diffview::right(content),
+            right: diffview::right(buffer),
         },
         ShowingMut::Document(_, _, BesideMut::Alone)
         | ShowingMut::Pages(_, _, BesideMut::Alone) => {
@@ -414,8 +429,7 @@ pub fn follow_cursor(state: &mut State, pane: PaneId) {
     diffview::sync_left(state, pane);
 }
 
-/// `scroll` drawn at `viewport`; a new size moves it to keep the cursor inside the scrolloff
-/// band. The host draws a frame with it before `measured` gives the state the same result.
+/// What the host draws this frame; `measured` later gives the state the same result.
 pub fn fit(
     doc: &TextDoc,
     selection: &Selection,
@@ -446,8 +460,7 @@ pub fn fit(
     }
 }
 
-/// The host drew `pane`'s text area at `viewport`; reported after the frame, so the pane may
-/// have closed since.
+/// Reported after the frame, so the pane may have closed since.
 pub fn measured(state: &mut State, pane: PaneId, viewport: Viewport) {
     let State {
         layout,

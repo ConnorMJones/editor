@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use git2::Status;
 use model::git::{Change, GitStatus, Group, Kind};
-use state::git::{Changed, GitSnapshot, aggregate, classify};
+use state::git::{Entry, GitSnapshot, Work, aggregate, classify};
 use state::project::path::{Folder, RelPath};
 
 fn p(path: &str) -> RelPath {
@@ -118,7 +118,7 @@ fn changes_list_in_sidebar_order() {
     let order: Vec<(Group, &str)> = snapshot
         .changes
         .iter()
-        .map(|Changed { group, path }| (*group, path.as_str()))
+        .map(|changed| (changed.entry.group(), changed.path.as_str()))
         .collect();
     assert_eq!(
         order,
@@ -147,4 +147,30 @@ fn a_root_the_enclosing_repository_ignores_shows_its_files_as_ignored() {
     assert!(found.snapshot.unlisted.is_empty());
     assert_eq!(found.snapshot.root, Some(Change::Ignored));
     assert_eq!(found.snapshot.get(&p("a.txt")), Some(GitStatus::Ignored));
+}
+
+#[test]
+fn a_partly_staged_file_lists_each_side_with_the_other_beneath_it() {
+    let both = Change::Both {
+        staged: Kind::Added,
+        unstaged: Kind::Modified,
+    };
+    assert_eq!(
+        Entry::of(both).as_slice(),
+        [
+            Entry::Staged {
+                kind: Kind::Added,
+                unstaged: Some(Kind::Modified),
+            },
+            Entry::Unstaged(Work::Changed {
+                kind: Kind::Modified,
+                staged: Some(Kind::Added),
+            }),
+        ]
+    );
+    assert!(Entry::of(Change::Ignored).is_empty());
+    assert_eq!(
+        Entry::of(Change::Untracked).as_slice(),
+        [Entry::Unstaged(Work::Untracked)]
+    );
 }

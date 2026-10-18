@@ -1,12 +1,13 @@
 use std::fs;
 
+use model::job::Busy;
 use model::notice::Notice;
 use model::typeset::{Origin, SourceFile};
 use state::render::document;
 use state::render::markdown::Figure;
 use state::render::pages::{self, PagesScroll};
-use state::render::typeset::{self, Compile, Outcome, Render, SPARE, Typst};
-use state::text::buffer::Content;
+use state::render::typeset::{self, Outcome, Render, SPARE, Typst};
+
 use state::view::layout::PaneId;
 use state::view::tab::{Showing, Tab};
 
@@ -44,9 +45,7 @@ fn open(name: &str, text: &str) -> (tempfile::TempDir, Harness) {
 
 /// The figures of the focused buffer's parsed markdown, with their sources.
 fn figures(h: &Harness) -> Vec<(String, Figure)> {
-    let Content::Text { doc, .. } = &h.state.buffers[h.view().buffer()].content else {
-        panic!("loading");
-    };
+    let doc = &h.state.buffers[h.view().buffer()].doc;
     let parsed = document::markdown(&h.state.documents, h.view().buffer(), doc).expect("parsed");
     let mut found = Vec::new();
     typeset::each_figure(&parsed.blocks, |figure, source| {
@@ -66,7 +65,7 @@ fn render<'a>(h: &'a Harness, source: &str) -> &'a Render {
 
 fn typst(h: &Harness) -> (u64, &Typst) {
     let buffer = h.view().buffer();
-    let doc = h.state.buffers[buffer].doc().expect("loaded");
+    let doc = &h.state.buffers[buffer].doc;
     match h.state.compiles.get(buffer) {
         Some(typst) => (doc.version, typst),
         None => panic!("no typst preview"),
@@ -176,7 +175,7 @@ fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     assert_eq!(h.held.len(), 1);
     h.keys("Ay<esc>");
     assert_eq!(h.held.len(), 1, "one compile at a time");
-    assert_eq!(typst(&h).1.compile, Compile::Running);
+    assert_eq!(typst(&h).1.compile, Busy::Running);
     let shown = typst(&h).1.pages.as_ref().unwrap().version;
     h.release(0);
     assert_eq!(typst(&h).1.pages.as_ref().unwrap().version, shown);
@@ -184,7 +183,7 @@ fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     h.release(0);
     let (version, preview_state) = typst(&h);
     assert_eq!(preview_state.pages.as_ref().unwrap().version, version);
-    assert_eq!(preview_state.compile, Compile::Idle);
+    assert_eq!(preview_state.compile, Busy::Idle);
 
     // An error keeps the last good pages and reports where it is.
     h.typesetting = Typesetting::Run;

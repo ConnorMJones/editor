@@ -8,7 +8,7 @@ pub mod typeset;
 use model::command::{Direction, ReadCommand, ScrollBy, Shown};
 
 use crate::view::mode;
-use crate::view::tab::{Showing, Tab};
+use crate::view::tab::{ShowingMut, Tab};
 use crate::{Effect, State};
 
 /// Where a rendering opens: on a source line, placed once the rendering is ready, or at a block
@@ -40,12 +40,21 @@ pub fn read(state: &mut State, command: ReadCommand) {
         ReadCommand::Leave => return mode::show(state, Shown::Source),
         ReadCommand::Move(motion) => motion,
     };
-    let moved = match state.layout.focused().active().map(Tab::showing) {
-        Some(Showing::Document(..)) => document::moved,
-        Some(Showing::Pages(..)) => pages::moved,
-        Some(Showing::Source(_) | Showing::Diff(..)) | None => return,
-    };
-    moved(state, motion)
+    let State {
+        layout,
+        documents,
+        compiles,
+        ..
+    } = state;
+    match layout.focused_mut().active_mut().map(Tab::showing_mut) {
+        Some(ShowingMut::Document(text, view, _)) => {
+            document::moved(view, documents.get(text.buffer()), motion)
+        }
+        Some(ShowingMut::Pages(text, view, _)) => {
+            pages::moved(view, compiles.get(text.buffer()), motion)
+        }
+        Some(ShowingMut::Source(_) | ShowingMut::Diff(..)) | None => {}
+    }
 }
 
 /// Lines and half viewports a scroll key moves by.

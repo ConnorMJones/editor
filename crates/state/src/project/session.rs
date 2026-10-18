@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use helix_core::{Range, Selection, SmallVec};
+use helix_core::SmallVec;
 use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,7 @@ use crate::render::Opening;
 use crate::render::document::DocumentScroll;
 use crate::render::pages::PagesScroll;
 use crate::sidebar::tree::{self, Dir, Fold, Listing};
-use crate::text::buffer::Content;
+use crate::text::buffer::{BufferId, Saved, Target};
 use crate::view::layout::{
     Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs,
 };
@@ -117,6 +117,8 @@ pub enum SessionError {
     UnusedPane(usize),
     #[error("pane {pane}, tab {tab}: the file has no rendering")]
     NoRendering { pane: usize, tab: usize },
+    #[error("pane {pane}, tab {tab}: the primary selection does not exist")]
+    Selection { pane: usize, tab: usize },
     #[error("focus names pane {0}, which does not exist")]
     MissingFocus(usize),
     #[error("pane {pane}: {reason}")]
@@ -250,8 +252,7 @@ fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> Ses
     }
 }
 
-/// Reopens the session's buffers and rebuilds its layout; files that no longer open are
-/// skipped, their panes left empty when no tab remains. Call after `boot`.
+/// Files that no longer open are skipped and their emptied panes close; call after `boot`.
 pub fn restore(
     state: &mut State,
     session: Session,
@@ -292,6 +293,7 @@ pub fn restore(
         return Err(SessionError::Tabs { pane, reason });
     }
 
+    let mut places: Vec<(PaneId, BufferId, Saved)> = Vec::new();
     for (pane, saved) in session.panes.into_iter().enumerate() {
         let SessionPane::Tabs {
             tabs,
@@ -312,38 +314,30 @@ pub fn restore(
                 primary,
                 scroll,
             } = item;
+            let saved = Saved::new(&ranges, primary, scroll).ok_or(SessionError::Selection {
+                pane,
+                tab: saved_index,
+            })?;
             // A diff also shows a file deleted from the worktree.
             let buffer = match (mode, path.is_file(), path.exists()) {
-                (_, true, _) | (SessionMode::Diff, false, false) => apply::load(state, path, out),
+                (_, true, _) | (SessionMode::Diff, false, false) => {
+                    match apply::read_now(state, &path, out) {
+                        Ok(buffer) => buffer,
+                        Err(notice) => {
+                            state.notice = Some(notice);
+                            continue;
+                        }
+                    }
+                }
                 (
                     SessionMode::Source | SessionMode::Render { .. } | SessionMode::Split { .. },
                     false,
                     _,
                 )
-                | (SessionMode::Diff, false, true) => None,
+                | (SessionMode::Diff, false, true) => continue,
             };
-            let Some(buffer) = buffer else {
-                continue;
-            };
-            // Loading buffers clamp their views when the text arrives.
-            let len = match &state.buffers[buffer].content {
-                Content::Text { doc, .. } => doc.text.len_chars(),
-                Content::Loading { .. } => usize::MAX,
-            };
-            let ranges: SmallVec<[Range; 1]> = ranges
-                .iter()
-                .map(|&[anchor, head]| Range::new(anchor.min(len), head.min(len)))
-                .collect();
             let mut tab = Tab::open(buffer, &state.buffers[buffer].path);
-            let view = tab.text_mut();
-            view.selection = match ranges.is_empty() {
-                true => Selection::point(0),
-                false => {
-                    let primary = primary.min(ranges.len() - 1);
-                    Selection::new(ranges, primary)
-                }
-            };
-            view.scroll.anchor = scroll.min(len);
+            places.push((ids[pane], buffer, saved));
             // Only a rendering uses where it opens.
             let (shown, at) = match mode {
                 SessionMode::Source => (Shown::Source, Opening::Line(0)),
@@ -393,6 +387,9 @@ pub fn restore(
             Ok(()) | Err(CloseError::LastPane) => {}
             Err(CloseError::NotInLayout) => unreachable!("restored panes are leaves"),
         }
+    }
+    for (pane, buffer, saved) in places {
+        apply::place(state, pane, buffer, Target::Saved(saved));
     }
 
     state.sidebar = match session.sidebar {

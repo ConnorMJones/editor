@@ -13,9 +13,11 @@ use crate::project::Project;
 use crate::project::files::{FileIndex, Indexed, OnIndexed};
 use crate::project::links::{self, Dest, Resolution};
 use crate::project::path::RelPath;
+use crate::render::document::Documents;
 use crate::render::markdown::{self, Format, LinkTarget, WikiLink};
-use crate::text::buffer::{BufferId, Content};
+use crate::text::buffer::{Buffer, BufferId};
 use crate::{Effect, Overlay, State, render::document};
+use slotmap::SlotMap;
 
 #[derive(Default)]
 pub struct Backlinks {
@@ -202,12 +204,8 @@ pub fn ensure(state: &mut State, out: &mut Vec<Effect>) {
     }
 }
 
-/// Notes the watcher saw change; before the first walk ends, the build reads them anyway.
-pub fn changed(state: &mut State, paths: &[RelPath], out: &mut Vec<Effect>) {
-    let root = state.project.root.path();
-    let FileIndex::Ready(Indexed { backlinks, .. }) = &mut state.project.index else {
-        return;
-    };
+/// Notes the watcher saw change.
+pub fn changed(backlinks: &mut Backlinks, root: &Path, paths: &[RelPath], out: &mut Vec<Effect>) {
     let notes: Vec<RelPath> = paths.iter().filter(|path| is_note(path)).cloned().collect();
     match (&mut backlinks.build, notes.is_empty()) {
         (_, true) | (Build::Unbuilt, false) => {}
@@ -219,14 +217,10 @@ pub fn changed(state: &mut State, paths: &[RelPath], out: &mut Vec<Effect>) {
 }
 
 /// The file index changed: drops notes that are gone and reads ones it does not know.
-pub fn reconcile(state: &mut State, out: &mut Vec<Effect>) {
-    let root = state.project.root.path();
-    let FileIndex::Ready(Indexed {
+pub fn reconcile(indexed: &mut Indexed, root: &Path, out: &mut Vec<Effect>) {
+    let Indexed {
         files, backlinks, ..
-    }) = &mut state.project.index
-    else {
-        return;
-    };
+    } = indexed;
     match backlinks.build {
         Build::Ready => {}
         Build::Unbuilt | Build::Building { .. } => return,
@@ -248,16 +242,19 @@ pub fn reconcile(state: &mut State, out: &mut Vec<Effect>) {
 
 /// A finished read: applies notes no newer source replaced, then fills a waiting picker.
 pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &mut Vec<Effect>) {
-    let root = state.project.root.path();
     let State {
-        project: Project { index, .. },
+        project: Project { index, root, .. },
         buffers,
+        documents,
+        overlay,
+        matcher,
         ..
     } = state;
-    // Reads start from a built index, so one is here.
-    let FileIndex::Ready(Indexed { backlinks, .. }) = index else {
-        return;
+    let indexed = match index {
+        FileIndex::Ready(indexed) => indexed,
+        FileIndex::Loading { .. } => unreachable!("notes are read only from a built index"),
     };
+    let backlinks = &mut indexed.backlinks;
     for (path, read) in reads {
         let newer = backlinks.notes.get(&path).is_some_and(|note| {
             note.stamp > stamp
@@ -294,36 +291,23 @@ pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &
     match dirty.is_empty() {
         true => {}
         false => {
-            request(backlinks, root, dirty, out);
+            request(backlinks, root.path(), dirty, out);
         }
     }
-    reconcile(state, out);
+    reconcile(indexed, root.path(), out);
     // A backlinks picker opened before the first read fills now.
-    let note = match &state.overlay {
-        Overlay::Picker(picker) => match &picker.items {
-            Items::Backlinks(referrers) => match referrers.search {
-                Search::Running => referrers.note.clone(),
-                Search::Idle | Search::Done | Search::Truncated => return,
-            },
-            Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Grep(_) => return,
-        },
-        Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => return,
-    };
-    sync_buffers(state, out);
-    let State {
-        overlay,
-        matcher,
-        project: Project { index, .. },
-        ..
-    } = state;
-    let (FileIndex::Ready(indexed), Overlay::Picker(picker)) = (index, overlay) else {
+    let Overlay::Picker(picker) = overlay else {
         return;
     };
     match &mut picker.items {
-        Items::Backlinks(referrers) => {
-            referrers.hits = hits(indexed, &note);
-            referrers.search = Search::Done;
-        }
+        Items::Backlinks(referrers) => match referrers.search {
+            Search::Running => {
+                sync_buffers(&mut indexed.backlinks, root.path(), buffers, documents, out);
+                referrers.hits = hits(indexed, &referrers.note);
+                referrers.search = Search::Done;
+            }
+            Search::Idle | Search::Done | Search::Truncated => return,
+        },
         Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Grep(_) => return,
     }
     crate::input::picker::filter(picker, matcher, Narrowing::All);
@@ -332,22 +316,17 @@ pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &
 
 /// Reads the links of open notes whose text moved since, and re-reads notes whose buffer
 /// closed.
-pub fn sync_buffers(state: &mut State, out: &mut Vec<Effect>) {
-    let State {
-        project: Project { index, root, .. },
-        buffers,
-        documents,
-        ..
-    } = state;
-    let FileIndex::Ready(Indexed { backlinks, .. }) = index else {
-        return;
-    };
+pub fn sync_buffers(
+    backlinks: &mut Backlinks,
+    root: &Path,
+    buffers: &SlotMap<BufferId, Buffer>,
+    documents: &Documents,
+    out: &mut Vec<Effect>,
+) {
     let mut scratch = String::new();
     for (id, buffer) in buffers.iter() {
-        let Content::Text { doc, .. } = &buffer.content else {
-            continue;
-        };
-        let Ok(path) = RelPath::new(root.path(), &buffer.path) else {
+        let doc = &buffer.doc;
+        let Ok(path) = RelPath::new(root, &buffer.path) else {
             continue;
         };
         let source = Source::Buffer {
@@ -396,7 +375,7 @@ pub fn sync_buffers(state: &mut State, out: &mut Vec<Effect>) {
     match closed.is_empty() {
         true => {}
         false => {
-            request(backlinks, root.path(), closed, out);
+            request(backlinks, root, closed, out);
         }
     }
 }

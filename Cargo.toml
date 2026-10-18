@@ -41,8 +41,17 @@ ztracing_macro = { path = "vendor/ztracing_macro" }
 clap = { version = "4.6.7", features = ["derive"] }
 toml = "1.1.6"
 # Pinned to the Tracy 0.13.1 protocol (the system profiler); bump with the viewer.
-tracing-tracy = "0.11.4"
-tracy-client = "=0.18.4"
+# System tracing (context switches, sampling) is opt-in through the editor's `tracy-sampling`.
+tracing-tracy = { version = "0.11.4", default-features = false, features = [
+    "enable",
+    "broadcast",
+    "code-transfer",
+    "callstack-inlines",
+] }
+tracy-client = { version = "=0.18.4", default-features = false, features = [
+    "enable",
+    "crash-handler",
+] }
 ignore = "0.4.33"
 notify = { version = "8.2.0", default-features = false }
 git2 = { version = "0.21.0", default-features = false }

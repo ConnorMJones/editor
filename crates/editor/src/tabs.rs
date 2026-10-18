@@ -19,8 +19,7 @@ const INDICATOR: gpui::Pixels = px(2.);
 const GROUP: &str = "tab";
 
 impl Workspace {
-    /// Zed-style tab bar of `pane`: preview tabs in italics, a modified dot that becomes a
-    /// close button on hover, and duplicate file names told apart by their directories.
+    /// Zed-style: preview tabs in italics, a modified dot that becomes a close button on hover.
     pub fn tab_bar(
         &self,
         pane: PaneId,
@@ -52,8 +51,7 @@ impl Workspace {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            // Zed's detail: enough trailing parent directories to differ from every other
-            // open tab with the same file name.
+            // Zed's detail: enough parent directories to tell apart tabs with the same file name.
             let parent = path.parent().unwrap_or(Path::new(""));
             let depth = (state.layout.panes().values())
                 .flat_map(Pane::items)
@@ -77,7 +75,7 @@ impl Workspace {
                     .to_string()
             });
             let active = index == tabs.active();
-            let modified = buffer.content.is_modified();
+            let modified = buffer.doc.is_modified();
             let (bg, fg, edge, bottom) = match (active, focused) {
                 (true, true) => (
                     hsla(theme.background),
@@ -103,7 +101,7 @@ impl Workspace {
                 true => label.italic(),
                 false => label,
             };
-            // Zed marks a diff tab with a muted diff icon before the file name; a rendering gets one too.
+            // A diff or rendering gets a muted icon before the file name, as zed marks diffs.
             let icon = match item.tab.shown() {
                 Shown::Source => None,
                 Shown::Diff => Some("±"),
@@ -171,10 +169,7 @@ impl Workspace {
                     tab.hover(|style| style.bg(hsla(theme.chrome.hover)))
                 })
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    let click = match event.click_count() {
-                        2 => Click::Double,
-                        _ => Click::Single,
-                    };
+                    let click = Click::of(event.click_count());
                     panes::click_tab(&mut this.state, pane, index, click);
                     window.focus(&this.focus, cx);
                     this.changed(cx);

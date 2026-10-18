@@ -12,6 +12,7 @@ use state::input::keymap::Context;
 use state::project::session::{self, SessionMode, SessionPane, SessionSidebar};
 use state::sidebar::changes::{self, ListCursor, ListRow};
 use state::sidebar::tree::Fold;
+use state::view::draws::{self, Draws, Part, Rows};
 use state::view::layout::Viewport;
 use state::view::panes::{self, Click};
 use state::view::scroll;
@@ -37,6 +38,10 @@ fn shown(h: &Harness) -> Shown {
     h.state.layout.focused().active().map(Tab::shown).unwrap()
 }
 
+fn draws(h: &Harness, part: Part) -> Draws<'_> {
+    draws::drawing(&h.state, h.state.layout.focus(), part).draws
+}
+
 /// Draws nothing but records the size of the focused diff, as a frame would.
 fn show(h: &mut Harness, rows: u16) {
     let focus = h.state.layout.focus();
@@ -53,7 +58,7 @@ fn changed(h: &Harness) -> Vec<(Group, String)> {
         Repo::Found { snapshot, .. } => snapshot
             .changes
             .iter()
-            .map(|entry| (entry.group, entry.path.as_str().to_owned()))
+            .map(|entry| (entry.entry.group(), entry.path.as_str().to_owned()))
             .collect(),
         Repo::None | Repo::Unknown => panic!("no repository"),
     }
@@ -179,12 +184,12 @@ fn deleted_files_show_head_beside_an_inert_side() {
     h.keys(":o gone.txt<ret><space>d");
     show(&mut h, 10);
     let buffer = h.view().buffer();
-    assert_eq!(
-        diffview::right(&h.state.buffers[buffer].content),
-        Right::Deleted
-    );
+    assert_eq!(diffview::right(&h.state.buffers[buffer]), Right::Deleted);
     let shown = diff(&h);
     assert!(matches!(shown.left, Left::Head { .. }));
+    assert!(matches!(draws(&h, Part::Head), Draws::Head { .. }));
+    assert!(matches!(draws(&h, Part::Buffer), Draws::Deleted { .. }));
+    assert!(matches!(draws(&h, Part::Text), Draws::Absent));
     // HEAD's three lines face filler rows above the empty buffer.
     assert_eq!(shown.align.sides[RIGHT].lead, 3);
     h.keys("ityped");
@@ -212,6 +217,14 @@ fn untracked_files_show_a_blank_head_side() {
     let shown = diff(&h);
     assert!(matches!(shown.left, Left::Absent));
     assert_eq!(shown.align.key, None);
+    assert!(matches!(draws(&h, Part::Head), Draws::NoHead));
+    assert!(matches!(
+        draws(&h, Part::Buffer),
+        Draws::Editable {
+            rows: Rows::Diff(_),
+            ..
+        }
+    ));
     // The buffer side is live.
     h.keys("iok <esc>");
     assert_eq!(h.doc().text, "ok fresh\n");
@@ -242,7 +255,7 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
     };
     let folds = h.state.changes.folds;
     let rows: Vec<Option<ListRow>> = (0..changes::list_len(&snapshot.changes, &folds) + 1)
-        .map(|row| changes::list_row(&snapshot.changes, &folds, row))
+        .map(|row| changes::rows(&snapshot.changes, &folds).nth(row))
         .collect();
     assert_eq!(
         rows,
@@ -263,7 +276,7 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
             None,
         ]
     );
-    let new = ListCursor::Entry(snapshot.changes[2].clone());
+    let new = ListCursor::on(&snapshot.changes[2]);
     assert_eq!(
         changes::cursor_row(&snapshot.changes, &folds, Some(&new)),
         Some(4)
@@ -373,7 +386,7 @@ fn clicking_the_head_side_moves_the_cursor_to_the_facing_line() {
 
 fn cursor_path(h: &Harness) -> Option<&str> {
     match h.state.changes.cursor.as_ref() {
-        Some(ListCursor::Entry(changed)) => Some(changed.path.as_str()),
+        Some(ListCursor::Entry { path, .. }) => Some(path.as_str()),
         Some(ListCursor::Header(_)) | None => None,
     }
 }

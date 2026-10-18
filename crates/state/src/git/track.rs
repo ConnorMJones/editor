@@ -4,39 +4,33 @@ use crate::git::diff::{Base, BaseRead, Bases, Compute, Finished, Lines, Outcome,
 use crate::git::navigate::land;
 use crate::git::{RepoPath, locate};
 use crate::job::Job;
-use crate::text::buffer::{BufferId, Content};
-use crate::{Effect, Refresh, Repo, State};
+use crate::text::buffer::{Buffer, BufferId};
+use crate::{Effect, Repo, State};
+use model::job::{Start, Then};
 
 /// Starts a base read for `buffer`, or queues one behind the running read.
 pub fn request_bases(state: &mut State, buffer: BufferId, out: &mut Vec<Effect>) {
-    let Some(entry) = state.buffers.get_mut(buffer) else {
-        return;
-    };
-    let Content::Text { diff, .. } = &mut entry.content else {
-        return;
-    };
+    let entry = &mut state.buffers[buffer];
+    let diff = &mut entry.diff;
     match (&state.project.git, locate(&state.project.git, &entry.path)) {
         // The first status refresh requests every buffer's bases.
         (Repo::Unknown, _) => {}
         (Repo::None | Repo::Found { .. }, None) => diff.bases = Bases::NoRepo,
-        (Repo::None | Repo::Found { .. }, Some((git_dir, path))) => {
-            diff.read = match diff.read {
-                Refresh::Idle => {
-                    let known = match &diff.bases {
-                        Bases::Tracked(tracked) => [tracked.head.oid(), tracked.index.oid()],
-                        Bases::NoRepo | Bases::Loading { .. } | Bases::Untracked => [None, None],
-                    };
-                    out.push(Effect::Job(Job::DiffBase {
-                        buffer,
-                        git_dir,
-                        path,
-                        known,
-                    }));
-                    Refresh::Running
-                }
-                Refresh::Running | Refresh::Queued => Refresh::Queued,
-            };
-        }
+        (Repo::None | Repo::Found { .. }, Some((git_dir, path))) => match diff.read.request() {
+            Start::Now => {
+                let known = match &diff.bases {
+                    Bases::Tracked(tracked) => [tracked.head.oid(), tracked.index.oid()],
+                    Bases::NoRepo | Bases::Loading { .. } | Bases::Untracked => [None, None],
+                };
+                out.push(Effect::Job(Job::DiffBase {
+                    buffer,
+                    git_dir,
+                    path,
+                    known,
+                }));
+            }
+            Start::Later => {}
+        },
     }
 }
 
@@ -48,7 +42,6 @@ pub fn request_all_bases(state: &mut State, out: &mut Vec<Effect>) {
     }
 }
 
-/// Takes the bases read for `buffer` at repository `path`.
 pub fn bases_read(
     state: &mut State,
     buffer: BufferId,
@@ -59,10 +52,8 @@ pub fn bases_read(
     let Some(entry) = state.buffers.get_mut(buffer) else {
         return;
     };
-    let Content::Text { diff, .. } = &mut entry.content else {
-        return;
-    };
-    let again = std::mem::replace(&mut diff.read, Refresh::Idle);
+    let diff = &mut entry.diff;
+    let again = diff.read.finish();
     let result = match (result, locate(&state.project.git, &entry.path)) {
         (Ok(read), Some((_, now))) if now == path => Ok(read),
         // The buffer was renamed or left the repository while the read ran.
@@ -99,15 +90,14 @@ pub fn bases_read(
                 },
                 // The bases moved while the read ran; read them again.
                 (None, _) | (_, None) => {
-                    diff.read = Refresh::Idle;
                     return request_bases(state, buffer, out);
                 }
             }
         }
     }
     match again {
-        Refresh::Queued => request_bases(state, buffer, out),
-        Refresh::Running | Refresh::Idle => {}
+        Then::Again => request_bases(state, buffer, out),
+        Then::Done => {}
     }
 }
 
@@ -119,9 +109,8 @@ pub fn diffed(
     lines: Box<Lines>,
     outcome: Outcome,
 ) {
-    let Some(Content::Text { doc, diff, .. }) =
-        state.buffers.get_mut(buffer).map(|b| &mut b.content)
-    else {
+    // A buffer closed since the diff began drops its result.
+    let Some(Buffer { doc, diff, .. }) = state.buffers.get_mut(buffer) else {
         return;
     };
     let Bases::Tracked(tracked) = &mut diff.bases else {
@@ -136,8 +125,8 @@ pub fn diffed(
 /// Starts a diff for every tracked buffer whose hunks no longer match its text or bases.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     for (buffer, entry) in state.buffers.iter_mut() {
-        let (doc, tracked) = match &mut entry.content {
-            Content::Text {
+        let (doc, tracked) = match entry {
+            Buffer {
                 doc,
                 diff:
                     crate::git::diff::Diff {
@@ -146,7 +135,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
                     },
                 ..
             } => (doc, tracked),
-            Content::Text { .. } | Content::Loading { .. } => continue,
+            Buffer { .. } => continue,
         };
         let stamp = tracked.current(doc.version);
         match tracked.stamp == Some(stamp) {

@@ -6,7 +6,6 @@ use model::notice::Notice;
 
 use crate::State;
 use crate::render::{Opening, document};
-use crate::text::buffer::Content;
 use crate::view::layout::{Pane, PaneId};
 use crate::view::scroll;
 use crate::view::tab::{Beside, BesideMut, NoMode, Share, Showing, ShowingMut, Tab};
@@ -49,15 +48,7 @@ pub fn show(state: &mut State, shown: Shown) {
         return *notice = Some(Notice::NoBuffer);
     };
     let buffer = tab.buffer();
-    let entry = &buffers[buffer];
-    let doc = match &entry.content {
-        Content::Text { doc, .. } => doc,
-        Content::Loading { .. } => {
-            return *notice = Some(Notice::StillLoading {
-                path: entry.path.clone(),
-            });
-        }
-    };
+    let doc = &buffers[buffer].doc;
     let rope = doc.text.slice(..);
     let rendered_top = match tab.showing() {
         Showing::Document(_, view, Beside::Alone) => (view.scroll.anchor()).and_then(|at| {
@@ -84,7 +75,7 @@ pub fn show(state: &mut State, shown: Shown) {
         Ok(()) => {}
         Err(NoMode) => {
             return *notice = Some(Notice::NotRenderable {
-                path: entry.path.clone(),
+                path: buffers[buffer].path.clone(),
             });
         }
     }

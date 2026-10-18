@@ -10,10 +10,11 @@ use model::notice::Notice;
 use crate::apply::count_of;
 use crate::git::diff::{Bases, Diff, Hunk, Side, next_hunk, prev_hunk};
 use crate::project::path::RelPath;
-use crate::text::buffer::{BufferId, Content, Target};
+use crate::text::buffer::{Buffer, BufferId, Target};
 use crate::view::layout::PaneId;
 use crate::view::panes::Arrive;
 use crate::view::scroll;
+use crate::view::tab::Tab;
 use crate::{Effect, Repo, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,10 +44,7 @@ pub fn land(state: &mut State, buffer: BufferId) {
     let State {
         buffers, layout, ..
     } = state;
-    let Some(Content::Text { doc, diff, .. }) = buffers.get_mut(buffer).map(|b| &mut b.content)
-    else {
-        return;
-    };
+    let Buffer { doc, diff, .. } = &mut buffers[buffer];
     let tracked = match &mut diff.bases {
         Bases::Tracked(tracked) if tracked.is_fresh(doc.version) => tracked,
         Bases::Loading { .. } | Bases::Tracked(_) | Bases::NoRepo | Bases::Untracked => return,
@@ -58,10 +56,7 @@ pub fn land(state: &mut State, buffer: BufferId) {
         Edge::First => tracked.hunks.first(),
         Edge::Last => tracked.hunks.last(),
     };
-    let view = (layout.find_pane(landing.pane)).and_then(|pane| {
-        let index = pane.tabs.as_ref()?.find(buffer)?;
-        Some(pane.items_mut()[index].tab.text_mut())
-    });
+    let view = layout.tab_of(landing.pane, buffer).map(Tab::text_mut);
     match (hunk, view) {
         (Some(hunk), Some(view)) => {
             let range = hunk_range(hunk, doc.text.slice(..));
@@ -72,8 +67,7 @@ pub fn land(state: &mut State, buffer: BufferId) {
     scroll::follow_cursor(state, landing.pane);
 }
 
-/// Each range moved to (select mode: extended to) the count-th item from it; `None` when the
-/// primary range has no item that way.
+/// Moves (select mode: extends) each range to the count-th item; `None` when the primary has none.
 pub fn step<T>(
     selection: &Selection,
     mode: Mode,
@@ -130,9 +124,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
     };
     let view = tab.text_mut();
     let buffer = view.buffer();
-    let Some(Content::Text { doc, diff, .. }) = buffers.get(buffer).map(|b| &b.content) else {
-        return;
-    };
+    let Buffer { doc, diff, .. } = &buffers[buffer];
     let hunks: &[Hunk] = match &diff.bases {
         Bases::Tracked(tracked) => &tracked.hunks,
         Bases::NoRepo | Bases::Loading { .. } | Bases::Untracked => &[],
@@ -183,7 +175,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
             };
             let path = changed.path.to_path(root);
             // Conflicts are resolved in the text, so they never open as a diff.
-            let arrive = match changed.group {
+            let arrive = match changed.entry.group() {
                 Group::Conflicts => Shown::Source,
                 Group::Staged | Group::Changes => arrive,
             };

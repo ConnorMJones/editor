@@ -1,6 +1,4 @@
-//! Typesetting the host runs for the state: math and mermaid figures of rendered markdown,
-//! typst preview pages and PDF export. The state decides what to typeset and keeps the
-//! results; the host owns the typesetter and answers each `Request` with a `Done`.
+//! The state decides what to typeset and keeps the results; the host owns the typesetter.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,10 +19,11 @@ use crate::render::document::Documents;
 use crate::render::markdown::FigureKind;
 use crate::render::markdown::{Block, BlockKind, Figure, Format, SpanKind};
 use crate::render::pages::{self, Compiles, PagesScroll};
-use crate::text::buffer::{Buffer, BufferId, Content};
+use crate::text::buffer::{Buffer, BufferId};
 use crate::view::layout::PaneId;
 use crate::view::tab::{BesideMut, ShowingMut, Tab};
 use crate::{Effect, State};
+use model::job::Busy;
 
 /// Unreferenced figures kept for undo and reopened views; older ones are evicted.
 pub const SPARE: usize = 64;
@@ -104,7 +103,7 @@ pub enum Done {
 pub struct Figures {
     pub look: Look,
     pub entries: HashMap<Figure, Entry>,
-    /// Bumped whenever an entry is filled; eviction leaves it, as no parse references an evicted entry.
+    /// Bumped when an entry fills; eviction leaves it, as no parse references an evicted entry.
     pub generation: u64,
     /// Bumped by every reference walk; entries seen by the latest walk are live.
     pub clock: u64,
@@ -142,29 +141,14 @@ impl Figures {
 
 /// A `.typ` buffer's preview: the pages of its last good compile and how the latest went.
 pub struct Typst {
-    pub compile: Compile,
+    pub compile: Busy,
     /// `TextDoc::version` of the compile in flight or last sent.
     pub requested: Option<u64>,
     pub pages: Option<Compiled>,
     pub outcome: Outcome,
     /// Project files other than the main one the last compile read; saving one recompiles.
     pub deps: Vec<PathBuf>,
-    pub locate: Locate,
-}
-
-/// Source-to-page lookups run one at a time; the newest cursor waits behind the running one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Locate {
-    Idle,
-    Running,
-    Queued(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Compile {
-    Idle,
-    /// A newer version waits for this one to finish, so at most one compile runs.
-    Running,
+    pub locate: Busy,
 }
 
 pub struct Compiled {
@@ -186,12 +170,12 @@ pub enum Outcome {
 impl Typst {
     pub fn new() -> Typst {
         Typst {
-            compile: Compile::Idle,
+            compile: Busy::Idle,
             requested: None,
             pages: None,
             outcome: Outcome::Pending,
             deps: Vec::new(),
-            locate: Locate::Idle,
+            locate: Busy::Idle,
         }
     }
 }
@@ -204,7 +188,6 @@ pub fn root_of<'a>(root: &'a Path, main: &'a Path) -> &'a Path {
     }
 }
 
-/// Calls `f` with every figure of `blocks` and its source text.
 pub fn each_figure(blocks: &[Block], mut f: impl FnMut(Figure, &str)) {
     for block in blocks {
         match &block.kind {
@@ -229,8 +212,7 @@ pub fn each_figure(blocks: &[Block], mut f: impl FnMut(Figure, &str)) {
     }
 }
 
-/// Marks the figures of every parse live, requests the new ones and evicts the oldest
-/// unreferenced ones beyond `SPARE`.
+/// Requests new figures and evicts the oldest unreferenced ones beyond `SPARE`.
 pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>) {
     figures.clock += 1;
     let Figures {
@@ -296,21 +278,15 @@ pub fn request_pages(
     out: &mut Vec<Effect>,
 ) {
     for &id in shown {
-        let (
-            Some(Buffer {
-                path,
-                content: Content::Text { doc, .. },
-            }),
-            Some(typst),
-        ) = (buffers.get(id), compiles.get_mut(id))
+        let (Some(Buffer { path, doc, .. }), Some(typst)) = (buffers.get(id), compiles.get_mut(id))
         else {
             continue;
         };
         let version = doc.version;
         match (typst.compile, typst.requested == Some(version)) {
-            (Compile::Running, _) | (Compile::Idle, true) => {}
-            (Compile::Idle, false) => {
-                typst.compile = Compile::Running;
+            (Busy::Running, _) | (Busy::Idle, true) => {}
+            (Busy::Idle, false) => {
+                typst.compile = Busy::Running;
                 typst.requested = Some(version);
                 out.push(Effect::Typeset(Request::Pages {
                     buffer: id,
@@ -336,9 +312,9 @@ pub fn export_pdf(state: &mut State, out: &mut Vec<Effect>) {
         state.notice = Some(Notice::NoBuffer);
         return;
     };
-    let Buffer { path, content } = &state.buffers[view.buffer()];
-    let notice = match (Format::of(path), content) {
-        (Some(Format::Typst), Content::Text { doc, .. }) => {
+    let Buffer { path, doc, .. } = &state.buffers[view.buffer()];
+    let notice = match Format::of(path) {
+        Some(Format::Typst) => {
             out.push(Effect::Typeset(Request::Pdf {
                 root: root_of(state.project.root.path(), path).to_owned(),
                 main: path.clone(),
@@ -347,11 +323,8 @@ pub fn export_pdf(state: &mut State, out: &mut Vec<Effect>) {
             }));
             return;
         }
-        (Some(Format::Typst), Content::Loading { .. }) => {
-            Notice::StillLoading { path: path.clone() }
-        }
-        (Some(Format::Markdown), _) => Notice::MarkdownExport,
-        (None, _) => Notice::NotTypst { path: path.clone() },
+        Some(Format::Markdown) => Notice::MarkdownExport,
+        None => Notice::NotTypst { path: path.clone() },
     };
     state.notice = Some(notice);
 }
@@ -399,18 +372,13 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                 notice,
                 ..
             } = state;
-            let (
-                Some(Buffer {
-                    path,
-                    content: Content::Text { doc, .. },
-                }),
-                Some(typst),
-            ) = (buffers.get(buffer), compiles.get_mut(buffer))
+            let (Some(Buffer { path, doc, .. }), Some(typst)) =
+                (buffers.get(buffer), compiles.get_mut(buffer))
             else {
                 return;
             };
             let current = doc.version;
-            typst.compile = Compile::Idle;
+            typst.compile = Busy::Idle;
             typst.deps = deps.into_iter().filter(|dep| dep != path).collect();
             match (version == current, result) {
                 (false, _) => {}
@@ -445,27 +413,13 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
         }
         Done::Located { buffer, at } => {
             let State {
-                layout,
-                buffers,
-                compiles,
-                ..
+                layout, compiles, ..
             } = state;
-            let (Some(Buffer { path, .. }), Some(typst)) =
-                (buffers.get(buffer), compiles.get_mut(buffer))
-            else {
+            let Some(typst) = compiles.get_mut(buffer) else {
                 return;
             };
-            typst.locate = match typst.locate {
-                Locate::Queued(cursor) => {
-                    out.push(Effect::Typeset(Request::Locate {
-                        buffer,
-                        main: path.clone(),
-                        cursor,
-                    }));
-                    Locate::Running
-                }
-                Locate::Running | Locate::Idle => Locate::Idle,
-            };
+            // The next sync asks again for a cursor that moved meanwhile.
+            typst.locate = Busy::Idle;
             // Pages waiting on a source line, or beside the source, go to where it landed.
             for pane in layout.panes_mut().map(|(_, pane)| pane) {
                 let Some(ShowingMut::Pages(text, view, beside)) =
@@ -604,4 +558,14 @@ pub fn invalidate(compiles: &mut Compiles, paths: &[PathBuf]) {
     for typst in compiles.values_mut().filter(read) {
         typst.requested = None;
     }
+}
+
+pub fn exported(state: &mut State, path: PathBuf, result: std::io::Result<usize>) {
+    state.notice = Some(match result {
+        Ok(bytes) => Notice::Exported { path, bytes },
+        Err(error) => {
+            tracing::warn!(?path, %error, "export failed");
+            Notice::WriteFailed { path, error }
+        }
+    });
 }

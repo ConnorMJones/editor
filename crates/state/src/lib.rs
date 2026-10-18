@@ -32,7 +32,7 @@ use crate::render::document::Documents;
 use crate::render::pages::Compiles;
 use crate::render::typeset;
 
-use crate::git::GitSnapshot;
+use crate::git::{Changed, GitSnapshot};
 use crate::input::keymap::{Keymap, KeymapError};
 use crate::input::picker::Picker;
 use crate::job::Job;
@@ -41,9 +41,10 @@ use crate::project::files::{FileIndex, OnIndexed};
 use crate::project::path::{Folder, RelPath};
 use crate::sidebar::changes::ChangesList;
 use crate::sidebar::tree::{Dir, Fold, Listing, Tree, TreeEdit};
-use crate::text::buffer::{Buffer, BufferId};
+use crate::text::buffer::{Buffer, BufferId, Read, ReadId};
 use crate::text::registers::{ClipboardUse, Registers};
 use crate::view::layout::Layout;
+use model::job::{InFlight, Start, Then};
 
 /// Canonical path of an existing directory the editor was opened on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,8 @@ pub struct State {
     pub languages: Arc<Loader>,
     pub keymap: Keymap,
     pub buffers: SlotMap<BufferId, Buffer>,
+    /// Files being read for their first buffer.
+    pub reads: SlotMap<ReadId, Read>,
     pub layout: Layout,
     pub overlay: Overlay,
     pub input: InputState,
@@ -124,11 +127,12 @@ impl State {
                     then: OnIndexed::Nothing,
                 },
                 git: Repo::Unknown,
-                refresh: Refresh::Idle,
+                refresh: InFlight::Idle,
             },
             languages: Arc::new(languages),
             keymap: Keymap::helix()?,
             buffers: SlotMap::with_key(),
+            reads: SlotMap::with_key(),
             layout: Layout::new(),
             overlay: Overlay::None,
             input: InputState {
@@ -183,17 +187,58 @@ pub fn boot(state: &mut State, out: &mut Vec<Effect>) {
     request_git(state, out);
 }
 
-/// Coalesces refreshes: at most one status job runs, with one more queued behind it.
 pub fn request_git(state: &mut State, out: &mut Vec<Effect>) {
-    state.project.refresh = match state.project.refresh {
-        Refresh::Idle => {
-            out.push(Effect::Job(Job::GitStatus {
-                root: state.project.root.path().to_owned(),
-            }));
-            Refresh::Running
+    match state.project.refresh.request() {
+        Start::Now => out.push(Effect::Job(Job::GitStatus {
+            root: state.project.root.path().to_owned(),
+        })),
+        Start::Later => {}
+    }
+}
+
+/// Takes a finished status: watches a newly found git dir and re-reads every buffer's bases.
+pub fn git_refreshed(
+    state: &mut State,
+    result: Result<Option<git::Found>, git2::Error>,
+    out: &mut Vec<Effect>,
+) {
+    match result {
+        Ok(Some(git::Found {
+            git_dir,
+            workdir,
+            snapshot,
+        })) => {
+            match &state.project.git {
+                Repo::Found { git_dir: known, .. } if *known == git_dir => {}
+                // Commits move refs and the reflog without touching the git dir itself.
+                Repo::Found { .. } | Repo::None | Repo::Unknown => out.push(Effect::Watch(
+                    [
+                        git_dir.clone(),
+                        git_dir.join("refs/heads"),
+                        git_dir.join("logs"),
+                    ]
+                    .into_iter()
+                    .filter(|dir| dir.is_dir())
+                    .collect(),
+                )),
+            }
+            state.project.git = Repo::Found {
+                git_dir,
+                workdir,
+                snapshot,
+            };
+            git::track::request_all_bases(state, out);
         }
-        Refresh::Running | Refresh::Queued => Refresh::Queued,
-    };
+        Ok(None) => {
+            state.project.git = Repo::None;
+            git::track::request_all_bases(state, out);
+        }
+        Err(error) => tracing::warn!(%error, "git status failed"),
+    }
+    match state.project.refresh.finish() {
+        Then::Again => request_git(state, out),
+        Then::Done => {}
+    }
 }
 
 pub enum Overlay {
@@ -250,7 +295,6 @@ impl PromptKind {
 pub struct InputState {
     pub mode: Mode,
     pub pending: KeySeq,
-    /// Numeric prefix typed in normal or select mode.
     pub count: Option<NonZeroUsize>,
     /// Register chosen with `"`; consumed by the next command.
     pub register: Option<Register>,
@@ -271,7 +315,6 @@ pub enum Sticky {
     View,
 }
 
-/// What leaving insert mode does to the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InsertExit {
     Keep,
@@ -294,7 +337,57 @@ pub struct LastMotion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exit {
     Running,
-    AfterWrite { buffers: Vec<BufferId> },
+    AfterWrite(Waiting),
+}
+
+/// Buffers whose writes a quit waits for; never empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiting(Vec<BufferId>);
+
+impl Waiting {
+    pub fn new(buffers: Vec<BufferId>) -> Option<Waiting> {
+        match buffers.is_empty() {
+            true => None,
+            false => Some(Waiting(buffers)),
+        }
+    }
+
+    pub fn one(buffer: BufferId) -> Waiting {
+        Waiting(vec![buffer])
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterWrite {
+    Stay,
+    Quit,
+}
+
+impl Exit {
+    pub fn written(&mut self, buffer: BufferId) -> AfterWrite {
+        match std::mem::replace(self, Exit::Running) {
+            Exit::Running => AfterWrite::Stay,
+            Exit::AfterWrite(Waiting(mut buffers)) => {
+                buffers.retain(|waiting| *waiting != buffer);
+                match Waiting::new(buffers) {
+                    Some(waiting) => {
+                        *self = Exit::AfterWrite(waiting);
+                        AfterWrite::Stay
+                    }
+                    None => AfterWrite::Quit,
+                }
+            }
+        }
+    }
+
+    pub fn failed(&mut self, buffer: BufferId) {
+        match self {
+            Exit::AfterWrite(Waiting(buffers)) if buffers.contains(&buffer) => {
+                *self = Exit::Running
+            }
+            Exit::AfterWrite(_) | Exit::Running => {}
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,8 +458,10 @@ pub enum Focus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Confirm {
-    /// Discards a file's changes, as `how` says.
-    Discard { path: PathBuf, how: stage::Discard },
+    Discard {
+        path: PathBuf,
+        how: stage::Discard,
+    },
     /// Creates the empty note an unresolved link names, and opens it.
     Create(RelPath),
 }
@@ -383,15 +478,15 @@ pub enum Repo {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refresh {
-    Idle,
-    Running,
-    /// Another refresh starts when the running one finishes.
-    Queued,
+impl Repo {
+    pub fn changes(&self) -> &[Changed] {
+        match self {
+            Repo::Found { snapshot, .. } => &snapshot.changes,
+            Repo::Unknown | Repo::None => &[],
+        }
+    }
 }
 
-/// Work for the host to perform after a state change.
 pub enum Effect {
     Job(Job),
     Quit,
@@ -406,7 +501,6 @@ pub enum Effect {
         clipboard: Clipboard,
         then: ClipboardUse,
     },
-    /// Opens a URL in the browser.
     OpenUrl(String),
     /// The host answers with `JobResult::Typeset`.
     Typeset(typeset::Request),
@@ -414,8 +508,10 @@ pub enum Effect {
 
 /// Brings everything derived from buffer text up to date; runs once after every event.
 pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
-    git::conflict::sync(state);
-    render::sync(state, out);
-    git::track::sync(state, out);
-    git::diffview::refresh(state, out);
+    let _span = tracing::trace_span!("sync").entered();
+    tracing::trace_span!("highlight").in_scope(|| text::highlight::sync(state, out));
+    tracing::trace_span!("conflicts").in_scope(|| git::conflict::sync(state));
+    tracing::trace_span!("render").in_scope(|| render::sync(state, out));
+    tracing::trace_span!("diffs").in_scope(|| git::track::sync(state, out));
+    tracing::trace_span!("diff views").in_scope(|| git::diffview::refresh(state, out));
 }

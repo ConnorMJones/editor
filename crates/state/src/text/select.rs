@@ -1,12 +1,13 @@
-use helix_core::chars::char_is_word;
-use helix_core::movement::Movement;
+use helix_core::chars::{char_is_whitespace, char_is_word};
+use helix_core::movement::{self, Movement};
 use helix_core::{LineEnding, Position, Range, RopeSlice, Selection, SmallVec, graphemes};
 use helix_stdx::rope::{self, RopeSliceExt};
 use model::command::{Direction, RegexOp, WordBounds};
+use model::mode::Mode;
 use model::notice::Notice;
 use model::register::Register;
 
-use crate::apply::{count_of, movement_of, select, try_select};
+use crate::apply::{count_of, movement_of, reselect, select, try_select};
 use crate::{Effect, Overlay, Prompt, PromptKind, State};
 use crate::{input::prompt, text::registers};
 
@@ -305,4 +306,112 @@ fn run_regex(state: &mut State, op: RegexOp, pattern: &str, event: PromptEvent) 
             (Err(notice), PromptEvent::Validate) => Err(notice),
         }
     });
+}
+
+pub fn select_mode(state: &mut State) {
+    reselect(state, |text, range| {
+        match range.is_empty() && range.head == text.len_chars() {
+            true => Range::new(
+                graphemes::prev_grapheme_boundary(text, range.anchor),
+                range.head,
+            ),
+            false => range,
+        }
+    });
+    state.input.mode = Mode::Select;
+}
+
+pub fn rotate(state: &mut State, direction: Direction) {
+    let count = count_of(state);
+    select(state, |_, selection, _| {
+        let mut selection = selection.clone();
+        let (index, len) = (selection.primary_index(), selection.len());
+        selection.set_primary_index(match direction {
+            Direction::Forward => (index + count) % len,
+            Direction::Backward => (index + (len.saturating_sub(count) % len)) % len,
+        });
+        selection
+    })
+}
+
+pub fn extend_line_below(state: &mut State) {
+    let count = count_of(state);
+    select(state, |doc, selection, _| {
+        let text = &doc.text;
+        selection.clone().transform(|range| {
+            let (start_line, end_line) = range.line_range(text.slice(..));
+            let start = text.line_to_char(start_line);
+            let end = text.line_to_char((end_line + 1).min(text.len_lines()));
+            let lines = match range.from() == start && range.to() == end {
+                true => count + 1,
+                false => count,
+            };
+            Range::new(
+                start,
+                text.line_to_char((end_line + lines).min(text.len_lines())),
+            )
+        })
+    })
+}
+
+pub fn extend_to_line_bounds(state: &mut State) {
+    select(state, |doc, selection, _| {
+        let text = &doc.text;
+        selection.clone().transform(|range| {
+            let (start_line, end_line) = range.line_range(text.slice(..));
+            let start = text.line_to_char(start_line);
+            let end = text.line_to_char((end_line + 1).min(text.len_lines()));
+            Range::new(start, end).with_direction(range.direction())
+        })
+    })
+}
+
+pub fn shrink_to_line_bounds(state: &mut State) {
+    select(state, |doc, selection, _| {
+        let text = &doc.text;
+        selection.clone().transform(|range| {
+            let (start_line, end_line) = range.line_range(text.slice(..));
+            match start_line == end_line {
+                true => range,
+                false => {
+                    let start = match text.line_to_char(start_line) == range.from() {
+                        true => range.from(),
+                        false => text.line_to_char((start_line + 1).min(text.len_lines())),
+                    };
+                    let full_end = text.line_to_char((end_line + 1).min(text.len_lines()));
+                    let end = match full_end == range.to() {
+                        true => full_end,
+                        false => text.line_to_char(end_line),
+                    };
+                    Range::new(start, end).with_direction(range.direction())
+                }
+            }
+        })
+    })
+}
+
+pub fn trim(state: &mut State) {
+    select(state, |doc, selection, _| {
+        let text = doc.text.slice(..);
+        let ranges: SmallVec<[Range; 1]> = selection
+            .iter()
+            .filter(|range| !range.is_empty() && !range.slice(text).chars().all(char_is_whitespace))
+            .map(|range| {
+                let start = movement::skip_while(text, range.from(), char_is_whitespace)
+                    .unwrap_or(range.from());
+                let end = movement::backwards_skip_while(text, range.to(), char_is_whitespace)
+                    .unwrap_or(range.to());
+                Range::new(start, end).with_direction(range.direction())
+            })
+            .collect();
+        let primary = selection.primary();
+        match ranges.iter().position(|range| range.overlaps(&primary)) {
+            _ if ranges.is_empty() => Selection::point(primary.cursor(text)),
+            Some(index) => Selection::new(ranges, index),
+            None => {
+                let last = ranges.len() - 1;
+                Selection::new(ranges, last)
+            }
+        }
+    })
 }

@@ -268,8 +268,19 @@ mod mouse {
 }
 
 mod scrollbar {
-    use state::view::scroll::{Scrollbar, Thumb, line_at_thumb, scrollbar};
+    use state::view::scroll::{OnTrack, Scrollbar, Thumb, line_at_thumb, scrollbar};
 
+    #[test]
+    fn a_press_on_the_track_lands_above_on_or_below_the_thumb() {
+        let thumb = Thumb {
+            top: 50.,
+            height: 20.,
+        };
+        assert_eq!(thumb.hit(10.), OnTrack::Above);
+        assert_eq!(thumb.hit(55.), OnTrack::Thumb { grab: 5. });
+        assert_eq!(thumb.hit(70.), OnTrack::Thumb { grab: 20. });
+        assert_eq!(thumb.hit(71.), OnTrack::Below);
+    }
     #[test]
     fn hidden_when_everything_fits() {
         assert_eq!(scrollbar(10, 0..10, 100., 10.), Scrollbar::Hidden);

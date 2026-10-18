@@ -9,7 +9,7 @@ use helix_core::Selection;
 use helix_core::text_annotations::TextAnnotations;
 use state::Overlay;
 use state::input::picker::{self, Preview, PreviewSource};
-use state::text::buffer::{Content, TextDoc};
+use state::text::buffer::TextDoc;
 use state::view::display::{self, CursorShape, Focus, Frame};
 use state::view::layout::{Pane, Scroll, Viewport};
 
@@ -99,47 +99,36 @@ impl Element for PreviewElement {
             let shown = match &state.overlay {
                 Overlay::Picker(open) => match picker::preview_source(open) {
                     None => Shown::Message(""),
-                    Some(PreviewSource::Buffer(buffer)) => {
-                        match state.buffers.get(buffer).map(|b| &b.content) {
-                            Some(Content::Text { doc, .. }) => {
-                                let cursor = (state.layout.panes().values())
-                                    .flat_map(Pane::items)
-                                    .find_map(|item| {
-                                        let view = item.tab.text();
-                                        (view.buffer() == buffer)
-                                            .then(|| view.selection.primary().head)
-                                    });
-                                Shown::Doc {
-                                    doc,
-                                    line: doc.text.char_to_line(
-                                        cursor.unwrap_or(0).min(doc.text.len_chars()),
-                                    ),
-                                }
+                    Some(PreviewSource::Buffer(buffer)) => match state.buffers.get(buffer) {
+                        Some(entry) => {
+                            let doc = &entry.doc;
+                            let cursor = (state.layout.panes().values())
+                                .flat_map(Pane::items)
+                                .find_map(|item| {
+                                    let view = item.tab.text();
+                                    (view.buffer() == buffer).then(|| view.selection.primary().head)
+                                });
+                            Shown::Doc {
+                                doc,
+                                line: doc
+                                    .text
+                                    .char_to_line(cursor.unwrap_or(0).min(doc.text.len_chars())),
                             }
-                            Some(Content::Loading { .. }) => Shown::Message("loading…"),
-                            None => Shown::Message(""),
                         }
-                    }
+                        None => Shown::Message(""),
+                    },
                     Some(PreviewSource::File { path, line }) => {
                         // An open buffer shows its unsaved edits.
-                        let buffered = state.buffers.iter().find(|(_, open_buffer)| {
+                        let buffered = state.buffers.values().find(|open_buffer| {
                             open_buffer.path.strip_prefix(root).ok()
                                 == Some(Path::new(path.as_str()))
                         });
                         match (buffered, open.previews.get(path)) {
-                            (
-                                Some((
-                                    _,
-                                    state::text::buffer::Buffer {
-                                        content: Content::Text { doc, .. },
-                                        ..
-                                    },
-                                )),
-                                _,
-                            ) => Shown::Doc { doc, line },
-                            (Some(_), _) | (None, None | Some(Preview::Loading)) => {
-                                Shown::Message("loading…")
-                            }
+                            (Some(open_buffer), _) => Shown::Doc {
+                                doc: &open_buffer.doc,
+                                line,
+                            },
+                            (None, None | Some(Preview::Loading)) => Shown::Message("loading…"),
                             (None, Some(Preview::Text(doc))) => Shown::Doc { doc, line },
                             (None, Some(Preview::Binary)) => Shown::Message("<binary file>"),
                             (None, Some(Preview::TooLarge)) => {

@@ -8,13 +8,13 @@ use state::input::picker::Items;
 use state::project::files::{FileIndex, Indexed};
 use state::project::path::RelPath;
 use state::sidebar::tree::{RowKind, TreeAction, TreeTarget};
-use state::text::buffer::{Disk, Highlight};
+use state::text::buffer::{Disk, Highlight, ParseJob};
 use state::text::highlight;
 use state::view::layout::Node;
 use state::view::panes;
 use state::{Files, Overlay, Repo, Sidebar, State};
 
-use crate::harness::{Harness, disk_of};
+use crate::harness::Harness;
 
 fn commit_all(dir: &Path) {
     let repo = git2::Repository::init(dir).unwrap();
@@ -278,7 +278,12 @@ fn external_changes_reload_clean_and_flag_dirty() {
     assert!(!h.doc().is_modified());
     let disk = |h: &Harness, name: &str| {
         let path = canonical(dir.path(), name);
-        disk_of(h.state.buffers.values().find(|b| b.path == path).unwrap())
+        h.state
+            .buffers
+            .values()
+            .find(|b| b.path == path)
+            .unwrap()
+            .disk
     };
     assert!(matches!(disk(&h, "clean.txt"), Disk::Synced { .. }));
     assert!(matches!(
@@ -302,7 +307,7 @@ fn own_writes_do_not_flag_changes() {
     h.keys(":o a.txt<ret>ix<esc>:w<ret>iy<esc>");
     h.changed(vec![canonical(dir.path(), "a.txt")]);
     let buffer = h.state.buffers.values().next().unwrap();
-    assert!(matches!(disk_of(buffer), Disk::Synced { .. }));
+    assert!(matches!(buffer.disk, Disk::Synced { .. }));
     assert_eq!(h.doc().text.to_string(), "xya");
 }
 
@@ -321,7 +326,7 @@ fn live_watcher_reloads_and_indexes() {
         let text = state
             .buffers
             .values()
-            .any(|b| matches!(&b.content, state::text::buffer::Content::Text { doc, .. } if doc.text == "changed on disk\n"));
+            .any(|b| b.doc.text == "changed on disk\n");
         indexed && text
     });
     assert!(reloaded);
@@ -546,11 +551,33 @@ fn a_parse_of_older_text_is_redone_for_the_current_text() {
     let old = Syntax::new(h.doc().text.slice(..), language, &h.state.languages).unwrap();
     // As if the text was edited while the first parse ran.
     h.keys("ggOstruct B;<esc>");
-    h.state.buffers[buffer].doc_mut().unwrap().highlight = Highlight::Parsing {
+    h.state.buffers[buffer].doc.highlight = Highlight::Parsing {
         language,
-        version: 0,
+        job: ParseJob::Running { version: 0 },
     };
-    h.run(|state, out| highlight::parsed(state, buffer, 0, Ok(old), out));
+    h.run(|state, _| highlight::parsed(state, buffer, 0, Ok(old)));
+    let Highlight::Parsed(syntax) = &h.doc().highlight else {
+        panic!("not parsed again");
+    };
+    let root = syntax.tree().root_node();
+    let kinds: Vec<&str> = root.children().map(|node| node.kind()).collect();
+    assert_eq!(kinds, ["struct_item", "function_item"]);
+}
+
+#[test]
+fn a_failed_tree_is_parsed_again_off_the_ui_thread_after_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.rs<ret>");
+    let buffer = h.view().buffer();
+    let language = h.doc().highlight.language().unwrap();
+    h.state.buffers[buffer].doc.highlight = Highlight::Failed {
+        language,
+        error: helix_core::syntax::HighlighterError::Timeout,
+    };
+    // The harness runs the parse job the edit asks for.
+    h.keys("ggOstruct B;<esc>");
     let Highlight::Parsed(syntax) = &h.doc().highlight else {
         panic!("not parsed again");
     };

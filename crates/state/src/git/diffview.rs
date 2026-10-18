@@ -13,7 +13,7 @@ use slotmap::SlotMap;
 
 use crate::git::diff::{Base, Bases, Diff, Hunk, Side, Stamp, Tracked};
 use crate::job::Job;
-use crate::text::buffer::{Buffer, BufferId, Content, Disk, TextDoc};
+use crate::text::buffer::{Buffer, BufferId, Disk, TextDoc};
 use crate::view::display::{Indent, Shade, text_format};
 use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView};
 use crate::view::scroll::{self, Padding};
@@ -67,11 +67,10 @@ pub enum Right {
     Deleted,
 }
 
-/// The buffer side of `content`: deleted when HEAD has the file, the worktree does not and
-/// nothing was typed since.
-pub fn right(content: &Content) -> Right {
-    match content {
-        Content::Text {
+/// Deleted when HEAD has the file, the worktree does not and nothing was typed since.
+pub fn right(buffer: &Buffer) -> Right {
+    match buffer {
+        Buffer {
             doc,
             disk: Disk::New | Disk::Deleted,
             diff:
@@ -85,7 +84,7 @@ pub fn right(content: &Content) -> Right {
                 },
             ..
         } if doc.text.len_chars() == 0 => Right::Deleted,
-        Content::Text { .. } | Content::Loading { .. } => Right::Live,
+        Buffer { .. } => Right::Live,
     }
 }
 
@@ -391,8 +390,8 @@ fn active<'a>(
     let ShowingMut::Diff(text, sides) = layout.find_pane(pane)?.active_mut()?.showing_mut() else {
         return None;
     };
-    match &buffers[text.buffer()].content {
-        Content::Text {
+    match &buffers[text.buffer()] {
+        Buffer {
             doc,
             diff:
                 Diff {
@@ -401,7 +400,7 @@ fn active<'a>(
                 },
             ..
         } => Some((text, sides, doc, tracked)),
-        Content::Text { .. } | Content::Loading { .. } => None,
+        Buffer { .. } => None,
     }
 }
 
@@ -499,18 +498,12 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
         return;
     };
     let buffer = text.buffer();
-    let Some(entry) = state.buffers.get(buffer) else {
-        return;
-    };
-    let wanted = match &entry.content {
-        Content::Loading { .. } => return,
-        Content::Text { diff, .. } => match &diff.bases {
-            Bases::Loading { .. } => Wanted::Pending,
-            Bases::NoRepo | Bases::Untracked => Wanted::Absent,
-            Bases::Tracked(tracked) => match &tracked.head {
-                Base::Absent => Wanted::Absent,
-                Base::Blob { oid, text } => Wanted::Head { oid: *oid, text },
-            },
+    let wanted = match &state.buffers[buffer].diff.bases {
+        Bases::Loading { .. } => Wanted::Pending,
+        Bases::NoRepo | Bases::Untracked => Wanted::Absent,
+        Bases::Tracked(tracked) => match &tracked.head {
+            Base::Absent => Wanted::Absent,
+            Base::Blob { oid, text } => Wanted::Head { oid: *oid, text },
         },
     };
     let next = match (wanted, &diff.left) {
@@ -557,7 +550,7 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
                         buffer,
                         oid,
                         text: text.clone(),
-                        path: entry.path.clone(),
+                        path: state.buffers[buffer].path.clone(),
                         languages: state.languages.clone(),
                     }));
                     Left::Parsing { oid }
@@ -633,13 +626,13 @@ pub fn click_left(state: &mut State, pane: PaneId, row: u16, col: u16) {
     let Some((text_view, diff, doc, tracked)) = active(layout, buffers, pane) else {
         return;
     };
-    let content = &buffers[text_view.buffer()].content;
+    let buffer = &buffers[text_view.buffer()];
     let (
         Left::Head {
             doc: head, scroll, ..
         },
         Right::Live,
-    ) = (&diff.left, right(content))
+    ) = (&diff.left, right(buffer))
     else {
         return;
     };

@@ -90,7 +90,7 @@ fn groups(h: &Harness, name: &str) -> Vec<Group> {
             .changes
             .iter()
             .filter(|changed| changed.path.as_str() == name)
-            .map(|changed| changed.group)
+            .map(|changed| changed.entry.group())
             .collect(),
         Repo::Unknown | Repo::None => panic!("no repository"),
     }

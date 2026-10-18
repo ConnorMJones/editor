@@ -12,7 +12,7 @@ use state::render::document::{
     self, BlockClick, DocumentAt, DocumentMotion, DocumentScroll, DocumentState,
 };
 use state::render::markdown::{LinkTarget, WikiLink};
-use state::text::buffer::Content;
+
 use state::view::layout::PaneId;
 use state::view::mode;
 use state::view::tab::{Beside, Share, Showing, Tab};
@@ -64,10 +64,7 @@ fn cursor_line(h: &Harness) -> usize {
 
 fn top_line(h: &Harness, pane: PaneId) -> usize {
     let view = h.state.layout.panes()[pane].active().unwrap().text();
-    let doc = match &h.state.buffers[view.buffer()].content {
-        Content::Text { doc, .. } => doc,
-        Content::Loading { .. } => panic!("loading"),
-    };
+    let doc = &h.state.buffers[view.buffer()].doc;
     doc.text.char_to_line(view.scroll.anchor)
 }
 
@@ -157,7 +154,7 @@ fn clicking_a_block_puts_the_text_cursor_on_it() {
     // As the host draws it: the block's first line at the parsed version.
     let click = |h: &Harness| {
         let buffer = h.view().buffer();
-        let doc = h.state.buffers[buffer].doc().expect("loaded");
+        let doc = &h.state.buffers[buffer].doc;
         let markdown = document::markdown(&h.state.documents, buffer, doc).unwrap();
         BlockClick {
             line: markdown.blocks[markdown.roots[6]].lines.start,
@@ -404,7 +401,7 @@ fn clicking_a_split_rendering_moves_the_cursor_and_leaves_the_rendering() {
     let pane = h.state.layout.focus();
     let click = {
         let buffer = h.view().buffer();
-        let doc = h.state.buffers[buffer].doc().expect("loaded");
+        let doc = &h.state.buffers[buffer].doc;
         let markdown = document::markdown(&h.state.documents, buffer, doc).unwrap();
         BlockClick {
             line: markdown.blocks[markdown.roots[6]].lines.start,

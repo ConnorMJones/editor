@@ -1,4 +1,4 @@
-//! Everything about the working root: its files, links between notes, the session and the watcher.
+//! Everything about the working root: files, note links, the session and the watcher.
 
 pub mod backlinks;
 pub mod files;
@@ -8,12 +8,13 @@ pub mod session;
 pub mod watch;
 
 use crate::project::files::FileIndex;
-use crate::{Refresh, Repo, Root};
+use crate::{Repo, Root};
+use model::job::InFlight;
 
 /// Everything known about one working root.
 pub struct Project {
     pub root: Root,
     pub index: FileIndex,
     pub git: Repo,
-    pub refresh: Refresh,
+    pub refresh: InFlight,
 }

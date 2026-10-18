@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::Selection;
 use model::command::{
@@ -8,6 +8,7 @@ use model::command::{
 };
 use model::config::OpenAs;
 use model::notice::Notice;
+use nucleo::Matcher;
 
 use crate::apply::{Force, apply};
 use crate::input::picker::{
@@ -15,6 +16,7 @@ use crate::input::picker::{
     Referrers, Search,
 };
 use crate::job::{FsOp, Job};
+use crate::project::Project;
 use crate::project::backlinks::{self, Build};
 use crate::project::files::{FileIndex, Indexed};
 use crate::project::path::{Folder, RelPath};
@@ -24,10 +26,10 @@ use crate::sidebar::changes::{self, ListRow};
 use crate::sidebar::tree::{
     self, Dir, EntryKind, Fold, Listing, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget,
 };
-use crate::text::buffer::{BufferId, Content, Position, Target};
+use crate::text::buffer::{BufferId, Position, Target};
 use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Tabs, TextView, Tick};
 use crate::view::tab::{NoMode, Tab};
-use crate::{Effect, Files, Focus, Overlay, Repo, Sidebar, State, view::scroll};
+use crate::{Effect, Files, Focus, Overlay, Sidebar, State, view::scroll};
 
 /// The mode a shown tab arrives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +40,7 @@ pub enum Arrive {
     In(Shown),
 }
 
-/// Shows `buffer` in `pane`, a live pane, by zed's preview rules, and returns its tab; the
-/// pane's current edits are committed, a modified buffer always opens permanently and a
-/// modified preview is never replaced.
+/// Zed's preview rules; a modified buffer opens permanently and a modified preview stays.
 pub fn show(
     state: &mut State,
     pane: PaneId,
@@ -48,7 +48,7 @@ pub fn show(
     arrive: Arrive,
     open: OpenAs,
 ) -> &mut Tab {
-    let open = match state.buffers[buffer].content.is_modified() {
+    let open = match state.buffers[buffer].doc.is_modified() {
         true => OpenAs::Permanent,
         false => open,
     };
@@ -58,17 +58,14 @@ pub fn show(
     } = state;
     let target = layout.pane(pane);
     match target.active().map(Tab::text) {
-        Some(view) => match &mut buffers[view.buffer()].content {
-            Content::Text { doc, .. } => doc.commit(&view.selection),
-            Content::Loading { .. } => {}
-        },
+        Some(view) => buffers[view.buffer()].doc.commit(&view.selection),
         None => {}
     }
     let tab = Tab::open(buffer, &buffers[buffer].path);
     let displaced = match &mut target.tabs {
         Some(tabs) => {
             let preview = tabs.preview().map(|p| tabs.items()[p].tab.buffer());
-            match preview.map(|b| buffers[b].content.is_modified()) {
+            match preview.map(|b| buffers[b].doc.is_modified()) {
                 Some(true) => tabs.keep(),
                 Some(false) | None => {}
             }
@@ -87,7 +84,7 @@ pub fn show(
                     .iter()
                     .any(|item| item.tab.buffer() == displaced)
             });
-            match (elsewhere, buffers[displaced].content.is_modified()) {
+            match (elsewhere, buffers[displaced].doc.is_modified()) {
                 (false, false) => {
                     buffers.remove(displaced);
                 }
@@ -99,10 +96,8 @@ pub fn show(
     let tab = (layout.pane(pane).active_mut()).expect("the pane shows the tab it just opened");
     match arrive {
         Arrive::In(shown) if shown != tab.shown() => {
-            let line = (buffers[buffer].doc()).map_or(0, |doc| {
-                let rope = doc.text.slice(..);
-                rope.char_to_line(tab.text().selection.primary().cursor(rope))
-            });
+            let rope = buffers[buffer].doc.text.slice(..);
+            let line = rope.char_to_line(tab.text().selection.primary().cursor(rope));
             match tab.enter(shown, Opening::Line(line)) {
                 Ok(()) | Err(NoMode) => {}
             }
@@ -119,8 +114,7 @@ pub struct Place {
     pub anchor: Option<usize>,
 }
 
-/// Shows `buffer` in a live `pane` as `show` does, puts its cursor at `place` and scrolls to it;
-/// returns its text as left.
+/// As `show`, then puts the cursor at `place` and scrolls to it.
 pub fn show_at(
     state: &mut State,
     pane: PaneId,
@@ -144,8 +138,7 @@ pub fn show_at(
         .text_mut()
 }
 
-/// Closes tab `index` of `pane`, dropping the buffer with its last view unless unsaved edits
-/// refuse it.
+/// Drops the buffer with its last view, unless unsaved edits refuse it.
 pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
     let Some(buffer) = (state.layout.panes().get(pane))
         .and_then(|target| target.items().get(index))
@@ -161,7 +154,7 @@ pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
             .enumerate()
             .any(|(at, item)| item.tab.buffer() == buffer && (id, at) != (pane, index))
     });
-    let modified = (state.buffers.get(buffer)).is_some_and(|b| b.content.is_modified());
+    let modified = state.buffers[buffer].doc.is_modified();
     match (elsewhere, modified, force) {
         (false, true, Force::No) => {
             state.notice = Some(Notice::UnsavedBuffers { count: 1 });
@@ -178,7 +171,6 @@ pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
     }
 }
 
-/// Stamps the focused pane's active tab as most recently used.
 fn touch(layout: &mut Layout) {
     let now = layout.tick();
     match layout.focused_mut().tabs.as_mut() {
@@ -216,7 +208,6 @@ pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) 
     focus_editor(state);
 }
 
-/// Activates the next or previous tab of the focused pane, wrapping around.
 pub fn cycle_tab(state: &mut State, cycle: Cycle) {
     let now = state.layout.tick();
     let Some(tabs) = state.layout.focused_mut().tabs.as_mut() else {
@@ -404,8 +395,15 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
 }
 
 pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) {
-    match command {
-        PickerCommand::Open(kind) => {
+    let State {
+        overlay,
+        matcher,
+        grep,
+        project,
+        ..
+    } = state;
+    match (command, overlay) {
+        (PickerCommand::Open(kind), _) => {
             let items = match kind {
                 // An open file picker fills when the first walk finishes.
                 PickerKind::Files => Items::Files(match &state.project.index {
@@ -465,14 +463,28 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                         }
                     };
                     backlinks::ensure(state, out);
-                    backlinks::sync_buffers(state, out);
-                    let (search, hits) = match &mut state.project.index {
-                        FileIndex::Ready(indexed) => match indexed.backlinks.build {
-                            Build::Ready => (Search::Done, backlinks::hits(indexed, &note)),
-                            Build::Unbuilt | Build::Building { .. } => {
-                                (Search::Running, Vec::new())
+                    let State {
+                        project: Project { index, root, .. },
+                        buffers,
+                        documents,
+                        ..
+                    } = state;
+                    let (search, hits) = match index {
+                        FileIndex::Ready(indexed) => {
+                            backlinks::sync_buffers(
+                                &mut indexed.backlinks,
+                                root.path(),
+                                buffers,
+                                documents,
+                                out,
+                            );
+                            match indexed.backlinks.build {
+                                Build::Ready => (Search::Done, backlinks::hits(indexed, &note)),
+                                Build::Unbuilt | Build::Building { .. } => {
+                                    (Search::Running, Vec::new())
+                                }
                             }
-                        },
+                        }
                         FileIndex::Loading { .. } => (Search::Running, Vec::new()),
                     };
                     Items::Backlinks(Referrers { note, search, hits })
@@ -480,66 +492,80 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
             };
             state.overlay = Overlay::Picker(Picker::new(items));
         }
-        PickerCommand::Insert(c) => edit_query(state, |query| query.push(c), out),
-        PickerCommand::Backspace => edit_query(
-            state,
+        (PickerCommand::Cancel, overlay) => *overlay = Overlay::None,
+        (PickerCommand::Submit, overlay) => match std::mem::replace(overlay, Overlay::None) {
+            Overlay::Picker(picker) => submit(state, picker, out),
+            overlay @ (Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_)) => {
+                state.overlay = overlay
+            }
+        },
+        (PickerCommand::Insert(c), Overlay::Picker(picker)) => {
+            edit_query(picker, matcher, grep, project, |query| query.push(c), out)
+        }
+        (PickerCommand::Backspace, Overlay::Picker(picker)) => edit_query(
+            picker,
+            matcher,
+            grep,
+            project,
             |query| {
                 query.pop();
             },
             out,
         ),
-        PickerCommand::Next => move_cursor(state, Cycle::Next),
-        PickerCommand::Previous => move_cursor(state, Cycle::Previous),
-        PickerCommand::Cancel => state.overlay = Overlay::None,
-        PickerCommand::Submit => {
-            let Overlay::Picker(picker) = std::mem::replace(&mut state.overlay, Overlay::None)
-            else {
-                return;
-            };
-            let Some(&index) = picker.matches.get(picker.cursor) else {
-                return;
-            };
-            let index = index as usize;
-            match picker.items {
-                Items::Files(files) => {
-                    let path = PathBuf::from(files[index].as_str());
-                    let open = state.tab_config.open_from_picker;
-                    crate::apply::open(state, path, Arrive::AsIs, None, open, out);
-                    focus_editor(state);
-                }
-                Items::Buffers(buffers) => {
-                    let focus = state.layout.focus();
-                    let buffer = buffers[index].0;
-                    show(state, focus, buffer, Arrive::AsIs, OpenAs::Permanent);
-                    focus_editor(state);
-                }
-                Items::Grep(Grep { hits, .. }) | Items::Backlinks(Referrers { hits, .. }) => {
-                    let hit = &hits[index];
-                    let open = state.tab_config.open_from_picker;
-                    crate::apply::open(
-                        state,
-                        PathBuf::from(hit.path.as_str()),
-                        Arrive::AsIs,
-                        Some(Target::Position(Position {
-                            line: hit.line as usize,
-                            column: hit.column as usize,
-                        })),
-                        open,
-                        out,
-                    );
-                    focus_editor(state);
-                }
-                Items::Commands => apply(state, PALETTE[index].1.clone(), out),
-            }
-        }
+        (PickerCommand::Next, Overlay::Picker(picker)) => move_cursor(picker, Cycle::Next),
+        (PickerCommand::Previous, Overlay::Picker(picker)) => move_cursor(picker, Cycle::Previous),
+        // The picker closed before a queued key arrived.
+        (
+            PickerCommand::Insert(_)
+            | PickerCommand::Backspace
+            | PickerCommand::Next
+            | PickerCommand::Previous,
+            Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_),
+        ) => {}
     }
     request_preview(state, out);
 }
 
-fn move_cursor(state: &mut State, cycle: Cycle) {
-    let Overlay::Picker(picker) = &mut state.overlay else {
+/// Opens the item under the picker's cursor; an empty list opens nothing.
+fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
+    let Some(&index) = picker.matches.get(picker.cursor) else {
         return;
     };
+    let index = index as usize;
+    match picker.items {
+        Items::Files(files) => {
+            let path = PathBuf::from(files[index].as_str());
+            let open = state.tab_config.open_from_picker;
+            crate::apply::open(state, path, Arrive::AsIs, None, open, out);
+            focus_editor(state);
+        }
+        Items::Buffers(buffers) => {
+            let focus = state.layout.focus();
+            let buffer = buffers[index].0;
+            show(state, focus, buffer, Arrive::AsIs, OpenAs::Permanent);
+            focus_editor(state);
+        }
+        Items::Grep(Grep { hits, .. }) | Items::Backlinks(Referrers { hits, .. }) => {
+            let hit = &hits[index];
+            let open = state.tab_config.open_from_picker;
+            crate::apply::open(
+                state,
+                PathBuf::from(hit.path.as_str()),
+                Arrive::AsIs,
+                Some(Target::Position(Position {
+                    line: hit.line as usize,
+                    column: hit.column as usize,
+                })),
+                open,
+                out,
+            );
+            focus_editor(state);
+        }
+        Items::Commands => apply(state, PALETTE[index].1.clone(), out),
+    }
+}
+
+fn move_cursor(picker: &mut Picker, cycle: Cycle) {
     let count = picker.matches.len().max(1);
     picker.cursor = match cycle {
         Cycle::Next => (picker.cursor + 1) % count,
@@ -547,20 +573,24 @@ fn move_cursor(state: &mut State, cycle: Cycle) {
     };
 }
 
-fn edit_query(state: &mut State, edit: impl FnOnce(&mut String), out: &mut Vec<Effect>) {
-    let Overlay::Picker(picker) = &mut state.overlay else {
-        return;
-    };
+fn edit_query(
+    picker: &mut Picker,
+    matcher: &mut Matcher,
+    current: &Arc<AtomicU64>,
+    project: &Project,
+    edit: impl FnOnce(&mut String),
+    out: &mut Vec<Effect>,
+) {
     let previous = picker.query.clone();
     edit(&mut picker.query);
     match &mut picker.items {
         Items::Grep(grep) => {
-            let generation = state.grep.fetch_add(1, Ordering::Relaxed) + 1;
+            let generation = current.fetch_add(1, Ordering::Relaxed) + 1;
             grep.generation = generation;
             grep.hits.clear();
             picker.matches.clear();
             picker.cursor = 0;
-            let files = match (&state.project.index, picker.query.is_empty()) {
+            let files = match (&project.index, picker.query.is_empty()) {
                 (FileIndex::Ready(Indexed { files, .. }), false) => files.clone(),
                 (FileIndex::Ready(_), true) | (FileIndex::Loading { .. }, _) => {
                     grep.search = Search::Idle;
@@ -569,16 +599,16 @@ fn edit_query(state: &mut State, edit: impl FnOnce(&mut String), out: &mut Vec<E
             };
             grep.search = Search::Running;
             out.push(Effect::Job(Job::Grep {
-                root: state.project.root.path().to_owned(),
+                root: project.root.path().to_owned(),
                 files,
                 regex: picker::grep_regex(&picker.query),
                 generation,
-                current: state.grep.clone(),
+                current: current.clone(),
             }));
         }
         Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
             let narrowing = Narrowing::between(&previous, &picker.query);
-            picker::filter(picker, &mut state.matcher, narrowing);
+            picker::filter(picker, matcher, narrowing);
         }
     }
 }
@@ -615,13 +645,12 @@ pub enum Close {
     Refused,
 }
 
-/// Window close from `:q`, the title bar or the compositor; refused while buffers have
-/// unsaved edits, leaving the editor focused with a notice.
+/// Refused while buffers have unsaved edits, with a notice.
 pub fn request_close(state: &mut State) -> Close {
     match state
         .buffers
         .values()
-        .filter(|b| b.content.is_modified())
+        .filter(|b| b.doc.is_modified())
         .count()
     {
         0 => Close::Allowed,
@@ -637,11 +666,20 @@ pub fn request_close(state: &mut State) -> Close {
     }
 }
 
-/// Number of a mouse click within a multi-click.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Click {
     Single,
     Double,
+}
+
+impl Click {
+    /// From the host's count of quick clicks; only a second click is a double.
+    pub fn of(count: usize) -> Click {
+        match count {
+            2 => Click::Double,
+            _ => Click::Single,
+        }
+    }
 }
 
 /// Tab click: activates tab `index` and focuses its pane; a double click keeps a preview.
@@ -672,8 +710,7 @@ pub fn focus_pane(state: &mut State, pane: PaneId) {
     focus_editor(state);
 }
 
-/// Tree click: selects row `index`; a directory toggles, a file opens in the focused pane,
-/// and a double click keeps the file's tab.
+/// A directory toggles, a file opens, and a double click keeps the file's tab.
 pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<Effect>) {
     let Some(kind) = state.tree.rows.get(index).map(|row| row.kind) else {
         return;
@@ -694,27 +731,25 @@ pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<E
     }
 }
 
-/// Picker click: opens match `index`.
 pub fn click_picker(state: &mut State, index: usize, out: &mut Vec<Effect>) {
-    let Overlay::Picker(open) = &mut state.overlay else {
-        return;
-    };
-    match index < open.matches.len() {
-        true => open.cursor = index,
-        false => return,
+    // The picker closed, or its matches changed, since the frame drew the row.
+    match std::mem::replace(&mut state.overlay, Overlay::None) {
+        Overlay::Picker(mut picker) if index < picker.matches.len() => {
+            picker.cursor = index;
+            submit(state, picker, out)
+        }
+        overlay @ (Overlay::Picker(_)
+        | Overlay::None
+        | Overlay::Prompt(_)
+        | Overlay::Confirm(_)) => state.overlay = overlay,
     }
-    picker(state, PickerCommand::Submit, out);
 }
 
-/// Changes sidebar click on row `row`: a header toggles its group, an entry opens like `l`, and a
-/// double click keeps its tab.
+/// A header toggles its group, an entry opens like `l`; a double click keeps its tab.
 pub fn click_changes(state: &mut State, row: usize, click: Click, out: &mut Vec<Effect>) {
-    let changes = match &state.project.git {
-        Repo::Found { snapshot, .. } => &snapshot.changes[..],
-        Repo::Unknown | Repo::None => &[],
-    };
+    let changes = state.project.git.changes();
     state.sidebar = Sidebar::Changes(Focus::Sidebar);
-    match changes::list_row(changes, &state.changes.folds, row) {
+    match changes::rows(changes, &state.changes.folds).nth(row) {
         Some(ListRow::Header { .. }) => {
             state.changes.cursor = changes::cursor_at(changes, &state.changes.folds, row);
             changes::list(state, ChangesCommand::Open, out);
@@ -737,10 +772,7 @@ pub fn changes_action(
     command: ChangesCommand,
     out: &mut Vec<Effect>,
 ) {
-    let changes = match &state.project.git {
-        Repo::Found { snapshot, .. } => &snapshot.changes[..],
-        Repo::Unknown | Repo::None => &[],
-    };
+    let changes = state.project.git.changes();
     state.changes.cursor = changes::cursor_at(changes, &state.changes.folds, row);
     changes::list(state, command, out);
 }
@@ -756,7 +788,6 @@ fn row_dir(row: Option<&tree::Row>) -> Folder {
     }
 }
 
-/// Opens the create prompt prefilled with `dir`.
 fn begin_create(state: &mut State, dir: &str, kind: NewEntry) {
     let line = match dir.is_empty() {
         true => String::new(),
@@ -765,7 +796,6 @@ fn begin_create(state: &mut State, dir: &str, kind: NewEntry) {
     state.sidebar = Sidebar::Files(Files::Edit(TreeEdit::Create { line, kind }));
 }
 
-/// A file tree context menu entry chosen for `target`.
 pub fn tree_action(
     state: &mut State,
     target: TreeTarget,

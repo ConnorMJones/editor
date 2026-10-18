@@ -8,7 +8,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use crate::job::{Job, ReloadIf, ReloadPolicy};
 use crate::project::files::FileIndex;
 use crate::project::path::{Folder, RelPath, RelPathError};
-use crate::text::buffer::{Content, Disk};
+use crate::text::buffer::Disk;
 use crate::{Effect, Repo, State, project::backlinks, request_git};
 
 /// Long-lived watcher owned by the host; dropping it stops events.
@@ -48,22 +48,18 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
     let mut relist: HashSet<Folder> = HashSet::new();
     crate::render::typeset::invalidate(&mut state.compiles, &paths);
     for path in paths {
-        for (id, buffer) in state.buffers.iter() {
-            // A loading buffer's pending read already sees the change.
-            match (&buffer.content, buffer.path == path) {
-                (Content::Text { disk, .. }, true) => out.push(Effect::Job(Job::Reload {
-                    buffer: id,
-                    path: path.clone(),
-                    when: match *disk {
-                        Disk::Synced { mtime } | Disk::ChangedExternally { mtime } => {
-                            ReloadIf::ChangedSince(mtime)
-                        }
-                        Disk::New | Disk::Deleted => ReloadIf::Always,
-                    },
-                    policy: ReloadPolicy::KeepEdits,
-                })),
-                (Content::Text { .. } | Content::Loading { .. }, _) => {}
-            }
+        for (id, buffer) in (state.buffers.iter()).filter(|(_, buffer)| buffer.path == path) {
+            out.push(Effect::Job(Job::Reload {
+                buffer: id,
+                path: path.clone(),
+                when: match buffer.disk {
+                    Disk::Synced { mtime } | Disk::ChangedExternally { mtime } => {
+                        ReloadIf::ChangedSince(mtime)
+                    }
+                    Disk::New | Disk::Deleted => ReloadIf::Always,
+                },
+                policy: ReloadPolicy::KeepEdits,
+            }));
         }
         match &state.project.git {
             Repo::Found { git_dir, .. } if path.starts_with(git_dir) => {
@@ -105,7 +101,16 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
             dir,
         }));
     }
-    backlinks::changed(state, &rescan, out);
+    match &mut state.project.index {
+        FileIndex::Ready(indexed) => backlinks::changed(
+            &mut indexed.backlinks,
+            state.project.root.path(),
+            &rescan,
+            out,
+        ),
+        // The first walk reads every note once it ends.
+        FileIndex::Loading { .. } => {}
+    }
     match (&state.project.index, rescan.is_empty()) {
         (FileIndex::Ready(_), false) => out.push(Effect::Job(Job::Rescan {
             root,

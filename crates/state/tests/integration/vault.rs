@@ -10,7 +10,7 @@ use state::project::files::{FileIndex, Indexed, OnIndexed};
 use state::project::path::RelPath;
 use state::render::document::{self, DocumentScroll};
 use state::render::markdown::{BlockKind, EmbedKind, ImageFile};
-use state::text::buffer::Content;
+
 use state::view::tab::{Showing, Tab};
 use state::{Confirm, Overlay, input};
 
@@ -210,9 +210,7 @@ fn embedded_images_resolve_from_other_folders() {
     .unwrap();
     h.changed(vec![dir.path().join("notes/gallery.md")]);
     h.keys(":o notes/gallery.md<ret><space>V");
-    let Content::Text { doc, .. } = &h.state.buffers[h.view().buffer()].content else {
-        panic!("loading");
-    };
+    let doc = &h.state.buffers[h.view().buffer()].doc;
     let parsed = document::markdown(&h.state.documents, h.view().buffer(), doc).expect("parsed");
     let kinds: Vec<&BlockKind> = parsed.blocks.iter().map(|block| &block.kind).collect();
     match kinds.as_slice() {

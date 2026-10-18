@@ -91,15 +91,4 @@ impl Change {
             },
         }
     }
-
-    /// Sidebar groups listing this path; a partly staged file sits in two.
-    pub fn groups(self) -> &'static [Group] {
-        match self {
-            Change::Ignored => &[],
-            Change::Conflicted => &[Group::Conflicts],
-            Change::Staged(_) => &[Group::Staged],
-            Change::Untracked | Change::Unstaged(_) => &[Group::Changes],
-            Change::Both { .. } => &[Group::Staged, Group::Changes],
-        }
-    }
 }

@@ -1,5 +1,4 @@
-//! Line diffs between HEAD, the index and a buffer, ported from helix-vcs (MPL-2.0) without its
-//! worker thread: the line cache moves into each diff job and back.
+//! Line diffs between HEAD, the index and a buffer, ported from helix-vcs (MPL-2.0).
 
 use std::iter::Peekable;
 use std::mem::transmute;
@@ -10,26 +9,25 @@ use helix_core::{Rope, RopeSlice};
 pub use imara_diff::Hunk;
 use imara_diff::{Algorithm, IndentHeuristic, IndentLevel, Interner, Token};
 
-use crate::Refresh;
 use crate::git::navigate::Landing;
 use crate::view::display::DiffSign;
+use model::job::InFlight;
 
 const ALGORITHM: Algorithm = Algorithm::Histogram;
 const MAX_DIFF_LINES: usize = 64 * u16::MAX as usize;
 // Caps the average line length at 128 bytes for files of `MAX_DIFF_LINES`.
 const MAX_DIFF_BYTES: usize = MAX_DIFF_LINES * 128;
 
-/// Git's view of a text buffer.
 pub struct Diff {
     pub bases: Bases,
     /// Base reads are coalesced per buffer like git status refreshes.
-    pub read: Refresh,
+    pub read: InFlight,
 }
 
 impl Diff {
     pub const LOADING: Diff = Diff {
         bases: Bases::Loading { landing: None },
-        read: Refresh::Idle,
+        read: InFlight::Idle,
     };
 }
 
@@ -69,7 +67,6 @@ impl Base {
     }
 }
 
-/// One base side of a read.
 #[derive(Debug)]
 pub enum BaseRead {
     /// Still the blob `oid` the request knew.
@@ -205,8 +202,7 @@ const HEAD: usize = 0;
 const INDEX: usize = 1;
 const WORK: usize = 2;
 
-/// Interned lines of HEAD, the index and the buffer, kept across diffs so an edit only
-/// re-interns the buffer. Private: tokens borrow the boxed ropes, which stay put until cleared.
+/// Kept across diffs so an edit re-interns only the buffer; tokens borrow the boxed ropes.
 pub struct Lines {
     texts: [Box<Rope>; 3],
     interner: Interner<RopeSlice<'static>>,
@@ -221,7 +217,6 @@ pub struct Lines {
     pub unstaged: Vec<Hunk>,
 }
 
-/// What a diff job found.
 pub enum Outcome {
     /// `Lines::hunks` and `Lines::unstaged` hold the hunks; `staged` is new when the bases moved.
     Diffed { staged: Option<Vec<Hunk>> },

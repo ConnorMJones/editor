@@ -4,8 +4,13 @@ use std::path::{Path, PathBuf};
 
 use slotmap::SlotMap;
 
+use crate::job::FsOp;
 use crate::project::path::{Folder, RelPath};
+use crate::project::watch;
 use crate::text::buffer::{Buffer, BufferId};
+use crate::{Effect, State};
+use model::command::Command;
+use model::notice::Notice;
 
 /// File explorer data; directories are listed lazily as they are expanded.
 #[derive(Default)]
@@ -179,7 +184,7 @@ pub struct Unsaved {
 pub fn sync_unsaved(unsaved: &mut Unsaved, root: &Path, buffers: &SlotMap<BufferId, Buffer>) {
     let modified = buffers
         .iter()
-        .filter(|(_, buffer)| buffer.content.is_modified());
+        .filter(|(_, buffer)| buffer.doc.is_modified());
     let unchanged = modified.clone().count() == unsaved.buffers.len()
         && modified.clone().all(|(id, buffer)| {
             unsaved
@@ -222,11 +227,104 @@ pub enum TreeTarget {
     Root,
 }
 
-/// Context menu entries of the file tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeAction {
     NewFile,
     NewFolder,
     Rename,
     Delete,
+}
+
+/// Takes a folder's listing; a folder that cannot be listed is forgotten.
+pub fn listed(
+    state: &mut State,
+    dir: Folder,
+    result: io::Result<Vec<Entry>>,
+    out: &mut Vec<Effect>,
+) {
+    let entries = match result {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, %dir, "cannot list directory");
+            state.tree.dirs.remove(&dir);
+            rebuild(&mut state.tree);
+            return;
+        }
+    };
+    out.push(Effect::Watch(vec![dir.to_path(state.project.root.path())]));
+    // Forget expansion state of subdirectories that disappeared.
+    state.tree.dirs.retain(|folder, _| match folder {
+        Folder::Sub(path) if path.folder_path() == dir.as_str() => entries
+            .iter()
+            .any(|e| e.kind == EntryKind::Dir && e.name == path.name()),
+        Folder::Sub(_) | Folder::Root => true,
+    });
+    match state.tree.dirs.get_mut(&dir) {
+        Some(existing) => existing.listing = Listing::Loaded(entries),
+        None => {
+            state.tree.dirs.insert(
+                dir,
+                Dir {
+                    fold: Fold::Collapsed,
+                    listing: Listing::Loaded(entries),
+                },
+            );
+        }
+    }
+    rebuild(&mut state.tree);
+}
+
+/// Opens a created file, follows a rename with buffers and folders, and reports what changed.
+pub fn fs_done(state: &mut State, op: FsOp, result: io::Result<()>, out: &mut Vec<Effect>) {
+    let root = state.project.root.path().to_owned();
+    match result {
+        Err(error) => {
+            let path = match &op {
+                FsOp::Create { path, .. } | FsOp::Remove { path, .. } => path,
+                FsOp::Rename { from, .. } => from,
+            };
+            state.notice = Some(Notice::FileOpFailed {
+                path: path.to_path(&root),
+                error,
+            });
+            return;
+        }
+        Ok(()) => {}
+    }
+    let changed = match op {
+        FsOp::Create { path, kind } => {
+            let changed = vec![path.to_path(&root)];
+            match kind {
+                EntryKind::File => {
+                    crate::apply::apply(state, Command::Open(path.to_path(&root)), out);
+                    crate::view::panes::focus_editor(state);
+                }
+                EntryKind::Dir => {}
+            }
+            changed
+        }
+        FsOp::Rename { from, to } => {
+            for buffer in state.buffers.values_mut() {
+                match RelPath::new(&root, &buffer.path).map(|rel| rel.rebased(&from, &to)) {
+                    Ok(Some(moved)) => buffer.path = moved.to_path(&root),
+                    // Outside the root, or outside what moved.
+                    Ok(None) | Err(_) => {}
+                }
+            }
+            state.tree.dirs = std::mem::take(&mut state.tree.dirs)
+                .into_iter()
+                .map(|(folder, dir)| (folder.moved(&from, &to), dir))
+                .collect();
+            vec![from.to_path(&root), to.to_path(&root)]
+        }
+        FsOp::Remove { path, .. } => {
+            state
+                .tree
+                .dirs
+                .retain(|folder, _| !matches!(folder, Folder::Sub(dir) if dir.is_within(&path)));
+            vec![path.to_path(&root)]
+        }
+    };
+    rebuild(&mut state.tree);
+    watch::changed(state, changed, out);
 }
