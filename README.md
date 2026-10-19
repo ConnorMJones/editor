@@ -10,9 +10,6 @@ Disclaimer: built with the help of ai, incase it wasn't clear and that you care.
 
 ## Install
 
-Everything edt needs at run time is inside the binary: the syntax grammars and their queries, the
-default fonts (Lilex and IBM Plex Sans) and the default colour scheme. Nothing is downloaded.
-
 ### With Nix
 
 ```sh
@@ -40,8 +37,6 @@ Then build and install the `edt` binary (the package is called `editor`):
 cargo install --locked --git <repo-url> editor
 ```
 
-A release build takes several minutes.
-
 ## Use
 
 ```sh
@@ -50,15 +45,34 @@ edt path/to/dir   # a folder
 edt notes.md      # a file, in its git repository (or its folder when it is not in one)
 ```
 
-The keys are helix's, plus a few of edt's own: `space e` file tree, `space g` Changes, `space d`
-diff, `space v` rendered split, `space ?` command palette. [docs/keymap.md](docs/keymap.md) lists
-every key.
+## Keybindings
+[docs/keymap.md](docs/keymap.md) for keybinding list.
+Keys are mostly helix with some custom ones.
+Arrow keys are also aliased with hjkl.
+- `space e` file tree
+- `space g` diff tree
+- `space ?` command pallet
+Each file type has it's own collection of views.
+So view switching here depends on the file type.
+- `space d` switch to diff view
+- `space v` split rendered view
+- `spave V` toggle full rendered view
+- `space tab` cycle views
+tiling mostly comes down to `w` (window).
+- `space w v` split
+- `space w q` closes focused tile
+- `space w h/l` switch between focused tile
+- `space w </>` resize split tiles. (you can also use mouse)
+
+os key + mouse you can move things around. 
 
 ## Configure
 
-edt reads `~/.config/edt/config.toml` (or the file given with `--config`). Every setting is
-optional; an unknown key or a bad value stops edt at startup with the reason. The defaults:
-
+Read from `~/.config/edt/config.toml` (or the file given with `--config`).
+All the settings are optional, closer to an override where it just follows
+the default values otherwise. Fails on bad values or keys. You can see
+`default-config.toml` which should show all the default values that you can
+change. Should look like: 
 ```toml
 [theme]
 scheme = "default"          # built in; any other name reads schemes/<name>.toml beside this file
@@ -95,12 +109,13 @@ open_from_picker = "permanent"
 title_bar = "hidden"        # "shown" draws a title bar
 ```
 
-A font family must be one of the bundled two or a font installed on the system.
+Font must be one of the bundled two or a font installed on the system.
 
 ### Colour schemes
 
-A scheme is the 16 [base16](https://github.com/tinted-theming/home) colours; edt maps them onto
-the interface, syntax and diff colours. Put a scheme in `~/.config/edt/schemes/<name>.toml` and
+A scheme is the 16 [base16](https://github.com/tinted-theming/home)
+same sort of thing as stylix.
+Put a scheme in `~/.config/edt/schemes/<name>.toml`
 select it with `scheme = "<name>"`:
 
 ```toml
@@ -112,45 +127,14 @@ base08 = "#fb4934"
 
 Without `inherits`, a scheme must set all 16 slots, `base00` to `base0F`. The keys are the ones
 base16 schemes use, so an existing scheme can be copied in as it is.
-
-### Stylix
-
-[Stylix](https://github.com/nix-community/stylix) has no target for edt yet. With home-manager,
-write its colours as a scheme:
-
-```nix
-xdg.configFile."edt/schemes/stylix.toml".text =
-  with config.lib.stylix.colors.withHashtag; ''
-    base00 = "${base00}"
-    base01 = "${base01}"
-    base02 = "${base02}"
-    base03 = "${base03}"
-    base04 = "${base04}"
-    base05 = "${base05}"
-    base06 = "${base06}"
-    base07 = "${base07}"
-    base08 = "${base08}"
-    base09 = "${base09}"
-    base0A = "${base0A}"
-    base0B = "${base0B}"
-    base0C = "${base0C}"
-    base0D = "${base0D}"
-    base0E = "${base0E}"
-    base0F = "${base0F}"
-  '';
-```
-
-and set `scheme = "stylix"` in `config.toml`.
+See `default-scheme.toml` as reference.
 
 ## Develop
 
-`nix develop` gives the toolchain and libraries. The checks run before every change are
-`cargo fmt --all`, `RUSTFLAGS="-D warnings" cargo check --lib --bins`,
-`cargo clippy --lib --bins -- -D warnings` and `cargo test -p state --features integration`.
-`docs/design.md` describes how the code is written.
-
-The grammars compiled in are listed in `vendor/grammars/sources.nix`; after changing the list, run
-`vendor/grammars/update.sh` to copy their sources and queries into the repository.
+`nix develop` flake support for all extra libraries and what not.
+The grammars compiled in are listed in `vendor/grammars/sources.nix`
+after changing the list, run `vendor/grammars/update.sh`
+this is the internal highlighting support for different file types *.rs etc.
 
 ## License
 
