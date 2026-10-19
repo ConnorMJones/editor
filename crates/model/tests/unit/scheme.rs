@@ -121,3 +121,10 @@ fn scheme_names_are_one_plain_file_name() {
     }
     assert!(toml::from_str::<Config>("[theme]\nscheme = \"x.toml\"").is_err());
 }
+
+#[test]
+fn the_example_scheme_is_the_built_in_default() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let palette = scheme::load(&named("default-scheme"), &root).expect("default-scheme.toml loads");
+    assert_eq!(palette, Palette::DEFAULT);
+}

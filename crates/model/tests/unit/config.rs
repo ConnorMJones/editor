@@ -104,3 +104,39 @@ fn diff_colours_override_and_reject_unknown_roles() {
     assert_eq!(config.theme.diff.removed, None);
     assert!(toml::from_str::<Config>("[theme.diff]\ninserted = \"#00ff00\"").is_err());
 }
+
+const DEFAULT_CONFIG: &str = include_str!("../../../../default-config.toml");
+
+#[test]
+fn the_example_config_holds_the_defaults() {
+    let config: Config = toml::from_str(DEFAULT_CONFIG).expect("default-config.toml parses");
+    assert_eq!(config, Config::default());
+}
+
+#[test]
+fn every_commented_setting_in_the_example_config_is_valid() {
+    let uncommented: String = DEFAULT_CONFIG
+        .lines()
+        .map(|line| match line.strip_prefix("# ") {
+            Some(setting)
+                if setting.starts_with('[')
+                    || setting.split_once(" = ").is_some_and(|(key, _)| {
+                        key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    }) =>
+            {
+                setting.replace("#rrggbb", "#004040")
+            }
+            Some(_) | None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let config: Config = toml::from_str(&uncommented).expect("uncommented settings parse");
+    assert_eq!(
+        config.theme.background,
+        Some(Rgb {
+            r: 0x00,
+            g: 0x40,
+            b: 0x40
+        })
+    );
+}

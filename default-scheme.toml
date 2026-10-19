@@ -1,0 +1,25 @@
+# The built-in "default" colour scheme, as a scheme file.
+# Copy this to ~/.config/edt/schemes/<name>.toml, change the colours, and set
+# `scheme = "<name>"` under [theme] in config.toml.
+#
+# A scheme is the 16 base16 slots: base00–base07 run from background to foreground, and
+# base08–base0F are the accent colours. Any base16 scheme's colours can be pasted in.
+# With `inherits = "<scheme>"` (a file name, or "default"), slots left out come from that scheme;
+# without it, all 16 are required.
+
+base00 = "#061229"
+base01 = "#2a3448"
+base02 = "#4d5666"
+base03 = "#717885"
+base04 = "#9a99a3"
+base05 = "#b8bbc2"
+base06 = "#dbdde0"
+base07 = "#ffffff"
+base08 = "#d07346"
+base09 = "#f0a000"
+base0A = "#fbd461"
+base0B = "#99bf52"
+base0C = "#72b9bf"
+base0D = "#5299bf"
+base0E = "#9989cc"
+base0F = "#b08060"

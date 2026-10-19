@@ -1,0 +1,47 @@
+# Every edt setting with its default value.
+# Copy this to ~/.config/edt/config.toml (or pass another file with --config) and change what you
+# need; settings left out keep these defaults. An unknown key or a bad value stops edt at startup.
+
+[theme]
+# "default" is the built-in scheme; any other name reads schemes/<name>.toml beside this file.
+# default-scheme.toml shows the format.
+scheme = "default"
+# Replaces base00 as the editor background.
+# background = "#rrggbb"
+
+# Diff and conflict colours; each one left unset comes from the scheme.
+[theme.diff]
+# added = "#rrggbb"
+# removed = "#rrggbb"
+# modified = "#rrggbb"
+# ours = "#rrggbb"
+# theirs = "#rrggbb"
+# base = "#rrggbb"
+
+# Fonts must be one of the two built in (Lilex, IBM Plex Sans) or installed on the system.
+[font.mono]
+family = "Lilex"
+size_px = 16.0
+
+# The interface font, and the prose font unless [font.prose] is set.
+[font.ui]
+family = "IBM Plex Sans"
+size_px = 14.0
+
+# Rendered markdown and typst text.
+# [font.prose]
+# family = "IBM Plex Sans"
+# size_px = 14.0
+
+[session]
+# "last" reopens the tabs and splits from the last time edt ran in this folder.
+restore = "off"
+
+# How opened files join a pane's tabs: "preview" (replaced by the next preview) or "permanent".
+[tabs]
+open_from_tree = "preview"
+open_from_picker = "permanent"
+
+[window]
+# "shown" draws a title bar; GNOME has none of its own, so hidden leaves Super+drag to move.
+title_bar = "hidden"

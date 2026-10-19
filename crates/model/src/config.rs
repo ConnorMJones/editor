@@ -4,7 +4,7 @@ use crate::color::Rgb;
 use crate::fonts;
 use crate::scheme::Scheme;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub theme: ThemeConfig,
@@ -14,7 +14,7 @@ pub struct Config {
     pub window: WindowConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ThemeConfig {
     pub scheme: Scheme,
@@ -33,7 +33,7 @@ impl Default for ThemeConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FontConfig {
     pub mono: FontSpec,
@@ -59,7 +59,7 @@ impl Default for FontConfig {
 }
 
 /// The prose font: the interface font unless `[font.prose]` names its own.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(from = "Option<FontSpec>")]
 pub enum ProseFont {
     Ui,
@@ -85,14 +85,14 @@ impl FontConfig {
 }
 
 /// `family` must name a bundled or installed font; startup fails otherwise.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FontSpec {
     pub family: String,
     pub size_px: f32,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SessionConfig {
     pub restore: Restore,
