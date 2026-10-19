@@ -6,20 +6,9 @@ edition = "2021"
 license = "MPL-2.0"
 
 [dependencies]
-helix-stdx = { path = "../helix-stdx" }
-
 anyhow = "1"
-serde = { version = "1.0", features = ["derive"] }
 toml.workspace = true
-etcetera.workspace = true
-parking_lot.workspace = true
-sha2 = "0.11"
-globset.workspace = true
-log = "0.4"
-
+tree-house.workspace = true
 grammars.workspace = true
 # Enables building a `Grammar` from a compiled-in parser.
 tree-house-bindings.workspace = true
-tempfile.workspace = true
-
-tree-house.workspace = true

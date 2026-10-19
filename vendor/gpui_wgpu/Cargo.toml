@@ -14,7 +14,6 @@ doctest = false
 
 [features]
 default = []
-bench-support = ["gpui/bench-support", "dep:image"]
 font-kit = ["dep:font-kit"]
 test-support = ["gpui/test-support", "dep:image"]
 
@@ -47,16 +46,3 @@ wgpu = { workspace = true, features = ["std", "parking_lot", "metal", "gles", "v
 [target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
 wgpu = { workspace = true, default-features = true }
 
-[target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
-wgpu = { workspace = true, features = ["webgl"] }
-
-[dev-dependencies]
-criterion.workspace = true
-gpui = { workspace = true, features = ["bench-support"] }
-image.workspace = true
-naga = { version = "29.0.4", features = ["wgsl-in"] }
-
-[[bench]]
-name = "layout_line"
-harness = false

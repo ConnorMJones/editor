@@ -16,7 +16,6 @@ doctest = false
 default = ["wayland", "x11"]
 test-support = ["gpui/test-support"]
 wayland = [
-    "dep:accesskit_unix",
     "gpui_wgpu",
     "ashpd/wayland",
 
@@ -34,7 +33,6 @@ wayland = [
     "uuid/v5",
 ]
 x11 = [
-    "dep:accesskit_unix",
     "gpui_wgpu",
     "ashpd",
 
@@ -53,8 +51,6 @@ screen-capture = [
 
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-accesskit.workspace = true
-accesskit_unix = { workspace = true, optional = true }
 anyhow.workspace = true
 bytemuck.workspace = true
 collections.workspace = true
@@ -62,7 +58,6 @@ futures.workspace = true
 gpui.workspace = true
 gpui_util.workspace = true
 gpui_wgpu = { workspace = true, optional = true, features = ["font-kit"] }
-http_client.workspace = true
 libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
@@ -73,12 +68,7 @@ url.workspace = true
 uuid.workspace = true
 
 # Always used
-oo7 = { workspace = true, features = [
-    "async-std",
-    "native_crypto",
-] }
 calloop = "0.14.3"
-notify-rust.workspace = true
 raw-window-handle.workspace = true
 
 # Used in both windowing options

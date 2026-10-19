@@ -14,7 +14,6 @@ doctest = false
 
 [features]
 default = []
-bench-support = ["gpui/bench-support", "gpui_wgpu/bench-support"]
 font-kit = []
 inspector = ["gpui/inspector"]
 test-support = ["gpui/test-support", "gpui_wgpu/test-support"]

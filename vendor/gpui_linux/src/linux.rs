@@ -3,7 +3,6 @@ mod display_connection;
 mod headless;
 mod keyboard;
 mod platform;
-mod system_notifications;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod text_system;
 #[cfg(feature = "wayland")]
