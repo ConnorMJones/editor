@@ -1,18 +1,17 @@
 //! A tab shows one file, in one of the modes its kind of file offers.
 
-use std::path::Path;
-
 use model::command::{Direction, Resize, Shown};
 
+use crate::drawing::{self, BoardId, InkTabs, PagedId};
 use crate::git::diffview::DiffSides;
+use crate::project::path::TextKind;
 use crate::render::document::{DocumentSeen, DocumentState};
-use crate::render::markdown::Format;
 use crate::render::pages::{PagesSeen, PagesState};
 use crate::render::{Opening, Rendering};
 use crate::text::buffer::BufferId;
 use crate::view::layout::TextView;
 
-/// A set of modes, one enum per set; each kind of file points at one.
+/// A set of modes, one enum per set; each kind of text in `TextTabs` takes one.
 pub trait Modes: Sized + Clone {
     /// `space tab` order, holding every mode `shown` returns; it starts with `first`.
     const ORDER: &'static [Shown];
@@ -24,11 +23,6 @@ pub trait Modes: Sized + Clone {
 
     /// `shown`, a rendering opening `at`; `None` for a mode this set lacks.
     fn enter(shown: Shown, at: Opening) -> Option<Self>;
-}
-
-/// A kind of file, by the set of modes its tabs have.
-pub trait FileKind {
-    type Mode: Modes;
 }
 
 /// Text that only shows as text.
@@ -105,51 +99,30 @@ impl<R: Rendering> Modes for MarkupModes<R> {
     }
 }
 
-#[derive(Clone)]
-pub struct Code;
-
-impl FileKind for Code {
-    type Mode = TextModes;
-}
-
-#[derive(Clone)]
-pub struct Markdown;
-
-impl FileKind for Markdown {
-    type Mode = MarkupModes<DocumentState>;
-}
-
-#[derive(Clone)]
-pub struct Typst;
-
-impl FileKind for Typst {
-    type Mode = MarkupModes<PagesState>;
-}
-
 /// A text file's tab: the text every mode shares, and the mode shown.
 #[derive(Clone)]
-pub struct TextTab<K: FileKind> {
+pub struct TextTab<M: Modes> {
     /// Selection and scroll, kept across modes.
     pub text: TextView,
-    pub mode: K::Mode,
+    pub mode: M,
 }
 
-impl<K: FileKind> TextTab<K> {
-    fn new(buffer: BufferId) -> TextTab<K> {
+impl<M: Modes> TextTab<M> {
+    fn new(buffer: BufferId) -> TextTab<M> {
         TextTab {
             text: TextView::new(buffer),
-            mode: K::Mode::first(),
+            mode: M::first(),
         }
     }
 
     fn enter(&mut self, shown: Shown, at: Opening) -> Result<(), NoMode> {
-        self.mode = K::Mode::enter(shown, at).ok_or(NoMode)?;
+        self.mode = M::enter(shown, at).ok_or(NoMode)?;
         Ok(())
     }
 
     /// The mode `direction` of the current one in `ORDER`, wrapping around.
     fn next(&self, direction: Direction) -> Shown {
-        let order = K::Mode::ORDER;
+        let order = M::ORDER;
         let at = (order.iter())
             .position(|shown| *shown == self.mode.shown())
             .expect("a mode is in its set's order");
@@ -164,12 +137,12 @@ impl<K: FileKind> TextTab<K> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoMode;
 
-/// A tab, by the kind of file it holds; each kind can only be in its own modes.
+/// A text file's tab, by its kind of text; each kind can only be in its own set of modes.
 #[derive(Clone)]
-pub enum Tab {
-    Code(TextTab<Code>),
-    Markdown(TextTab<Markdown>),
-    Typst(TextTab<Typst>),
+pub enum TextTabs {
+    Code(TextTab<TextModes>),
+    Markdown(TextTab<MarkupModes<DocumentState>>),
+    Typst(TextTab<MarkupModes<PagesState>>),
 }
 
 /// Whether a rendering fills its tab, or sits beside the source it follows with where they last
@@ -236,13 +209,13 @@ impl<'a> ShowingMut<'a> {
     }
 }
 
-impl Tab {
-    /// `buffer`'s tab in its first mode; the kind comes from `path` and never changes.
-    pub fn open(buffer: BufferId, path: &Path) -> Tab {
-        match Format::of(path) {
-            Some(Format::Markdown) => Tab::Markdown(TextTab::new(buffer)),
-            Some(Format::Typst) => Tab::Typst(TextTab::new(buffer)),
-            None => Tab::Code(TextTab::new(buffer)),
+impl TextTabs {
+    /// `buffer`'s tab in its first mode, as its kind of text has them.
+    pub fn open(buffer: BufferId, kind: TextKind) -> TextTabs {
+        match kind {
+            TextKind::Code => TextTabs::Code(TextTab::new(buffer)),
+            TextKind::Markdown => TextTabs::Markdown(TextTab::new(buffer)),
+            TextKind::Typst => TextTabs::Typst(TextTab::new(buffer)),
         }
     }
 
@@ -253,53 +226,53 @@ impl Tab {
     /// The selection and scroll every mode shares.
     pub fn text(&self) -> &TextView {
         match self {
-            Tab::Code(tab) => &tab.text,
-            Tab::Markdown(tab) => &tab.text,
-            Tab::Typst(tab) => &tab.text,
+            TextTabs::Code(tab) => &tab.text,
+            TextTabs::Markdown(tab) => &tab.text,
+            TextTabs::Typst(tab) => &tab.text,
         }
     }
 
     pub fn text_mut(&mut self) -> &mut TextView {
         match self {
-            Tab::Code(tab) => &mut tab.text,
-            Tab::Markdown(tab) => &mut tab.text,
-            Tab::Typst(tab) => &mut tab.text,
+            TextTabs::Code(tab) => &mut tab.text,
+            TextTabs::Markdown(tab) => &mut tab.text,
+            TextTabs::Typst(tab) => &mut tab.text,
         }
     }
 
     pub fn shown(&self) -> Shown {
         match self {
-            Tab::Code(tab) => tab.mode.shown(),
-            Tab::Markdown(tab) => tab.mode.shown(),
-            Tab::Typst(tab) => tab.mode.shown(),
+            TextTabs::Code(tab) => tab.mode.shown(),
+            TextTabs::Markdown(tab) => tab.mode.shown(),
+            TextTabs::Typst(tab) => tab.mode.shown(),
         }
     }
 
     /// Switches to `shown`, a rendering opening `at`.
     pub fn enter(&mut self, shown: Shown, at: Opening) -> Result<(), NoMode> {
         match self {
-            Tab::Code(tab) => tab.enter(shown, at),
-            Tab::Markdown(tab) => tab.enter(shown, at),
-            Tab::Typst(tab) => tab.enter(shown, at),
+            TextTabs::Code(tab) => tab.enter(shown, at),
+            TextTabs::Markdown(tab) => tab.enter(shown, at),
+            TextTabs::Typst(tab) => tab.enter(shown, at),
         }
     }
 
     /// The mode `space tab` moves to.
     pub fn next(&self, direction: Direction) -> Shown {
         match self {
-            Tab::Code(tab) => tab.next(direction),
-            Tab::Markdown(tab) => tab.next(direction),
-            Tab::Typst(tab) => tab.next(direction),
+            TextTabs::Code(tab) => tab.next(direction),
+            TextTabs::Markdown(tab) => tab.next(direction),
+            TextTabs::Typst(tab) => tab.next(direction),
         }
     }
 
     pub fn showing(&self) -> Showing<'_> {
         match self {
-            Tab::Code(TextTab { text, mode }) => match mode {
+            TextTabs::Code(TextTab { text, mode }) => match mode {
                 TextModes::Source => Showing::Source(text),
                 TextModes::Diff(sides) => Showing::Diff(text, sides),
             },
-            Tab::Markdown(TextTab { text, mode }) => match mode {
+            TextTabs::Markdown(TextTab { text, mode }) => match mode {
                 MarkupModes::Source => Showing::Source(text),
                 MarkupModes::Diff(sides) => Showing::Diff(text, sides),
                 MarkupModes::Render(state) => Showing::Document(text, state, Beside::Alone),
@@ -309,7 +282,7 @@ impl Tab {
                     share,
                 } => Showing::Document(text, render, Beside::Source(*seen, *share)),
             },
-            Tab::Typst(TextTab { text, mode }) => match mode {
+            TextTabs::Typst(TextTab { text, mode }) => match mode {
                 MarkupModes::Source => Showing::Source(text),
                 MarkupModes::Diff(sides) => Showing::Diff(text, sides),
                 MarkupModes::Render(state) => Showing::Pages(text, state, Beside::Alone),
@@ -324,11 +297,11 @@ impl Tab {
 
     pub fn showing_mut(&mut self) -> ShowingMut<'_> {
         match self {
-            Tab::Code(TextTab { text, mode }) => match mode {
+            TextTabs::Code(TextTab { text, mode }) => match mode {
                 TextModes::Source => ShowingMut::Source(text),
                 TextModes::Diff(sides) => ShowingMut::Diff(text, sides),
             },
-            Tab::Markdown(TextTab { text, mode }) => match mode {
+            TextTabs::Markdown(TextTab { text, mode }) => match mode {
                 MarkupModes::Source => ShowingMut::Source(text),
                 MarkupModes::Diff(sides) => ShowingMut::Diff(text, sides),
                 MarkupModes::Render(state) => ShowingMut::Document(text, state, BesideMut::Alone),
@@ -338,7 +311,7 @@ impl Tab {
                     share,
                 } => ShowingMut::Document(text, render, BesideMut::Source(seen, share)),
             },
-            Tab::Typst(TextTab { text, mode }) => match mode {
+            TextTabs::Typst(TextTab { text, mode }) => match mode {
                 MarkupModes::Source => ShowingMut::Source(text),
                 MarkupModes::Diff(sides) => ShowingMut::Diff(text, sides),
                 MarkupModes::Render(state) => ShowingMut::Pages(text, state, BesideMut::Alone),
@@ -355,7 +328,7 @@ impl Tab {
 /// The source side's part of a split's width, strictly between 0 and 1; the host draws each side
 /// at least a few columns wide whatever it holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Share(f32);
+pub struct Share(f32); // private: checked by its constructor
 
 #[derive(Debug, thiserror::Error)]
 #[error("split share {0} is not strictly between 0 and 1")]
@@ -382,6 +355,62 @@ impl Share {
             Resize::Narrow => Share((self.0 - Share::STEP).max(Share::STEP)),
             Resize::Widen => Share((self.0 + Share::STEP).min(1.0 - Share::STEP)),
             Resize::Even => Share::EVEN,
+        }
+    }
+}
+
+/// What a tab holds, which names it among a pane's tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opened {
+    Text(BufferId),
+    Paged(PagedId),
+    Board(BoardId),
+}
+
+/// A tab: text in its modes, or a drawing.
+pub enum Tab {
+    Text(TextTabs),
+    Ink(InkTabs),
+}
+
+impl Tab {
+    pub fn opened(&self) -> Opened {
+        match self {
+            Tab::Text(text) => Opened::Text(text.buffer()),
+            Tab::Ink(ink) => ink.opened(),
+        }
+    }
+
+    pub fn as_text(&self) -> Option<&TextTabs> {
+        match self {
+            Tab::Text(text) => Some(text),
+            Tab::Ink(_) => None,
+        }
+    }
+
+    pub fn as_text_mut(&mut self) -> Option<&mut TextTabs> {
+        match self {
+            Tab::Text(text) => Some(text),
+            Tab::Ink(_) => None,
+        }
+    }
+}
+
+impl Tab {
+    /// A new tab on `opened`, in its kind's first mode or with the tools ink tabs start with.
+    pub fn open(opened: Opened, state: &crate::State) -> Tab {
+        match opened {
+            Opened::Text(buffer) => Tab::Text(TextTabs::open(buffer, state.buffers[buffer].kind)),
+            Opened::Paged(id) => Tab::Ink(drawing::open_paged(state, id)),
+            Opened::Board(id) => Tab::Ink(drawing::open_board(state, id)),
+        }
+    }
+
+    /// The tab a split starts its new pane with.
+    pub fn split_copy(&self) -> Tab {
+        match self {
+            Tab::Text(text) => Tab::Text(text.clone()),
+            Tab::Ink(ink) => Tab::Ink(ink.copy()),
         }
     }
 }

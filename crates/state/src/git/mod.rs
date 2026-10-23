@@ -458,7 +458,7 @@ pub fn change_index(git_dir: &Path, path: &RepoPath, op: &IndexOp) -> Result<(),
 pub struct RepoPath(pub RelPath);
 
 /// Git dir and repository path of `path`; `None` outside the repository's worktree.
-pub(crate) fn locate(repo: &Repo, path: &Path) -> Option<(PathBuf, RepoPath)> {
+pub fn locate(repo: &Repo, path: &Path) -> Option<(PathBuf, RepoPath)> {
     match repo {
         Repo::Found {
             git_dir, workdir, ..

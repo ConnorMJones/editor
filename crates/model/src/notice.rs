@@ -33,6 +33,23 @@ pub enum Notice {
     },
     NoBuffer,
     ReadOnly,
+    NotText,
+    NothingToSplit,
+    WrongExtension {
+        path: PathBuf,
+    },
+    NotADrawing,
+    BoardHasNoPages,
+    NoLayer,
+    LayerHidden,
+    NothingPicked,
+    DrawingRefused {
+        reason: String,
+    },
+    DrawingUnreadable {
+        path: PathBuf,
+        reason: String,
+    },
     UnknownCommand {
         input: String,
     },
@@ -183,6 +200,20 @@ impl std::fmt::Display for Notice {
             Notice::UnsavedBuffers { count } => write!(f, "{count} buffer(s) have unsaved changes"),
             Notice::NoBuffer => f.write_str("no buffer open"),
             Notice::ReadOnly => f.write_str("this view cannot be edited"),
+            Notice::NotText => f.write_str("a drawing has no text"),
+            Notice::NothingToSplit => f.write_str("an empty pane has nothing to split"),
+            Notice::WrongExtension { path } => {
+                write!(f, "{} names another kind of file", path.display())
+            }
+            Notice::NotADrawing => f.write_str("not a drawing"),
+            Notice::BoardHasNoPages => f.write_str("a board has no pages"),
+            Notice::NoLayer => f.write_str("the active layer is gone"),
+            Notice::LayerHidden => f.write_str("the active layer is hidden"),
+            Notice::NothingPicked => f.write_str("nothing is selected"),
+            Notice::DrawingRefused { reason } => write!(f, "drawing refused: {reason}"),
+            Notice::DrawingUnreadable { path, reason } => {
+                write!(f, "cannot read {}: {reason}", path.display())
+            }
             Notice::UnknownCommand { input } => write!(f, "unknown command: {input}"),
             Notice::MissingArgument { command } => write!(f, "{command}: missing argument"),
             Notice::UnexpectedArgument { command } => write!(f, "{command}: takes no argument"),

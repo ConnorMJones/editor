@@ -5,9 +5,9 @@ mod parse;
 mod targets;
 
 pub use highlight::{highlight, highlight_code};
-pub(crate) use parse::OPTIONS;
+pub use parse::OPTIONS;
 pub use parse::parse;
-pub(crate) use targets::link_target;
+pub use targets::link_target;
 pub use targets::locate;
 
 use std::collections::HashMap;
@@ -21,23 +21,6 @@ use model::theme::Style;
 use model::typeset::Display;
 
 use crate::project::links::{Index, Resolution};
-
-/// What a rendered view can show, by file extension.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Format {
-    Markdown,
-    Typst,
-}
-
-impl Format {
-    pub fn of(path: &Path) -> Option<Format> {
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("md" | "markdown") => Some(Format::Markdown),
-            Some("typ") => Some(Format::Typst),
-            Some(_) | None => None,
-        }
-    }
-}
 
 pub struct Markdown {
     /// Pre-order: a block's descendants follow it, up to its `end`.

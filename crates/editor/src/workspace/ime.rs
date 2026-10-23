@@ -85,7 +85,7 @@ impl EntityInputHandler for Workspace {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let state = &self.state;
-        let shown = state.layout.focused().active()?;
+        let shown = state.layout.focused().active_text()?;
         let view = shown.text();
         let doc = &state.buffers[view.buffer()].doc;
         let text = doc.text.slice(..);

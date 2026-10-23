@@ -205,9 +205,11 @@ pub fn sync_unsaved(unsaved: &mut Unsaved, root: &Path, buffers: &SlotMap<Buffer
         let Ok(file) = RelPath::new(root, path) else {
             continue;
         };
-        for (end, _) in file.0.match_indices('/') {
-            unsaved.paths.insert(RelPath(file.0[..end].to_owned()));
-        }
+        // The root's empty path is no folder under it, so `parse` skips it.
+        unsaved.paths.extend(
+            file.ancestors()
+                .filter_map(|folder| RelPath::parse(folder).ok()),
+        );
         unsaved.paths.insert(file);
     }
 }

@@ -39,3 +39,20 @@ impl Mul<f32> for Pt {
         Pt(self.0 * scale)
     }
 }
+
+/// A finite number above zero.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Positive(f32); // private: checked by `new`
+
+impl Positive {
+    pub const fn new(value: f32) -> Option<Positive> {
+        match value.is_finite() && value > 0.0 {
+            true => Some(Positive(value)),
+            false => None,
+        }
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}

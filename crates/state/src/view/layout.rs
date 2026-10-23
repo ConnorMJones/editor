@@ -8,25 +8,60 @@ use slotmap::{SlotMap, new_key_type};
 use crate::render::document::{DocumentSeen, DocumentState};
 use crate::render::pages::{PagesSeen, PagesState};
 use crate::text::buffer::BufferId;
-use crate::view::tab::{BesideMut, Showing, ShowingMut, Tab};
+use crate::view::tab::{BesideMut, Opened, Showing, ShowingMut, Tab, TextTabs};
 
 new_key_type! {
     pub struct PaneId;
 }
 
 pub struct Layout {
-    // Private: the leaves of `root` are exactly the keys of `panes`, and `focus` is one of them.
-    panes: SlotMap<PaneId, Pane>,
-    root: Node,
-    focus: PaneId,
+    panes: SlotMap<PaneId, Pane>, // private: the tree's leaves are exactly the panes, focus is one of them
+    root: Node, // private: the tree's leaves are exactly the panes, focus is one of them
+    focus: PaneId, // private: the tree's leaves are exactly the panes, focus is one of them
     pub clock: Tick,
 }
 
-/// A split always has at least two children, none of which is a split along the same axis.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Pane(PaneId),
-    Split { axis: Axis, children: Vec<Child> },
+    Split(Split),
+}
+
+/// Panes side by side or stacked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Split {
+    axis: Axis,           // private: two or more children, none split along `axis`
+    children: Vec<Child>, // private: two or more children, none split along `axis`
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SplitError {
+    #[error("a split needs at least two children")]
+    TooFew,
+    #[error("child {0} splits along its parent's axis")]
+    SameAxis(usize),
+}
+
+impl Split {
+    pub fn new(axis: Axis, children: Vec<Child>) -> Result<Split, SplitError> {
+        let same = (children.iter()).position(|child| match &child.node {
+            Node::Split(inner) => inner.axis == axis,
+            Node::Pane(_) => false,
+        });
+        match (children.len(), same) {
+            (0 | 1, _) => Err(SplitError::TooFew),
+            (_, Some(index)) => Err(SplitError::SameAxis(index)),
+            (_, None) => Ok(Split { axis, children }),
+        }
+    }
+
+    pub fn axis(&self) -> Axis {
+        self.axis
+    }
+
+    pub fn children(&self) -> &[Child] {
+        &self.children
+    }
 }
 
 /// A split member; it spans `flex` over the sum of its siblings' flexes.
@@ -36,10 +71,18 @@ pub struct Child {
     pub node: Node,
 }
 
+/// Where a moved tab goes: into a pane's tabs, before `at` or after the active one, or into a new
+/// pane on `side` of `pane`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Into { pane: PaneId, at: Option<usize> },
+    Beside { pane: PaneId, side: Side },
+}
+
 /// A positive, finite share weight.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
-pub struct Flex(f32);
+pub struct Flex(f32); // private: checked by its constructor
 
 #[derive(Debug, thiserror::Error)]
 #[error("split weight {0} is not a positive number")]
@@ -107,6 +150,14 @@ impl Rect {
     };
 }
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LayoutError {
+    #[error("the layout's panes and the panes given differ")]
+    Leaves,
+    #[error("the focused pane is not in the layout")]
+    Focus,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CloseError {
     LastPane,
@@ -129,19 +180,32 @@ impl Layout {
         }
     }
 
-    /// From a session: `root` was built from the keys of `panes`, each once, and `focus` is one.
-    pub(crate) fn restored(
+    /// A layout from its parts, refused unless `root`'s leaves are the keys of `panes`, each once,
+    /// and `focus` is one of them.
+    pub fn restored(
         panes: SlotMap<PaneId, Pane>,
         root: Node,
         focus: PaneId,
         clock: Tick,
-    ) -> Layout {
-        Layout {
+    ) -> Result<Layout, LayoutError> {
+        let mut leaves = Vec::with_capacity(panes.len());
+        collect_leaves(&root, &mut leaves);
+        let count = leaves.len();
+        leaves.sort();
+        leaves.dedup();
+        let exact = leaves.len() == count
+            && count == panes.len()
+            && leaves.iter().all(|leaf| panes.contains_key(*leaf));
+        exact.then_some(()).ok_or(LayoutError::Leaves)?;
+        (panes.contains_key(focus))
+            .then_some(())
+            .ok_or(LayoutError::Focus)?;
+        Ok(Layout {
             panes,
             root,
             focus,
             clock,
-        }
+        })
     }
 
     pub fn panes(&self) -> &SlotMap<PaneId, Pane> {
@@ -175,10 +239,10 @@ impl Layout {
     }
 
     /// The tab of `buffer` in `pane`, while both are open.
-    pub fn tab_of(&mut self, pane: PaneId, buffer: BufferId) -> Option<&mut Tab> {
+    pub fn tab_of(&mut self, pane: PaneId, buffer: BufferId) -> Option<&mut TextTabs> {
         let pane = self.panes.get_mut(pane)?;
-        let index = pane.tabs.as_ref()?.find(buffer)?;
-        Some(&mut pane.items_mut()[index].tab)
+        let index = pane.tabs.as_ref()?.find(Opened::Text(buffer))?;
+        pane.items_mut()[index].tab.as_text_mut()
     }
 
     /// Every pane, for edits that leave the tree as it is.
@@ -217,13 +281,13 @@ impl Layout {
     pub fn selection_of(&self, buffer: BufferId) -> Selection {
         (self.panes.values())
             .flat_map(Pane::items)
-            .map(|item| item.tab.text())
+            .filter_map(|item| item.tab.as_text().map(TextTabs::text))
             .find(|view| view.buffer() == buffer)
             .map_or_else(|| Selection::point(0), |view| view.selection.clone())
     }
 
     pub fn document(&self, pane: PaneId) -> Option<(&TextView, &DocumentState)> {
-        match self.panes.get(pane)?.active()?.showing() {
+        match self.panes.get(pane)?.active_text()?.showing() {
             Showing::Document(text, state, _) => Some((text, state)),
             Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..) => None,
         }
@@ -237,14 +301,14 @@ impl Layout {
         &mut DocumentState,
         BesideMut<'_, DocumentSeen>,
     )> {
-        match self.panes.get_mut(pane)?.active_mut()?.showing_mut() {
+        match self.panes.get_mut(pane)?.active_text_mut()?.showing_mut() {
             ShowingMut::Document(text, state, beside) => Some((text, state, beside)),
             ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Pages(..) => None,
         }
     }
 
     pub fn pages(&self, pane: PaneId) -> Option<(&TextView, &PagesState)> {
-        match self.panes.get(pane)?.active()?.showing() {
+        match self.panes.get(pane)?.active_text()?.showing() {
             Showing::Pages(text, state, _) => Some((text, state)),
             Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => None,
         }
@@ -254,19 +318,19 @@ impl Layout {
         &mut self,
         pane: PaneId,
     ) -> Option<(&mut TextView, &mut PagesState, BesideMut<'_, PagesSeen>)> {
-        match self.panes.get_mut(pane)?.active_mut()?.showing_mut() {
+        match self.panes.get_mut(pane)?.active_text_mut()?.showing_mut() {
             ShowingMut::Pages(text, state, beside) => Some((text, state, beside)),
             ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Document(..) => None,
         }
     }
 
-    /// Makes `buffer`'s preview tab permanent in every pane.
-    pub fn keep(&mut self, buffer: BufferId) {
+    /// Makes `opened`'s preview tab permanent in every pane.
+    pub fn keep(&mut self, opened: Opened) {
         for pane in self.panes.values_mut() {
             match &mut pane.tabs {
                 Some(tabs)
                     if tabs.preview.is_some_and(|preview| {
-                        tabs.items[preview.index].tab.buffer() == buffer
+                        tabs.items[preview.index].tab.opened() == opened
                     }) =>
                 {
                     tabs.keep()
@@ -276,21 +340,67 @@ impl Layout {
         }
     }
 
-    /// Places `pane` after the focused pane along `axis`, evening out that split, and focuses it.
-    pub fn split(&mut self, axis: Axis, pane: Pane) -> PaneId {
-        let id = self.panes.insert(pane);
-        split_node(&mut self.root, self.focus, axis, id);
+    /// Places a pane holding `tabs` on `side` of `target`, evening out that split, and focuses it;
+    /// `None` when `target` has closed.
+    pub fn split(&mut self, target: PaneId, side: Side, tabs: Tabs) -> Option<PaneId> {
+        self.panes.get(target)?;
+        let id = self.panes.insert(Pane { tabs: Some(tabs) });
+        beside(&mut self.root, target, side, id);
         self.focus = id;
-        id
+        Some(id)
+    }
+
+    /// A new pane on `side` of `target` holding a copy of its active tab, as zed and vim split, then
+    /// focused; `None` when `target` has closed or has no tab to copy.
+    pub fn split_copy(&mut self, target: PaneId, side: Side) -> Option<PaneId> {
+        let now = self.tick();
+        let tab = self.panes.get(target)?.active()?.split_copy();
+        self.split(target, side, Tabs::split_copy(tab, now))
+    }
+
+    /// Moves tab `index` of `from` to `to` and focuses the pane it lands in; a pane the move
+    /// leaves without tabs closes. `None` when a pane or the tab has gone since the move began.
+    pub fn move_tab(&mut self, from: PaneId, index: usize, to: Place) -> Option<PaneId> {
+        let now = self.tick();
+        let count = self.panes.get(from)?.items().len();
+        self.panes.get(from)?.items().get(index)?;
+        let landed = match to {
+            // A pane's only tab split off beside itself would leave the layout as it was.
+            Place::Beside { pane, .. } if pane == from && count == 1 => from,
+            Place::Beside { pane, side } => {
+                self.panes.get(pane)?;
+                let item = self.remove_tab(from, index)?;
+                let id = self.panes.insert(Pane {
+                    tabs: Some(Tabs::one(item)),
+                });
+                beside(&mut self.root, pane, side, id);
+                id
+            }
+            Place::Into { pane, at } if pane == from => {
+                let tabs = self.panes[from].tabs.as_mut()?;
+                tabs.reorder(index, at.unwrap_or(tabs.active), now);
+                from
+            }
+            Place::Into { pane, at } => {
+                self.panes.get(pane)?;
+                let item = self.remove_tab(from, index)?;
+                let target = &mut self.panes[pane].tabs;
+                match target {
+                    Some(tabs) => tabs.take(item, at, now),
+                    None => *target = Some(Tabs::one(item)),
+                }
+                pane
+            }
+        };
+        self.focus = landed;
+        Some(landed)
     }
 
     /// Removes `pane`, moving focus from it to the pane beside where it was.
     pub fn close(&mut self, pane: PaneId) -> Result<(), CloseError> {
         let beside = match &self.root {
             Node::Pane(_) => return Err(CloseError::LastPane),
-            Node::Split { .. } => {
-                remove_node(&mut self.root, pane).ok_or(CloseError::NotInLayout)?
-            }
+            Node::Split(_) => remove_node(&mut self.root, pane).ok_or(CloseError::NotInLayout)?,
         };
         self.panes.remove(pane);
         match self.focus == pane {
@@ -347,16 +457,16 @@ impl Layout {
         let mut area = Rect::FULL;
         let mut node = &mut self.root;
         for &step in path {
-            let Node::Split { axis, children } = node else {
+            let Node::Split(split) = node else {
                 return;
             };
-            let Some(rect) = child_rects(*axis, children, area).nth(step) else {
+            let Some(rect) = child_rects(split.axis, &split.children, area).nth(step) else {
                 return;
             };
             area = rect;
-            node = &mut children[step].node;
+            node = &mut split.children[step].node;
         }
-        let Node::Split { axis, children } = node else {
+        let Node::Split(Split { axis, children }) = node else {
             return;
         };
         let (start, extent) = match axis {
@@ -425,38 +535,39 @@ impl Default for Layout {
     }
 }
 
-fn split_node(node: &mut Node, target: PaneId, axis: Axis, new: PaneId) -> bool {
+/// Places `new` on `side` of `target`; a split along that axis takes it as a sibling.
+fn beside(node: &mut Node, target: PaneId, side: Side, new: PaneId) -> bool {
+    let axis = side.axis();
     match node {
         Node::Pane(id) if *id == target => {
-            *node = Node::Split {
-                axis,
-                children: vec![
-                    Child::even(Node::Pane(target)),
-                    Child::even(Node::Pane(new)),
-                ],
+            let pair = match side {
+                Side::Left | Side::Up => [new, target],
+                Side::Right | Side::Down => [target, new],
             };
+            *node = Node::Split(Split {
+                axis,
+                children: pair.map(|pane| Child::even(Node::Pane(pane))).to_vec(),
+            });
             true
         }
         Node::Pane(_) => false,
-        Node::Split {
-            axis: own,
-            children,
-        } => {
-            let direct = children
-                .iter()
-                .position(|child| child.node == Node::Pane(target));
-            match (direct, *own == axis) {
+        Node::Split(split) => {
+            let direct = (split.children.iter()).position(|child| child.node == Node::Pane(target));
+            match (direct, split.axis == axis) {
                 // Like vim's equalalways and zed, adding a pane evens out its split.
-                (Some(i), true) => {
-                    children.insert(i + 1, Child::even(Node::Pane(new)));
-                    for child in children.iter_mut() {
+                (Some(index), true) => {
+                    let at = match side {
+                        Side::Left | Side::Up => index,
+                        Side::Right | Side::Down => index + 1,
+                    };
+                    split.children.insert(at, Child::even(Node::Pane(new)));
+                    for child in split.children.iter_mut() {
                         child.flex = Flex::EVEN;
                     }
                     true
                 }
-                (Some(_), false) | (None, _) => children
-                    .iter_mut()
-                    .any(|child| split_node(&mut child.node, target, axis, new)),
+                (Some(_), false) | (None, _) => (split.children.iter_mut())
+                    .any(|child| beside(&mut child.node, target, side, new)),
             }
         }
     }
@@ -464,7 +575,7 @@ fn split_node(node: &mut Node, target: PaneId, axis: Axis, new: PaneId) -> bool 
 
 /// Evens out the split `target` leaves; returns the pane now beside where it was.
 fn remove_node(node: &mut Node, target: PaneId) -> Option<PaneId> {
-    let Node::Split { axis, children } = node else {
+    let Node::Split(Split { axis, children }) = node else {
         return None;
     };
     let count = children.len();
@@ -476,7 +587,7 @@ fn remove_node(node: &mut Node, target: PaneId) -> Option<PaneId> {
             loop {
                 leaf = match leaf {
                     Node::Pane(id) => break *id,
-                    Node::Split { children, .. } => match index {
+                    Node::Split(Split { children, .. }) => match index {
                         0 => &children[0].node,
                         _ => &children[children.len() - 1].node,
                     },
@@ -492,10 +603,10 @@ fn remove_node(node: &mut Node, target: PaneId) -> Option<PaneId> {
     let mut flat: Vec<Child> = Vec::with_capacity(children.len());
     for child in children.drain(..) {
         match child.node {
-            Node::Split {
+            Node::Split(Split {
                 axis: inner,
                 children: grand,
-            } if inner == axis => flat.extend(grand),
+            }) if inner == axis => flat.extend(grand),
             node => flat.push(Child {
                 flex: child.flex,
                 node,
@@ -513,10 +624,10 @@ fn remove_node(node: &mut Node, target: PaneId) -> Option<PaneId> {
     }
     *node = match flat.len() {
         1 => flat.pop().expect("one child").node,
-        _ => Node::Split {
+        _ => Node::Split(Split {
             axis,
             children: flat,
-        },
+        }),
     };
     Some(beside)
 }
@@ -524,7 +635,7 @@ fn remove_node(node: &mut Node, target: PaneId) -> Option<PaneId> {
 fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
     match node {
         Node::Pane(id) => out.push(*id),
-        Node::Split { children, .. } => children.iter().for_each(|c| collect_leaves(&c.node, out)),
+        Node::Split(split) => (split.children.iter()).for_each(|c| collect_leaves(&c.node, out)),
     }
 }
 
@@ -552,7 +663,7 @@ pub fn child_rects(axis: Axis, children: &[Child], area: Rect) -> impl Iterator<
 fn collect_rects(node: &Node, area: Rect, out: &mut Vec<(PaneId, Rect)>) {
     match node {
         Node::Pane(id) => out.push((*id, area)),
-        Node::Split { axis, children } => {
+        Node::Split(Split { axis, children }) => {
             for (child, rect) in children.iter().zip(child_rects(*axis, children, area)) {
                 collect_rects(&child.node, rect, out);
             }
@@ -578,6 +689,14 @@ impl Pane {
             .map(|tabs| &mut tabs.items[tabs.active].tab)
     }
 
+    pub fn active_text(&self) -> Option<&TextTabs> {
+        self.active()?.as_text()
+    }
+
+    pub fn active_text_mut(&mut self) -> Option<&mut TextTabs> {
+        self.active_mut()?.as_text_mut()
+    }
+
     pub fn items(&self) -> &[Item] {
         match &self.tabs {
             Some(tabs) => &tabs.items,
@@ -595,9 +714,9 @@ impl Pane {
 
 /// A non-empty tab list in bar order, private so its indices stay valid and buffers distinct.
 pub struct Tabs {
-    items: Vec<Item>,
-    active: usize,
-    preview: Option<Preview>,
+    items: Vec<Item>,         // private: never empty, indices valid, files distinct
+    active: usize,            // private: never empty, indices valid, files distinct
+    preview: Option<Preview>, // private: never empty, indices valid, files distinct
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -623,13 +742,13 @@ pub struct Item {
 #[derive(Clone)]
 pub struct TextView {
     /// Fixed for the view's lifetime so a pane's items keep distinct buffers.
-    buffer: BufferId,
+    buffer: BufferId, // private: a tab's buffer is its identity
     pub selection: Selection,
     pub scroll: Scroll,
 }
 
 impl TextView {
-    pub(crate) fn new(buffer: BufferId) -> TextView {
+    pub fn new(buffer: BufferId) -> TextView {
         TextView {
             buffer,
             selection: Selection::point(0),
@@ -659,7 +778,7 @@ pub enum InvalidTabs {
 }
 
 impl Tabs {
-    pub(crate) fn new(tab: Tab, open: OpenAs, now: Tick) -> Tabs {
+    pub fn new(tab: Tab, open: OpenAs, now: Tick) -> Tabs {
         Tabs {
             items: vec![Item { tab, used: now }],
             active: 0,
@@ -673,7 +792,7 @@ impl Tabs {
         }
     }
 
-    pub(crate) fn split_copy(tab: Tab, now: Tick) -> Tabs {
+    pub fn split_copy(tab: Tab, now: Tick) -> Tabs {
         Tabs {
             items: vec![Item { tab, used: now }],
             active: 0,
@@ -684,16 +803,16 @@ impl Tabs {
         }
     }
 
-    pub(crate) fn from_parts(
+    pub fn from_parts(
         items: Vec<Item>,
         active: usize,
         preview: Option<usize>,
     ) -> Result<Tabs, InvalidTabs> {
         let duplicate = items.iter().enumerate().find_map(|(index, item)| {
-            let buffer = item.tab.buffer();
+            let opened = item.tab.opened();
             items[..index]
                 .iter()
-                .any(|earlier| earlier.tab.buffer() == buffer)
+                .any(|earlier| earlier.tab.opened() == opened)
                 .then_some(index)
         });
         match (items.len(), duplicate, preview) {
@@ -728,10 +847,10 @@ impl Tabs {
         self.preview.map(|preview| preview.index)
     }
 
-    pub fn find(&self, buffer: BufferId) -> Option<usize> {
+    pub fn find(&self, opened: Opened) -> Option<usize> {
         self.items
             .iter()
-            .position(|item| item.tab.buffer() == buffer)
+            .position(|item| item.tab.opened() == opened)
     }
 
     /// Stale indices are ignored.
@@ -750,9 +869,9 @@ impl Tabs {
     }
 
     /// Zed's rule: activate an open item, replace an active preview, else insert after the active.
-    pub(crate) fn open(&mut self, tab: Tab, open: OpenAs, now: Tick) -> Option<Item> {
+    pub fn open(&mut self, tab: Tab, open: OpenAs, now: Tick) -> Option<Item> {
         let item = Item { tab, used: now };
-        match (self.find(item.tab.buffer()), open, self.preview) {
+        match (self.find(item.tab.opened()), open, self.preview) {
             (Some(index), OpenAs::Permanent, _) => {
                 match self.preview.map(|preview| preview.index) == Some(index) {
                     true => self.preview = None,
@@ -806,6 +925,52 @@ impl Tabs {
                 None
             }
         }
+    }
+
+    /// A pane's tabs holding one tab, kept.
+    pub fn one(item: Item) -> Tabs {
+        Tabs {
+            items: vec![item],
+            active: 0,
+            preview: None,
+        }
+    }
+
+    /// Takes in a tab moved from another pane, before `at` or after the active tab, and
+    /// activates it; a tab on the same file already here is activated instead.
+    pub fn take(&mut self, item: Item, at: Option<usize>, now: Tick) {
+        match (self.find(item.tab.opened()), at) {
+            (Some(index), _) => self.activate(index, now),
+            (None, None) => {
+                self.insert_after_active(item);
+            }
+            (None, Some(at)) => self.rearrange(now, |items| {
+                let at = at.min(items.len());
+                items.insert(at, item);
+                at
+            }),
+        }
+    }
+
+    /// Moves tab `from` to sit at `to`, and activates it.
+    pub fn reorder(&mut self, from: usize, to: usize, now: Tick) {
+        self.rearrange(now, |items| {
+            let item = items.remove(from);
+            let to = to.min(items.len());
+            items.insert(to, item);
+            to
+        })
+    }
+
+    /// Applies `change` to the items, then activates the index it returns; the preview stays on
+    /// its tab wherever that went.
+    fn rearrange(&mut self, now: Tick, change: impl FnOnce(&mut Vec<Item>) -> usize) {
+        let preview =
+            (self.preview).map(|preview| (self.items[preview.index].tab.opened(), preview.kind));
+        let active = change(&mut self.items);
+        self.preview = preview
+            .and_then(|(opened, kind)| self.find(opened).map(|index| Preview { index, kind }));
+        self.activate(active, now);
     }
 
     fn insert_after_active(&mut self, item: Item) -> usize {

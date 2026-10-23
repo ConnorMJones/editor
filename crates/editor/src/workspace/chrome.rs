@@ -12,17 +12,13 @@ use state::apply;
 use super::{Drag, Workspace};
 use crate::fonts::hsla;
 
-pub(super) const TITLE_HEIGHT: Pixels = px(32.0);
-pub(super) const SHADOW: Pixels = px(10.0);
-pub(super) const ROUNDING: Pixels = px(10.0);
-pub(super) const BORDER: Pixels = px(1.0);
+pub const TITLE_HEIGHT: Pixels = px(32.0);
+pub const SHADOW: Pixels = px(10.0);
+pub const ROUNDING: Pixels = px(10.0);
+pub const BORDER: Pixels = px(1.0);
 
 /// Port of zed's `resize_edge`: the window edge or corner within reach of `pos`.
-pub(super) fn resize_edge(
-    pos: Point<Pixels>,
-    window: Size<Pixels>,
-    tiling: Tiling,
-) -> Option<ResizeEdge> {
+pub fn resize_edge(pos: Point<Pixels>, window: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
     let inner = Bounds::new(Point::default(), window).inset(SHADOW * 1.5);
     let corner = size(SHADOW * 1.5, SHADOW * 1.5);
     let near = |x: Pixels, y: Pixels| Bounds::new(point(x, y), corner).contains(&pos);
@@ -73,11 +69,11 @@ fn free_corners(tiling: Tiling) -> Corners<Pixels> {
     }
 }
 
-pub(super) fn corners(window: &Window) -> Corners<Pixels> {
+pub fn corners(window: &Window) -> Corners<Pixels> {
     free_corners(tiling(window))
 }
 
-pub(super) fn round<E: Styled>(element: E, corners: Corners<Pixels>) -> E {
+pub fn round<E: Styled>(element: E, corners: Corners<Pixels>) -> E {
     element
         .rounded_tl(corners.top_left)
         .rounded_tr(corners.top_right)
@@ -87,7 +83,7 @@ pub(super) fn round<E: Styled>(element: E, corners: Corners<Pixels>) -> E {
 
 impl Workspace {
     /// Zed's client-side decorations: shadow, rounded border and resize edges unless tiled.
-    pub(super) fn decorations(
+    pub fn decorations(
         &self,
         content: Stateful<Div>,
         window: &mut Window,
@@ -200,7 +196,7 @@ impl Workspace {
     }
 
     /// Drag to move, double-click to maximize, right-click for the window menu.
-    pub(super) fn titlebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub fn titlebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let fonts = &self.fonts;
         let controls = window.window_controls();

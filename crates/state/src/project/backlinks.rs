@@ -13,11 +13,14 @@ use crate::project::Project;
 use crate::project::files::{FileIndex, Indexed, OnIndexed};
 use crate::project::links::{self, Dest, Resolution};
 use crate::project::path::RelPath;
+use crate::project::path::{FileKind, TextKind};
 use crate::render::document::Documents;
-use crate::render::markdown::{self, Format, LinkTarget, WikiLink};
+use crate::render::markdown::{self, LinkTarget, WikiLink};
 use crate::text::buffer::{Buffer, BufferId};
 use crate::{Effect, Overlay, State, render::document};
 use slotmap::SlotMap;
+
+const NOTE: FileKind = FileKind::Text(TextKind::Markdown);
 
 #[derive(Default)]
 pub struct Backlinks {
@@ -32,7 +35,6 @@ pub struct Backlinks {
 pub enum Build {
     #[default]
     Unbuilt,
-    /// The first read of every note runs; notes that change meanwhile are read again after it.
     Building {
         stamp: u64,
         dirty: Vec<RelPath>,
@@ -46,7 +48,6 @@ pub struct Note {
     pub links: Vec<OutLink>,
 }
 
-/// Where a note's links were read from; an open buffer's text wins over the disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Disk,
@@ -135,7 +136,6 @@ pub fn extract(src: &str, out: &mut Vec<OutLink>) {
     }
 }
 
-/// Reads and extracts each note.
 pub fn read(root: &Path, paths: Vec<RelPath>) -> Vec<(RelPath, Read)> {
     let mut text = String::new();
     paths
@@ -163,10 +163,6 @@ pub fn read(root: &Path, paths: Vec<RelPath>) -> Vec<(RelPath, Read)> {
         .collect()
 }
 
-fn is_note(path: &RelPath) -> bool {
-    Format::of(Path::new(path.as_str())) == Some(Format::Markdown)
-}
-
 fn request(
     backlinks: &mut Backlinks,
     root: &Path,
@@ -192,7 +188,11 @@ pub fn ensure(state: &mut State, out: &mut Vec<Effect>) {
             files, backlinks, ..
         }) => match backlinks.build {
             Build::Unbuilt => {
-                let notes = files.iter().filter(|file| is_note(file)).cloned().collect();
+                let notes = files
+                    .iter()
+                    .filter(|file| file.kind() == NOTE)
+                    .cloned()
+                    .collect();
                 let stamp = request(backlinks, root, notes, out);
                 backlinks.build = Build::Building {
                     stamp,
@@ -206,7 +206,11 @@ pub fn ensure(state: &mut State, out: &mut Vec<Effect>) {
 
 /// Notes the watcher saw change.
 pub fn changed(backlinks: &mut Backlinks, root: &Path, paths: &[RelPath], out: &mut Vec<Effect>) {
-    let notes: Vec<RelPath> = paths.iter().filter(|path| is_note(path)).cloned().collect();
+    let notes: Vec<RelPath> = paths
+        .iter()
+        .filter(|path| path.kind() == NOTE)
+        .cloned()
+        .collect();
     match (&mut backlinks.build, notes.is_empty()) {
         (_, true) | (Build::Unbuilt, false) => {}
         (Build::Building { dirty, .. }, false) => dirty.extend(notes),
@@ -229,7 +233,7 @@ pub fn reconcile(indexed: &mut Indexed, root: &Path, out: &mut Vec<Effect>) {
     notes.retain(|path, _| files.binary_search(path).is_ok());
     let unknown: Vec<RelPath> = files
         .iter()
-        .filter(|file| is_note(file) && !notes.contains_key(*file))
+        .filter(|file| file.kind() == NOTE && !notes.contains_key(*file))
         .cloned()
         .collect();
     match unknown.is_empty() {
@@ -334,12 +338,12 @@ pub fn sync_buffers(
             version: doc.version,
         };
         match (
-            is_note(&path),
+            buffer.kind,
             backlinks.notes.get(&path).map(|note| note.source),
         ) {
-            (false, _) => continue,
-            (true, Some(known)) if known == source => continue,
-            (true, Some(_) | None) => {}
+            (TextKind::Code | TextKind::Typst, _) => continue,
+            (TextKind::Markdown, Some(known)) if known == source => continue,
+            (TextKind::Markdown, Some(_) | None) => {}
         }
         let text = match document::markdown(documents, id, doc) {
             Some(parsed) => parsed.source.as_str(),

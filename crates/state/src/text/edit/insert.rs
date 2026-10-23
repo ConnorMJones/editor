@@ -24,11 +24,7 @@ static DEFAULT_PAIRS: LazyLock<AutoPairs> = LazyLock::new(AutoPairs::default);
 
 const HEURISTIC: IndentationHeuristic = IndentationHeuristic::Hybrid;
 
-pub(super) fn auto_pairs<'a>(
-    doc: &TextDoc,
-    selection: &Selection,
-    loader: &'a Loader,
-) -> &'a AutoPairs {
+pub fn auto_pairs<'a>(doc: &TextDoc, selection: &Selection, loader: &'a Loader) -> &'a AutoPairs {
     let (start, _) = selection.primary().into_byte_range(doc.text.slice(..));
     doc.language_config_at(loader, start)
         .and_then(|config| config.auto_pairs.as_ref())
@@ -253,7 +249,7 @@ pub fn insert_with_indent(state: &mut State, fallback: Fallback) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Comments {
+pub enum Comments {
     Continue,
     Skip,
 }
@@ -263,7 +259,7 @@ pub fn open(state: &mut State, direction: Direction) {
     open_lines(state, direction, Comments::Continue)
 }
 
-pub(super) fn open_lines(state: &mut State, direction: Direction, comments: Comments) {
+pub fn open_lines(state: &mut State, direction: Direction, comments: Comments) {
     let count = count_of(state);
     state.input.mode = Mode::Insert;
     edit(state, |doc, selection, loader| {
@@ -371,7 +367,7 @@ pub fn exit_insert(state: &mut State) {
             };
             inserted_blank.then(|| (text.line_to_char(line), pos))
         }
-        Focused::Empty | Focused::ReadOnly => None,
+        Focused::Empty | Focused::Drawing | Focused::ReadOnly => None,
     };
     if let Some((start, end)) = blank_line {
         edit(state, |doc, _, _| {
@@ -427,7 +423,7 @@ pub fn smart_tab(state: &mut State) {
                 .chars()
                 .all(char::is_whitespace)
         }),
-        Focused::Empty | Focused::ReadOnly => false,
+        Focused::Empty | Focused::Drawing | Focused::ReadOnly => false,
     };
     match after_text {
         true => motion::motion(state, Motion::ParentNodeEnd),

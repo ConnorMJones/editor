@@ -14,7 +14,7 @@ use super::Draw;
 use crate::fonts::{Fonts, hsla};
 
 /// A monospace box with an optional label, highlighted when `runs` are given.
-pub(super) fn code_box(
+pub fn code_box(
     theme: &Theme,
     fonts: &Fonts,
     label: Option<SharedString>,
@@ -50,7 +50,7 @@ pub(super) fn code_box(
 }
 
 /// A muted box standing in for content that cannot be shown yet.
-pub(super) fn placeholder(
+pub fn placeholder(
     theme: &Theme,
     fonts: &Fonts,
     label: &'static str,
@@ -83,7 +83,7 @@ pub(super) fn placeholder(
 }
 
 /// A typeset figure: its image once ready, else its source (and error) in a muted box.
-pub(super) fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyElement {
+pub fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyElement {
     let theme = draw.theme;
     let fonts = draw.fonts;
     let label = match figure.kind {
@@ -117,7 +117,7 @@ pub(super) fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyEl
     }
 }
 
-pub(super) fn picture(theme: &Theme, fonts: &Fonts, file: &ImageFile, src: &str) -> AnyElement {
+pub fn picture(theme: &Theme, fonts: &Fonts, file: &ImageFile, src: &str) -> AnyElement {
     match file {
         ImageFile::Local(path) => {
             let (missing, theme_muted) =

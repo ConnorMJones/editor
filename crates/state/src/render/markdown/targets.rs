@@ -33,7 +33,7 @@ pub fn locate(src: &str, base: Base) -> ImageFile {
     }
 }
 
-pub(super) fn vault_image(base: Base, dest: Dest<&str>) -> ImageFile {
+pub fn vault_image(base: Base, dest: Dest<&str>) -> ImageFile {
     match links::resolve(base.vault, base.folder, dest) {
         Resolution::File(path) => ImageFile::Local(path.to_path(base.root)),
         Resolution::Missing(_) | Resolution::Invalid => ImageFile::Missing,
@@ -53,7 +53,7 @@ fn has_scheme(dest: &str) -> bool {
     }
 }
 
-pub(super) fn percent_decode(text: &str) -> String {
+pub fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -77,7 +77,7 @@ pub(super) fn percent_decode(text: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
-pub(crate) fn link_target(link_type: LinkType, dest: &str, alias: Option<String>) -> LinkTarget {
+pub fn link_target(link_type: LinkType, dest: &str, alias: Option<String>) -> LinkTarget {
     match link_type {
         LinkType::WikiLink { .. } => LinkTarget::Wiki(WikiLink::parse(dest, alias)),
         LinkType::Email => LinkTarget::Url(format!("mailto:{dest}")),
@@ -105,7 +105,7 @@ pub(crate) fn link_target(link_type: LinkType, dest: &str, alias: Option<String>
     }
 }
 
-pub(super) fn is_image_path(target: &str) -> bool {
+pub fn is_image_path(target: &str) -> bool {
     Path::new(target)
         .extension()
         .and_then(|ext| ext.to_str())

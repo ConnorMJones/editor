@@ -362,12 +362,12 @@ pub struct Pointed<'a> {
     pub right: Right,
 }
 
-pub(crate) fn pane_text<'a>(
+pub fn pane_text<'a>(
     layout: &'a mut Layout,
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
 ) -> Option<Pointed<'a>> {
-    let tab = layout.find_pane(pane)?.active_mut()?;
+    let tab = layout.find_pane(pane)?.active_text_mut()?;
     let buffer = &buffers[tab.buffer()];
     let doc = &buffer.doc;
     Some(match tab.showing_mut() {
@@ -489,7 +489,7 @@ pub fn measured(state: &mut State, pane: PaneId, viewport: Viewport) {
             right: Right::Deleted,
             ..
         })
-        | None => match layout.find_pane(pane).and_then(Pane::active_mut) {
+        | None => match layout.find_pane(pane).and_then(Pane::active_text_mut) {
             Some(view) => view.text_mut().scroll.viewport = viewport,
             None => return,
         },

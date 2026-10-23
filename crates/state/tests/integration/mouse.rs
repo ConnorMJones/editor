@@ -107,7 +107,7 @@ fn tab_clicks_show_and_close_through_the_close_guard() {
 fn clicking_a_pane_focuses_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys("<C-w>v<space>e");
+    h.keys(":o a.txt<ret><C-w>v<space>e");
     let first = h.state.layout.leaves()[0];
     assert_ne!(h.state.layout.focus(), first);
     panes::focus_pane(&mut h.state, first);

@@ -18,7 +18,7 @@ use crate::git::diffview::Right;
 use crate::view::display::{Indent, text_format};
 use crate::view::scroll::{self, Pointed, SCROLLOFF};
 
-pub(crate) fn direction(direction: Direction) -> movement::Direction {
+pub fn direction(direction: Direction) -> movement::Direction {
     match direction {
         Direction::Forward => movement::Direction::Forward,
         Direction::Backward => movement::Direction::Backward,

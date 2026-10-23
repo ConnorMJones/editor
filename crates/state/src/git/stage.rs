@@ -15,7 +15,7 @@ use crate::project::path::RelPath;
 use crate::project::watch;
 use crate::sidebar::tree::EntryKind;
 use crate::view::layout::Pane;
-use crate::view::tab::Tab;
+use crate::view::tab::TextTabs;
 use crate::{Confirm, Effect, Overlay, Repo, State, request_git};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,8 +48,8 @@ fn index_job(state: &mut State, path: &Path, op: IndexOp) -> Option<Job> {
 pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
     let focus = state.layout.focus();
     let Some(view) = (state.layout.panes().get(focus))
-        .and_then(Pane::active)
-        .map(Tab::text)
+        .and_then(Pane::active_text)
+        .map(TextTabs::text)
     else {
         state.notice = Some(Notice::NoBuffer);
         return;

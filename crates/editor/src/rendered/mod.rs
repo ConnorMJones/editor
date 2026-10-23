@@ -1,20 +1,17 @@
-//! Rendered views: GPUI lists of blocks or pages, with SVGs rasterised at their drawn size.
+//! Rendered views: documents as GPUI lists of blocks, and pages fitted by the shared sheet view;
+//! SVGs are rasterised at their drawn size.
 
 use gpui::{
     AnyElement, App, Context, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
     WeakEntity, Window, div, list, prelude::*, px,
 };
 use helix_core::SmallVec;
-use model::typeset::{PagePoint, Svg};
 use model::units::Px;
-use state::State;
 use state::render::document::{DocumentAt, DocumentScroll};
-use state::render::markdown::Markdown;
-use state::render::pages::{Fit, PagesAt, PagesScroll, Zoom};
-use state::render::typeset::{Typst, each_figure};
+use state::render::typeset::each_figure;
 use state::text::buffer::BufferId;
 use state::view::layout::{Pane, PaneId};
-use state::view::tab::{Showing, Tab};
+use state::view::tab::{Showing, TextTabs};
 
 use crate::fonts::PROSE_LINE;
 use crate::workspace::Workspace;
@@ -23,20 +20,16 @@ mod document;
 mod pages;
 pub mod raster;
 
-use pages::{PAGE_GAP, page_width};
-
-/// A document or pages pane's list and what its measured items describe.
+/// A document pane's list and what its measured items describe.
 pub struct RenderedPane {
     pub list: ListState,
     pub buffer: BufferId,
-    /// Document version (markdown) or compiled version (typst) the list was spliced to.
+    /// Document version the list was spliced to.
     pub version: u64,
-    /// Item hashes: block source hashes, or typst page sizes.
+    /// Block source hashes.
     pub hashes: Vec<u64>,
     /// What else the items were measured with.
     pub measured: Measured,
-    /// How far the pages are drawn panned left, as last applied.
-    pub left: Pixels,
     /// Scroll last exchanged between the list and the state.
     pub applied: Applied,
 }
@@ -45,37 +38,22 @@ pub struct RenderedPane {
 pub struct Measured {
     /// `Figures::generation`, which sizes figures.
     pub figures: u64,
-    pub shape: Shape,
-    /// Viewport size the list was last laid out in; pages are sized from it.
-    pub width: Pixels,
-    pub height: Pixels,
+    /// Folded callouts.
+    pub toggled: Vec<u32>,
+    /// The file index's generation, which resolved the embeds.
+    pub generation: u64,
 }
 
-/// The view state items are laid out with, per kind of view.
-#[derive(Clone, PartialEq)]
-pub enum Shape {
-    /// `generation` is the file index's, which resolved the embeds.
-    Document {
-        toggled: Vec<u32>,
-        generation: u64,
-    },
-    Pages {
-        fit: Fit,
-        zoom: Zoom,
-    },
-}
-
-/// Where a list stands: `offset` into item `item`, with its contents panned `left`.
+/// Where a list stands: `offset` into item `item`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ListAt {
     pub item: usize,
     pub offset: Pixels,
-    pub left: Pixels,
 }
 
 /// What the state asks of a list.
 #[derive(Clone, Copy)]
-enum Want<'a> {
+enum Want {
     /// A line not yet resolved into a place.
     Wait,
     At(ListAt),
@@ -83,14 +61,6 @@ enum Want<'a> {
         from: ListAt,
         lines: i32,
         half_pages: i32,
-        columns: i32,
-    },
-    /// A point on `page`, drawn at `fit` and `zoom`.
-    Point {
-        at: PagePoint,
-        page: &'a Svg,
-        fit: Fit,
-        zoom: Zoom,
     },
 }
 
@@ -100,16 +70,6 @@ enum Asked {
     Move,
 }
 
-/// What a list's items are: which figures size them, and how far it can pan.
-enum Items<'a> {
-    Blocks(&'a Markdown),
-    Pages {
-        pages: &'a [Svg],
-        fit: Fit,
-        zoom: Zoom,
-    },
-}
-
 /// The scroll the list was last set to or reported, unless items moved under it since.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Applied {
@@ -117,37 +77,19 @@ pub enum Applied {
     At(ListAt),
 }
 
-/// Tells the state where `pane`'s list stands, in its view's own terms.
-fn report(state: &mut State, pane: PaneId, at: ListAt) {
-    match state
-        .layout
-        .panes()
-        .get(pane)
-        .and_then(Pane::active)
-        .map(Tab::showing)
-    {
-        Some(Showing::Document(..)) => state::render::document::scrolled(
-            state,
-            pane,
-            DocumentAt {
-                item: at.item,
-                offset: Px(at.offset.into()),
-            },
-        ),
-        Some(Showing::Pages(..)) => state::render::pages::scrolled(
-            state,
-            pane,
-            PagesAt {
-                page: at.item,
-                offset: Px(at.offset.into()),
-                left: Px(at.left.into()),
-            },
-        ),
-        Some(Showing::Source(_) | Showing::Diff(..)) | None => {}
-    }
+/// Tells the state where `pane`'s list stands.
+fn report(state: &mut state::State, pane: PaneId, at: ListAt) {
+    state::render::document::scrolled(
+        state,
+        pane,
+        DocumentAt {
+            item: at.item,
+            offset: Px(at.offset.into()),
+        },
+    )
 }
 
-/// Brings each document and pages pane's list in line with the state and carries out its scroll.
+/// Brings each document pane's list in line with the state and carries out its scroll.
 pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     let _span = tracing::trace_span!("rendered sync").entered();
     let Workspace {
@@ -159,109 +101,51 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     } = workspace;
     rendered.retain(|pane, cache| {
         match (state.layout.panes().get(pane))
-            .and_then(Pane::active)
-            .map(Tab::showing)
+            .and_then(Pane::active_text)
+            .map(TextTabs::showing)
         {
-            Some(Showing::Document(text, ..) | Showing::Pages(text, ..)) => {
-                text.buffer() == cache.buffer
-            }
-            Some(Showing::Source(_) | Showing::Diff(..)) | None => false,
+            Some(Showing::Document(text, ..)) => text.buffer() == cache.buffer,
+            Some(Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..)) | None => false,
         }
     });
     let shown: SmallVec<[PaneId; 4]> = (state.layout.panes().iter())
         .filter(|(_, target)| {
             matches!(
-                target.active().map(Tab::showing),
-                Some(Showing::Document(..) | Showing::Pages(..))
+                target.active_text().map(TextTabs::showing),
+                Some(Showing::Document(..))
             )
         })
         .map(|(pane, _)| pane)
         .collect();
     let line = fonts.prose_size * PROSE_LINE;
-    let list_at = |item: usize, offset: Px, left: Px| ListAt {
+    let list_at = |item: usize, offset: Px| ListAt {
         item,
         offset: px(offset.0),
-        left: px(left.0),
     };
     for pane in shown {
-        let (buffer, version, hashes, shape, want, items) =
-            match state.layout.panes()[pane].active().map(Tab::showing) {
-                Some(Showing::Document(text, view, _)) => {
-                    let buffer = text.buffer();
-                    let Some(parsed) = state.documents.get(buffer) else {
-                        continue;
-                    };
-                    let want = match view.scroll {
-                        DocumentScroll::Line(_) => Want::Wait,
-                        DocumentScroll::At(at) => Want::At(list_at(at.item, at.offset, Px(0.0))),
-                        DocumentScroll::Moved { from, by } => Want::Moved {
-                            from: list_at(from.item, from.offset, Px(0.0)),
-                            lines: by.lines,
-                            half_pages: by.half_pages,
-                            columns: 0,
-                        },
-                    };
-                    let shape = Shape::Document {
-                        toggled: view.toggled.clone(),
-                        generation: parsed.generation,
-                    };
-                    (
-                        buffer,
-                        parsed.version,
-                        &parsed.markdown.hashes,
-                        shape,
-                        want,
-                        Items::Blocks(&parsed.markdown),
-                    )
-                }
-                Some(Showing::Pages(text, view, _)) => {
-                    let buffer = text.buffer();
-                    let Some(Typst {
-                        pages: Some(compiled),
-                        ..
-                    }) = state.compiles.get(buffer)
-                    else {
-                        continue;
-                    };
-                    let want = match view.scroll {
-                        PagesScroll::Line(_) => Want::Wait,
-                        PagesScroll::Point(at) => match compiled.pages.get(at.page) {
-                            Some(page) => Want::Point {
-                                at,
-                                page,
-                                fit: view.fit,
-                                zoom: view.zoom,
-                            },
-                            None => Want::Wait,
-                        },
-                        PagesScroll::At(at) => Want::At(list_at(at.page, at.offset, at.left)),
-                        PagesScroll::Moved { from, by } => Want::Moved {
-                            from: list_at(from.page, from.offset, from.left),
-                            lines: by.lines,
-                            half_pages: by.half_pages,
-                            columns: by.columns,
-                        },
-                    };
-                    let shape = Shape::Pages {
-                        fit: view.fit,
-                        zoom: view.zoom,
-                    };
-                    let items = Items::Pages {
-                        pages: &compiled.pages,
-                        fit: view.fit,
-                        zoom: view.zoom,
-                    };
-                    (
-                        buffer,
-                        compiled.version,
-                        &compiled.sizes,
-                        shape,
-                        want,
-                        items,
-                    )
-                }
-                Some(Showing::Source(_) | Showing::Diff(..)) | None => continue,
-            };
+        let Some(Showing::Document(text, view, _)) = state.layout.panes()[pane]
+            .active_text()
+            .map(TextTabs::showing)
+        else {
+            continue;
+        };
+        let buffer = text.buffer();
+        let Some(parsed) = state.documents.get(buffer) else {
+            continue;
+        };
+        let want = match view.scroll {
+            DocumentScroll::Line(_) => Want::Wait,
+            DocumentScroll::At(at) => Want::At(list_at(at.item, at.offset)),
+            DocumentScroll::Moved { from, by } => Want::Moved {
+                from: list_at(from.item, from.offset),
+                lines: by.lines,
+                half_pages: by.half_pages,
+            },
+        };
+        let (version, hashes, markdown) =
+            (parsed.version, &parsed.markdown.hashes, &parsed.markdown);
+        let toggled = view.toggled.clone();
+        let generation = parsed.generation;
         let cache = match rendered.get_mut(pane) {
             Some(cache) => cache,
             None => {
@@ -279,7 +163,6 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                             let at = ListAt {
                                 item: top.item_ix,
                                 offset: top.offset_in_item,
-                                left: cache.left,
                             };
                             cache.applied = Applied::At(at);
                             report(&mut this.state, pane, at);
@@ -296,11 +179,9 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                         hashes: hashes.clone(),
                         measured: Measured {
                             figures: state.figures.generation,
-                            shape: shape.clone(),
-                            width: px(0.),
-                            height: px(0.),
+                            toggled: toggled.clone(),
+                            generation,
                         },
-                        left: px(0.),
                         applied: Applied::Stale,
                     },
                 );
@@ -328,13 +209,15 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         let measured = &mut cache.measured;
         let since = std::mem::replace(&mut measured.figures, state.figures.generation);
         let arrived = (since != state.figures.generation).then_some(since);
-        match (measured.shape == shape, arrived, &items) {
-            (false, ..) => {
-                measured.shape = shape;
+        let shaped = measured.toggled == toggled && measured.generation == generation;
+        match (shaped, arrived) {
+            (false, _) => {
+                measured.toggled = toggled;
+                measured.generation = generation;
                 cache.list.remeasure();
             }
             // Only the items holding a figure filled since the last measure change height.
-            (true, Some(since), Items::Blocks(markdown)) => {
+            (true, Some(since)) => {
                 let filled = |figure| (state.figures.entries.get(&figure)).map_or(0, |e| e.filled);
                 for (item, &root) in markdown.roots.iter().enumerate() {
                     let mut newest = 0;
@@ -346,68 +229,35 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                     }
                 }
             }
-            (true, None, _) | (true, Some(_), Items::Pages { .. }) => {}
+            (true, None) => {}
         }
         let viewport = cache.list.viewport_bounds().size;
-        let (from, down, across, asked) = match (want, cache.applied) {
+        let (from, down, asked) = match (want, cache.applied) {
             (Want::Wait, _) => continue,
             (Want::At(at), Applied::At(applied)) if at == applied => continue,
-            (Want::At(at), Applied::At(_) | Applied::Stale) => (at, px(0.), px(0.), Asked::At(at)),
+            (Want::At(at), Applied::At(_) | Applied::Stale) => (at, px(0.), Asked::At(at)),
             (
                 Want::Moved {
                     from,
                     lines,
                     half_pages,
-                    columns,
                 },
                 _,
             ) => (
                 from,
                 line * lines as f32 + viewport.height * (half_pages as f32 / 2.),
-                line * columns as f32,
                 Asked::Move,
             ),
-            (
-                Want::Point {
-                    at,
-                    page,
-                    fit,
-                    zoom,
-                },
-                _,
-            ) => {
-                let scale = page_width(&cache.measured, fit, zoom, page) / px(page.width.0);
-                let gap = match at.page {
-                    0 => PAGE_GAP,
-                    _ => px(0.),
-                };
-                // The point lands a third of the way down, centred across.
-                (
-                    list_at(at.page, Px(0.0), Px(0.0)),
-                    gap + px(at.y.0 * scale) - viewport.height / 3.,
-                    PAGE_GAP + px(at.x.0 * scale) - viewport.width / 2.,
-                    Asked::Move,
-                )
-            }
         };
         cache.list.scroll_to(ListOffset {
             item_ix: from.item,
             offset_in_item: px(0.),
         });
         cache.list.scroll_by(from.offset + down);
-        let widest = match items {
-            Items::Blocks(_) => px(0.),
-            Items::Pages { pages, fit, zoom } => (pages.iter())
-                .map(|page| page_width(&cache.measured, fit, zoom, page))
-                .fold(px(0.), |widest, width| widest.max(width)),
-        };
-        let room = (widest + PAGE_GAP * 2. - viewport.width).max(px(0.));
-        cache.left = (from.left + across).max(px(0.)).min(room);
         let top = cache.list.logical_scroll_top();
         let landed = ListAt {
             item: top.item_ix,
             offset: top.offset_in_item,
-            left: cache.left,
         };
         cache.applied = Applied::At(landed);
         match asked {
@@ -417,31 +267,36 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     }
 }
 
-/// The list drawing `pane`'s document or pages view, under a pages view's diagnostics strip.
+/// The body of `pane`'s document or pages view: a list of blocks, or the pages under their
+/// diagnostics strip.
 pub fn body(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> AnyElement {
-    let Some(cache) = workspace.rendered.get(pane) else {
-        return div().flex_1().into_any_element();
-    };
-    let header = match workspace.state.layout.pages(pane) {
-        Some((text, _)) => (workspace.state.compiles.get(text.buffer()))
-            .and_then(|typst| pages::header(workspace, pane, typst, cx)),
-        None => None,
-    };
-    div()
-        .flex_1()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .children(header)
-        .child(
-            list(
+    match workspace.state.layout.pages(pane) {
+        Some((text, _)) => {
+            let header = (workspace.state.compiles.get(text.buffer()))
+                .and_then(|typst| pages::header(workspace, pane, typst, cx));
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(header)
+                .child(div().flex_1().min_h_0().child(pages::PagesElement {
+                    workspace: cx.entity(),
+                    pane,
+                }))
+                .into_any_element()
+        }
+        None => match workspace.rendered.get(pane) {
+            Some(cache) => list(
                 cache.list.clone(),
                 cx.processor(move |this, index: usize, _window, cx| item(this, pane, index, cx)),
             )
             .flex_1()
-            .min_h_0(),
-        )
-        .into_any_element()
+            .min_h_0()
+            .into_any_element(),
+            None => div().flex_1().into_any_element(),
+        },
+    }
 }
 
 fn item(
@@ -451,16 +306,16 @@ fn item(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     match (this.state.layout.panes().get(pane))
-        .and_then(Pane::active)
-        .map(Tab::showing)
+        .and_then(Pane::active_text)
+        .map(TextTabs::showing)
     {
         Some(Showing::Document(text, view, _)) => {
             document::item(this, pane, text.buffer(), view, index, cx)
         }
-        Some(Showing::Pages(text, view, _)) => {
-            pages::item(this, pane, text.buffer(), view, index, cx)
+        // The list closes with the document view, so these show only for a frame.
+        Some(Showing::Pages(..) | Showing::Source(_) | Showing::Diff(..)) | None => {
+            div().into_any_element()
         }
-        Some(Showing::Source(_) | Showing::Diff(..)) | None => div().into_any_element(),
     }
 }
 

@@ -14,8 +14,9 @@ use model::notice::Notice;
 
 use crate::apply::{self, focused_text};
 use crate::project::files::FileIndex;
+use crate::project::path::TextKind;
 use crate::project::path::{Folder, RelPath};
-use crate::render::markdown::{self, BlockKind, Format, LinkTarget, Markdown, WikiLink};
+use crate::render::markdown::{self, BlockKind, LinkTarget, Markdown, WikiLink};
 use crate::text::buffer::{BufferId, Target, TextDoc};
 use crate::view::layout::{NotInLayout, PaneId};
 use crate::view::panes::Arrive;
@@ -90,10 +91,13 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
                 None => {
                     let note = with_md(path.as_str());
                     // A bare name is created beside the linking note.
-                    Resolution::Missing(match path.folder() {
-                        Folder::Root => Folder::of(dir).join(&note),
-                        Folder::Sub(_) => RelPath(note),
-                    })
+                    match path.folder() {
+                        Folder::Root => Resolution::Missing(Folder::of(dir).join(&note)),
+                        Folder::Sub(_) => match RelPath::parse(&note) {
+                            Ok(note) => Resolution::Missing(note),
+                            Err(_) => Resolution::Invalid,
+                        },
+                    }
                 }
             }
         }
@@ -108,7 +112,7 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
             let exists = |path: &RelPath| index.files.binary_search(path).is_ok();
             let note = match Path::new(relative.as_str()).extension() {
                 Some(_) => None,
-                None => Some(RelPath(with_md(relative.as_str()))),
+                None => RelPath::parse(&with_md(relative.as_str())).ok(),
             };
             let from_root = match base.is_empty() {
                 true => None,
@@ -197,7 +201,7 @@ fn normalize(base: &str, rest: &str) -> Option<RelPath> {
             part => parts.push(part),
         }
     }
-    (!parts.is_empty()).then(|| RelPath(parts.join("/")))
+    RelPath::parse(&parts.join("/")).ok()
 }
 
 /// Groups links by the file name they name, case-folded and without `.md`: only a file with
@@ -443,13 +447,13 @@ pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
     let line = text.byte_to_line(cursor);
     let line_start = text.line_to_byte(line);
     let path = state.buffers[buffer].path.clone();
-    let link = match Format::of(&path) {
-        Some(Format::Markdown) => {
+    let link = match state.buffers[buffer].kind {
+        TextKind::Markdown => {
             let content = std::borrow::Cow::<str>::from(text.line(line));
             let content = content.trim_end_matches(['\n', '\r']);
             link_at(content, (cursor - line_start).min(content.len()))
         }
-        Some(Format::Typst) | None => None,
+        TextKind::Typst | TextKind::Code => None,
     };
     match link {
         Some(link) => return follow(state, buffer, &link, Origin::Text(pane), out),

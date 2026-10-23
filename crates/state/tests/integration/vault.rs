@@ -11,7 +11,7 @@ use state::project::path::RelPath;
 use state::render::document::{self, DocumentScroll};
 use state::render::markdown::{BlockKind, EmbedKind, ImageFile};
 
-use state::view::tab::{Showing, Tab};
+use state::view::tab::{Showing, TextTabs};
 use state::{Confirm, Overlay, input};
 
 use crate::harness::Harness;
@@ -185,7 +185,10 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
         )
     });
     assert_eq!(focused(&h), "notes/sub/c.md");
-    match h.state.layout.panes()[pane].active().map(Tab::showing) {
+    match h.state.layout.panes()[pane]
+        .active_text()
+        .map(TextTabs::showing)
+    {
         Some(Showing::Document(_, view, _)) => {
             assert_eq!(
                 view.scroll,

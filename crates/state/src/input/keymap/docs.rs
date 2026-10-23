@@ -19,6 +19,31 @@ Source view keys are listed in their own section below.
 | `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
 ";
 
+/// Drawings, kept by hand.
+const DRAWINGS: &str = "\
+## Drawings
+
+`.pdt` files are paged documents and `.bdt` files are boards; both open into panes like any file.
+The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
+Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
+
+| Keys | Context | Action |
+| --- | --- | --- |
+| `b` / `e` | drawing | The pen's tip draws / erases whole strokes. |
+| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to scale, the dot above to rotate. |
+| `tl` / `ta` / `tr` / `to` | drawing | The tip drags out a line / arrow / rectangle / ellipse. |
+| `dd`, `del` | drawing | Delete the selection. |
+| `u` / `U` | drawing | Undo / redo the drawing. |
+| `+` / `-` / `=` | drawing | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
+| `zf` | drawing | Fit pages to the pane's width, or to its height. |
+| `h j k l`, arrows, wheel | drawing | Pan; pages stay on screen. |
+| `]p` / `[p`, `gg` / `G` | drawing | Next / previous page, first / last page. |
+| `o` / `O` | drawing | A blank page below / above the page in focus. |
+| `dp` | drawing | Remove the page in focus. |
+| `]l` / `[l` | drawing | Next / previous layer becomes active. |
+| `space l h` / `space l n` | drawing | Hide or show the active layer / add a layer. |
+";
+
 /// The git source view, kept by hand.
 const SOURCE_VIEW: &str = "\
 ## Source view (git)
@@ -114,6 +139,8 @@ pub fn reference() -> String {
     out.push_str(SOURCE_VIEW);
     out.push_str("\n");
     out.push_str(MARKDOWN_VIEW);
+    out.push_str("\n");
+    out.push_str(DRAWINGS);
     out.push_str("\n## Typed commands (`:`)\n\n| Names |\n| --- |\n");
     for (names, _) in crate::input::prompt::COMMANDS {
         let names: Vec<String> = names.iter().map(|name| format!("`:{name}`")).collect();

@@ -231,6 +231,10 @@ impl PlatformWindow for HeadlessWindow {
         Arc::new(HeadlessAtlas::default())
     }
 
+    fn meshes(&self) -> Arc<dyn gpui::PlatformMeshes> {
+        Arc::new(gpui::NoMeshes)
+    }
+
     fn is_subpixel_rendering_supported(&self) -> bool {
         false
     }

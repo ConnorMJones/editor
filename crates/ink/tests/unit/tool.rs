@@ -1,0 +1,450 @@
+use ink::brush::Size;
+use ink::doc::{Background, Board, Drawing, Ink, LayerIndex, MarkChange, ShapeKind};
+use ink::geom::{Point, Rect, Surface};
+use ink::history::Edited;
+use ink::input::Sample;
+use ink::tool::{
+    Brushing, Erasing, Gather, Grip, Handle, Outcome, PenInput, Selecting, ToolKind, Tools,
+};
+use model::color::Rgb;
+
+use crate::{brush, paint, sample, wave, window};
+
+fn tools() -> Tools<LayerIndex> {
+    Tools::new(brush(window()), paint(), Size::new(6.0).unwrap())
+}
+
+fn reach() -> Size {
+    Size::new(4.0).unwrap()
+}
+
+fn board() -> Edited<Board> {
+    Edited::new(Board::new(Background::Plain(Rgb::hex(0xffffff))))
+}
+
+/// Samples along straight lines through `points`, 5 ms apart.
+fn path(points: &[(f32, f32)]) -> Vec<Sample<Surface>> {
+    let mut samples = Vec::new();
+    for pair in points.windows(2) {
+        let ((ax, ay), (bx, by)) = (pair[0], pair[1]);
+        for step in 0..10 {
+            let t = step as f32 / 10.0;
+            let time = samples.len() as f32 / 200.0;
+            samples.push(sample(ax + (bx - ax) * t, ay + (by - ay) * t, time, 0.5));
+        }
+    }
+    let &(x, y) = points.last().unwrap();
+    samples.push(sample(x, y, samples.len() as f32 / 200.0, 0.5));
+    samples
+}
+
+/// Works `kind` through `samples`, returning the outcome of lifting the pen.
+fn gesture(
+    tools: &mut Tools<LayerIndex>,
+    kind: ToolKind,
+    board: &Board,
+    samples: &[Sample<Surface>],
+) -> Outcome<LayerIndex> {
+    let (first, rest) = samples.split_first().unwrap();
+    let (last, middle) = rest.split_last().unwrap();
+    let down = PenInput::Down {
+        target: LayerIndex(0),
+        sample: *first,
+    };
+    assert!(matches!(
+        tools.input(kind, down, board, reach()),
+        Outcome::Drawn
+    ));
+    for sample in middle {
+        tools.input(kind, PenInput::Move(*sample), board, reach());
+    }
+    tools.input(kind, PenInput::Up(*last), board, reach())
+}
+
+/// Commits what `kind` proposes over `points`.
+fn commit(
+    edited: &mut Edited<Board>,
+    tools: &mut Tools<LayerIndex>,
+    kind: ToolKind,
+    points: &[(f32, f32)],
+) {
+    match gesture(tools, kind, edited.drawing(), &path(points)) {
+        Outcome::Commit(change) => {
+            edited.commit(change.into()).unwrap();
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Two short strokes, one near the origin and one at x 100.
+fn two_strokes(tools: &mut Tools<LayerIndex>) -> Edited<Board> {
+    let mut edited = board();
+    commit(
+        &mut edited,
+        tools,
+        ToolKind::Brush,
+        &[(0.0, 0.0), (20.0, 0.0)],
+    );
+    commit(
+        &mut edited,
+        tools,
+        ToolKind::Brush,
+        &[(100.0, 0.0), (120.0, 0.0)],
+    );
+    edited
+}
+
+fn bounds(edited: &Edited<Board>) -> Vec<Rect<Surface>> {
+    (edited.drawing().marks(LayerIndex(0)).unwrap().iter())
+        .map(|(_, mark)| mark.bounds())
+        .collect()
+}
+
+fn picked(tools: &Tools<LayerIndex>) -> usize {
+    match &tools.select {
+        Selecting::Holding { picked, .. } => picked.ids.len(),
+        Selecting::Idle
+        | Selecting::Pressed { .. }
+        | Selecting::Boxing { .. }
+        | Selecting::Lassoing { .. } => 0,
+    }
+}
+
+#[test]
+fn lifting_the_brush_proposes_the_stroke() {
+    let board = board();
+    let board = board.drawing();
+    let mut tools = tools();
+    let samples = wave::<Surface>(50);
+    let (first, rest) = samples.split_first().unwrap();
+    let down = PenInput::Down {
+        target: LayerIndex(0),
+        sample: *first,
+    };
+    tools.input(ToolKind::Brush, down, board, reach());
+    for sample in &rest[..10] {
+        tools.input(ToolKind::Brush, PenInput::Move(*sample), board, reach());
+    }
+    assert!(matches!(tools.brush.state, Brushing::Drawing { .. }));
+    assert!(!tools.brush.stroke.mesh.mesh().triangles.is_empty());
+    tools.input(ToolKind::Brush, PenInput::Cancel, board, reach());
+    assert!(matches!(tools.brush.state, Brushing::Idle));
+    match gesture(&mut tools, ToolKind::Brush, board, &samples) {
+        Outcome::Commit(MarkChange::Add(LayerIndex(0), mark)) => match &mark.ink {
+            Ink::Stroke(geometry) => assert_eq!(geometry.samples.len(), 50),
+            Ink::Shape(_) => panic!("the brush draws strokes"),
+        },
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(tools.brush.state, Brushing::Idle));
+}
+
+#[test]
+fn input_without_a_stroke_is_ignored() {
+    let board = board();
+    let mut tools = tools();
+    let at = sample::<Surface>(1.0, 1.0, 0.0, 0.5);
+    let kinds = [
+        ToolKind::Brush,
+        ToolKind::Eraser,
+        ToolKind::Select(Gather::Lasso),
+        ToolKind::Shape(ShapeKind::Line),
+    ];
+    for input in [PenInput::Move(at), PenInput::Up(at), PenInput::Cancel] {
+        for kind in kinds {
+            assert!(
+                matches!(
+                    tools.input(kind, input, board.drawing(), reach()),
+                    Outcome::Ignored
+                ),
+                "{kind:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn erasing_removes_the_strokes_crossed_in_one_step() {
+    let mut tools = tools();
+    let mut edited = board();
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Brush,
+        &[(0.0, 0.0), (100.0, 0.0)],
+    );
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Brush,
+        &[(0.0, 100.0), (100.0, 100.0)],
+    );
+    let across = path(&[(50.0, -20.0), (50.0, 20.0)]);
+    let (first, rest) = across.split_first().unwrap();
+    let down = PenInput::Down {
+        target: LayerIndex(0),
+        sample: *first,
+    };
+    tools.input(ToolKind::Eraser, down, edited.drawing(), reach());
+    for sample in &rest[..rest.len() - 1] {
+        tools.input(
+            ToolKind::Eraser,
+            PenInput::Move(*sample),
+            edited.drawing(),
+            reach(),
+        );
+    }
+    match &tools.eraser.state {
+        Erasing::Erasing { erased, .. } => {
+            assert_eq!(erased.len(), 1, "erased marks are shown hidden")
+        }
+        Erasing::Idle => panic!("still erasing"),
+    }
+    let Outcome::Commit(change) = tools.input(
+        ToolKind::Eraser,
+        PenInput::Up(rest[rest.len() - 1]),
+        edited.drawing(),
+        reach(),
+    ) else {
+        panic!("the eraser proposes a removal");
+    };
+    edited.commit(change.into()).unwrap();
+    assert_eq!(edited.drawing().marks(LayerIndex(0)).unwrap().len(), 1);
+    edited.undo().unwrap();
+    assert_eq!(edited.drawing().marks(LayerIndex(0)).unwrap().len(), 2);
+}
+
+#[test]
+fn a_lasso_picks_the_marks_it_encloses() {
+    let mut tools = tools();
+    let edited = two_strokes(&mut tools);
+    let lasso = [
+        (-10.0, -10.0),
+        (30.0, -10.0),
+        (30.0, 10.0),
+        (-10.0, 10.0),
+        (-10.0, -10.0),
+    ];
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &path(&lasso),
+    );
+    assert_eq!(picked(&tools), 1);
+    let around = [
+        (-10.0, -10.0),
+        (130.0, -10.0),
+        (130.0, 10.0),
+        (-10.0, 10.0),
+        (-10.0, -10.0),
+    ];
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &path(&around),
+    );
+    assert_eq!(picked(&tools), 2);
+    let empty = [(-10.0, 50.0), (130.0, 50.0), (130.0, 70.0), (-10.0, 50.0)];
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &path(&empty),
+    );
+    assert_eq!(picked(&tools), 0);
+}
+
+#[test]
+fn a_tap_picks_the_mark_under_it() {
+    let mut tools = tools();
+    let edited = two_strokes(&mut tools);
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &path(&[(110.0, 0.0), (111.0, 1.0)]),
+    );
+    match &tools.select {
+        Selecting::Holding { picked, .. } => {
+            let marks = edited.drawing().marks(LayerIndex(0)).unwrap();
+            let (top, _) = marks.iter().last().unwrap();
+            assert_eq!(picked.ids.as_slice(), [top]);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn moving_a_selection_is_one_step_that_undoes_whole() {
+    let mut tools = tools();
+    let mut edited = two_strokes(&mut tools);
+    let before = bounds(&edited);
+    let around = [
+        (-10.0, -10.0),
+        (130.0, -10.0),
+        (130.0, 10.0),
+        (-10.0, 10.0),
+        (-10.0, -10.0),
+    ];
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &path(&around),
+    );
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        &[(60.0, 0.0), (60.0, 50.0)],
+    );
+    let after = bounds(&edited);
+    for (before, after) in before.iter().zip(&after) {
+        assert!((after.min().y - before.min().y - 50.0).abs() < 1e-3);
+        assert!((after.min().x - before.min().x).abs() < 1e-3);
+    }
+    edited.undo().unwrap();
+    assert_eq!(bounds(&edited), before);
+}
+
+#[test]
+fn the_handles_rotate_and_scale_the_selection() {
+    let mut tools = tools();
+    let mut edited = board();
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Brush,
+        &[(0.0, 0.0), (40.0, 0.0)],
+    );
+    let tap = path(&[(20.0, 0.0), (20.5, 0.0)]);
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &tap,
+    );
+    let box_of = |tools: &Tools<LayerIndex>| match &tools.select {
+        Selecting::Holding {
+            picked,
+            grip: Grip::Still,
+            ..
+        } => picked.bounds,
+        other => panic!("{other:?}"),
+    };
+    let held = box_of(&tools);
+
+    let corner = Handle::Corner(ink::tool::Corner::BottomRight).at(&held, reach());
+    let farther = (corner.x + 40.0, corner.y);
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        &[(corner.x, corner.y), farther],
+    );
+    let scaled = bounds(&edited)[0];
+    let width = |rect: Rect<Surface>| rect.max().x - rect.min().x;
+    assert!((width(scaled) - width(held) - 40.0).abs() < 1e-2);
+    let (held, now) = (box_of(&tools), scaled);
+    assert!(
+        held.min().distance(now.min()) < 1e-3 && held.max().distance(now.max()) < 1e-3,
+        "the box follows the marks"
+    );
+
+    let rotate = Handle::Rotate.at(&scaled, reach());
+    let center = scaled.min().lerp(scaled.max(), 0.5);
+    let beside = (center.x + (center.y - rotate.y), center.y);
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        &[(rotate.x, rotate.y), beside],
+    );
+    let turned = bounds(&edited)[0];
+    let height = |rect: Rect<Surface>| rect.max().y - rect.min().y;
+    assert!(
+        (height(turned) - width(scaled)).abs() < 1.0,
+        "a quarter turn stands the stroke up: {turned:?}"
+    );
+    assert_eq!(edited.drawing().marks(LayerIndex(0)).unwrap().len(), 1);
+}
+
+#[test]
+fn deleting_removes_the_picked_marks() {
+    let mut tools = tools();
+    let mut edited = two_strokes(&mut tools);
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Lasso),
+        edited.drawing(),
+        &path(&[(10.0, 0.0), (10.5, 0.0)]),
+    );
+    let change = tools.select.delete().unwrap();
+    edited.commit(change.into()).unwrap();
+    assert_eq!(edited.drawing().marks(LayerIndex(0)).unwrap().len(), 1);
+    assert!(tools.select.delete().is_none(), "nothing is left picked");
+}
+
+#[test]
+fn a_shape_is_dragged_out_and_a_tap_draws_none() {
+    let mut tools = tools();
+    let mut edited = board();
+    let rectangle = ToolKind::Shape(ShapeKind::Rectangle);
+    let at = sample::<Surface>(5.0, 5.0, 0.0, 0.5);
+    let down = PenInput::Down {
+        target: LayerIndex(0),
+        sample: at,
+    };
+    tools.input(rectangle, down, edited.drawing(), reach());
+    assert!(matches!(
+        tools.input(rectangle, PenInput::Up(at), edited.drawing(), reach()),
+        Outcome::Drawn
+    ));
+    commit(
+        &mut edited,
+        &mut tools,
+        rectangle,
+        &[(0.0, 0.0), (60.0, 40.0)],
+    );
+    let marks = edited.drawing().marks(LayerIndex(0)).unwrap();
+    let (_, mark) = marks.iter().next().unwrap();
+    assert!(
+        mark.touches(Point::new(60.0, 40.0), 0.1),
+        "a corner is drawn"
+    );
+    assert!(mark.touches(Point::new(30.0, 0.0), 0.1), "an edge is drawn");
+    assert!(
+        !mark.touches(Point::new(30.0, 20.0), 1.0),
+        "the inside is empty"
+    );
+}
+
+#[test]
+fn a_box_picks_the_marks_wholly_inside_it() {
+    let mut tools = tools();
+    let edited = two_strokes(&mut tools);
+    let select = ToolKind::Select(Gather::Box);
+    gesture(
+        &mut tools,
+        select,
+        edited.drawing(),
+        &path(&[(-10.0, -10.0), (30.0, 10.0)]),
+    );
+    assert_eq!(picked(&tools), 1);
+    gesture(
+        &mut tools,
+        select,
+        edited.drawing(),
+        &path(&[(-10.0, -10.0), (110.0, 10.0)]),
+    );
+    assert_eq!(picked(&tools), 1, "the second stroke is only partly inside");
+    gesture(
+        &mut tools,
+        select,
+        edited.drawing(),
+        &path(&[(130.0, 10.0), (-10.0, -10.0)]),
+    );
+    assert_eq!(picked(&tools), 2, "a box drawn backwards picks the same");
+}

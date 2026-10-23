@@ -3,22 +3,27 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use helix_core::SmallVec;
+use model::geom::Point;
+use model::sheet::{Fit, PageIndex, PlaneView, SheetView, Spot, Zoom};
 use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
 use crate::apply;
+use crate::drawing::{self, InkTabs};
 use crate::job::Job;
 use crate::project::path::{Folder, RelPath};
 use crate::render::Opening;
 use crate::render::document::DocumentScroll;
-use crate::render::pages::PagesScroll;
+use crate::render::pages::Locating;
 use crate::sidebar::tree::{self, Dir, Fold, Listing};
 use crate::text::buffer::{BufferId, Saved, Target};
 use crate::view::layout::{
-    Child, CloseError, Flex, InvalidTabs, Item, Layout, Node, Pane, PaneId, Tabs,
+    Child, CloseError, Flex, InvalidTabs, Item, Layout, LayoutError, Node, Pane, PaneId, Split,
+    SplitError, Tabs,
 };
-use crate::view::tab::{Beside, NoMode, Showing, Tab};
+use crate::view::tab::{Beside, NoMode, Opened, Showing, Tab, TextTabs};
 use crate::{Effect, Files, Focus, Sidebar, SidebarWidth, State};
+use ink::doc::LayerIndex;
 use model::command::Shown;
 use model::git::Group;
 
@@ -53,8 +58,14 @@ pub enum SessionNode {
     },
 }
 
+/// A saved tab's view, read into its kind: text's mode, ranges, primary and scroll, or a drawing's.
+enum Restoring {
+    Text(SessionMode, Vec<[usize; 2]>, usize, usize),
+    Drawing(drawing::Saved),
+}
+
 /// `active` and `preview` index into `tabs`.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionPane {
     Empty,
@@ -66,16 +77,41 @@ pub enum SessionPane {
     },
 }
 
-/// A tab: its file, the mode it shows, and the selection and scroll its text keeps.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A tab: its file, and what its kind of tab keeps.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionItem {
     pub path: PathBuf,
-    pub mode: SessionMode,
-    /// `[anchor, head]` char offsets.
-    pub ranges: Vec<[usize; 2]>,
-    pub primary: usize,
-    pub scroll: usize,
+    pub view: SessionView,
+}
+
+/// What a tab keeps: text's mode, selection and scroll, or a drawing's layer and view.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum SessionView {
+    Text {
+        mode: SessionMode,
+        /// `[anchor, head]` char offsets.
+        ranges: Vec<[usize; 2]>,
+        primary: usize,
+        scroll: usize,
+    },
+    /// `x` and `y` are the point on `page` at the pane's centre.
+    Paged {
+        layer: usize,
+        page: usize,
+        x: f32,
+        y: f32,
+        fit: Fit,
+        zoom: f32,
+    },
+    /// `x` and `y` are the board point at the pane's centre.
+    Board {
+        layer: usize,
+        x: f32,
+        y: f32,
+        zoom: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,14 +147,18 @@ pub enum SessionError {
     MissingPane(usize),
     #[error("layout uses pane {0} more than once")]
     DuplicatePane(usize),
-    #[error("a split needs at least two children")]
-    EmptySplit,
+    #[error(transparent)]
+    Split(#[from] SplitError),
+    #[error(transparent)]
+    Layout(#[from] LayoutError),
     #[error("pane {0} is not placed in the layout")]
     UnusedPane(usize),
     #[error("pane {pane}, tab {tab}: the file has no rendering")]
     NoRendering { pane: usize, tab: usize },
     #[error("pane {pane}, tab {tab}: the primary selection does not exist")]
     Selection { pane: usize, tab: usize },
+    #[error("pane {pane}, tab {tab}: the file is not the kind of file the tab was")]
+    Kind { pane: usize, tab: usize },
     #[error("focus names pane {0}, which does not exist")]
     MissingFocus(usize),
     #[error("pane {pane}: {reason}")]
@@ -163,46 +203,25 @@ pub fn snapshot(state: &State) -> Session {
                 tabs: tabs
                     .items()
                     .iter()
-                    .map(|item| {
-                        let view = item.tab.text();
-                        let path = state.buffers[view.buffer()].path.clone();
-                        let ranges = view
-                            .selection
-                            .ranges()
-                            .iter()
-                            .map(|range| [range.anchor, range.head])
-                            .collect();
-                        let mode = match item.tab.showing() {
-                            Showing::Source(_) => SessionMode::Source,
-                            Showing::Diff(..) => SessionMode::Diff,
-                            Showing::Document(_, view, beside) => saved(
-                                match view.scroll {
-                                    DocumentScroll::Line(line) => Opening::Line(line),
-                                    DocumentScroll::At(at)
-                                    | DocumentScroll::Moved { from: at, .. } => {
-                                        Opening::Item(at.item)
-                                    }
-                                },
-                                beside,
-                            ),
-                            Showing::Pages(_, view, beside) => saved(
-                                match view.scroll {
-                                    PagesScroll::Line(line) => Opening::Line(line),
-                                    PagesScroll::Point(at) => Opening::Item(at.page),
-                                    PagesScroll::At(at) | PagesScroll::Moved { from: at, .. } => {
-                                        Opening::Item(at.page)
-                                    }
-                                },
-                                beside,
-                            ),
-                        };
-                        SessionItem {
-                            path,
-                            mode,
-                            ranges,
-                            primary: view.selection.primary_index(),
-                            scroll: view.scroll.anchor,
-                        }
+                    .map(|item| SessionItem {
+                        path: state.path_of(item.tab.opened()).to_owned(),
+                        view: match &item.tab {
+                            Tab::Text(text) => text_view(text),
+                            Tab::Ink(InkTabs::Paged(tab)) => SessionView::Paged {
+                                layer: tab.hand.layer.0,
+                                page: tab.view.centre.page.0,
+                                x: tab.view.centre.at.x,
+                                y: tab.view.centre.at.y,
+                                fit: tab.view.fit,
+                                zoom: tab.view.zoom.get(),
+                            },
+                            Tab::Ink(InkTabs::Board(tab)) => SessionView::Board {
+                                layer: tab.hand.layer.0,
+                                x: tab.view.centre.x,
+                                y: tab.view.centre.y,
+                                zoom: tab.view.zoom.get(),
+                            },
+                        },
                     })
                     .collect(),
                 active: tabs.active(),
@@ -241,10 +260,9 @@ fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> Ses
             pane: index[pane],
             flex,
         },
-        Node::Split { axis, children } => SessionNode::Split {
-            axis: *axis,
-            children: children
-                .iter()
+        Node::Split(split) => SessionNode::Split {
+            axis: split.axis(),
+            children: (split.children().iter())
                 .map(|c| snapshot_node(&c.node, c.flex, index))
                 .collect(),
             flex,
@@ -307,13 +325,68 @@ pub fn restore(
         let mut kept: Vec<usize> = Vec::with_capacity(tabs.len());
         let mut items: Vec<Item> = Vec::with_capacity(tabs.len());
         for (saved_index, item) in tabs.into_iter().enumerate() {
-            let SessionItem {
-                path,
-                mode,
-                ranges,
-                primary,
-                scroll,
-            } = item;
+            let SessionItem { path, view } = item;
+            let wrong_kind = SessionError::Kind {
+                pane,
+                tab: saved_index,
+            };
+            let restoring = match view {
+                SessionView::Text {
+                    mode,
+                    ranges,
+                    primary,
+                    scroll,
+                } => Restoring::Text(mode, ranges, primary, scroll),
+                SessionView::Paged {
+                    layer,
+                    page,
+                    x,
+                    y,
+                    fit,
+                    zoom,
+                } => Restoring::Drawing(drawing::Saved::Paged {
+                    layer: LayerIndex(layer),
+                    view: SheetView {
+                        centre: Spot {
+                            page: PageIndex(page),
+                            at: Point::new(x, y),
+                        },
+                        fit,
+                        zoom: Zoom::clamped(zoom),
+                    },
+                }),
+                SessionView::Board { layer, x, y, zoom } => {
+                    Restoring::Drawing(drawing::Saved::Board {
+                        layer: LayerIndex(layer),
+                        view: PlaneView {
+                            centre: Point::new(x, y),
+                            zoom: Zoom::clamped(zoom),
+                        },
+                    })
+                }
+            };
+            let (mode, ranges, primary, scroll) = match restoring {
+                Restoring::Text(mode, ranges, primary, scroll) => (mode, ranges, primary, scroll),
+                Restoring::Drawing(saved) => {
+                    match path.is_file() {
+                        true => {}
+                        false => continue,
+                    }
+                    let tab = match apply::read_now(state, &path, out) {
+                        Ok(opened) => drawing::reopen(state, opened, saved).ok_or(wrong_kind)?,
+                        Err(notice) => {
+                            state.notice = Some(notice);
+                            continue;
+                        }
+                    };
+                    items.push(Item {
+                        tab,
+                        used: state.layout.tick(),
+                    });
+                    kept.push(saved_index);
+                    continue;
+                }
+            };
             let saved = Saved::new(&ranges, primary, scroll).ok_or(SessionError::Selection {
                 pane,
                 tab: saved_index,
@@ -322,7 +395,8 @@ pub fn restore(
             let buffer = match (mode, path.is_file(), path.exists()) {
                 (_, true, _) | (SessionMode::Diff, false, false) => {
                     match apply::read_now(state, &path, out) {
-                        Ok(buffer) => buffer,
+                        Ok(Opened::Text(buffer)) => buffer,
+                        Ok(Opened::Paged(_) | Opened::Board(_)) => return Err(wrong_kind),
                         Err(notice) => {
                             state.notice = Some(notice);
                             continue;
@@ -336,7 +410,7 @@ pub fn restore(
                 )
                 | (SessionMode::Diff, false, true) => continue,
             };
-            let mut tab = Tab::open(buffer, &state.buffers[buffer].path);
+            let mut tab = TextTabs::open(buffer, state.buffers[buffer].kind);
             places.push((ids[pane], buffer, saved));
             // Only a rendering uses where it opens.
             let (shown, at) = match mode {
@@ -355,7 +429,7 @@ pub fn restore(
                 }
             }
             items.push(Item {
-                tab,
+                tab: Tab::Text(tab),
                 used: state.layout.tick(),
             });
             kept.push(saved_index);
@@ -376,7 +450,7 @@ pub fn restore(
         };
         panes[ids[pane]].tabs = tabs;
     }
-    state.layout = Layout::restored(panes, root, focus, state.layout.clock);
+    state.layout = Layout::restored(panes, root, focus, state.layout.clock)?;
     // Panes whose files were all deleted close, as an emptied pane does.
     let empty: SmallVec<[PaneId; 4]> = (state.layout.panes().iter())
         .filter(|(_, pane)| pane.tabs.is_none())
@@ -433,18 +507,15 @@ fn parse_node(node: SessionNode, slots: &mut [Option<PaneId>]) -> Result<Child, 
             axis,
             children,
             flex,
-        } => match children.len() {
-            0 | 1 => Err(SessionError::EmptySplit),
-            _ => Ok(Child {
+        } => {
+            let children = (children.into_iter())
+                .map(|child| parse_node(child, slots))
+                .collect::<Result<_, _>>()?;
+            Ok(Child {
                 flex,
-                node: Node::Split {
-                    axis,
-                    children: (children.into_iter())
-                        .map(|child| parse_node(child, slots))
-                        .collect::<Result<_, _>>()?,
-                },
-            }),
-        },
+                node: Node::Split(Split::new(axis, children)?),
+            })
+        }
     }
 }
 
@@ -453,5 +524,38 @@ fn saved<S>(top: Opening, beside: Beside<S>) -> SessionMode {
     match beside {
         Beside::Alone => SessionMode::Render { top },
         Beside::Source(..) => SessionMode::Split { top },
+    }
+}
+
+/// What a text tab keeps: the mode it shows, its selection and its scroll.
+fn text_view(text: &TextTabs) -> SessionView {
+    let view = text.text();
+    let mode = match text.showing() {
+        Showing::Source(_) => SessionMode::Source,
+        Showing::Diff(..) => SessionMode::Diff,
+        Showing::Document(_, view, beside) => saved(
+            match view.scroll {
+                DocumentScroll::Line(line) => Opening::Line(line),
+                DocumentScroll::At(at) | DocumentScroll::Moved { from: at, .. } => {
+                    Opening::Item(at.item)
+                }
+            },
+            beside,
+        ),
+        Showing::Pages(_, view, beside) => saved(
+            match view.locating {
+                Locating::Line(line) => Opening::Line(line),
+                Locating::Settled => Opening::Item(view.view.centre.page.0),
+            },
+            beside,
+        ),
+    };
+    SessionView::Text {
+        mode,
+        ranges: (view.selection.ranges().iter())
+            .map(|range| [range.anchor, range.head])
+            .collect(),
+        primary: view.selection.primary_index(),
+        scroll: view.scroll.anchor,
     }
 }

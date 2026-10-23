@@ -11,6 +11,7 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 # Our crates.
 cli = { path = "crates/cli" }
+ink = { path = "crates/ink" }
 model = { path = "crates/model" }
 state = { path = "crates/state" }
 typeset = { path = "crates/typeset" }

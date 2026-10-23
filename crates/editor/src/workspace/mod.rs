@@ -17,7 +17,6 @@ use slotmap::SecondaryMap;
 use state::git::stage::Discard;
 use state::job::{self, JobResult};
 use state::project::watch::{self, Watcher};
-use state::render::pages::Fit;
 use state::render::typeset::Request;
 use state::sidebar::changes::{self};
 use state::sidebar::tree::{self, NewEntry, TreeEdit};
@@ -30,17 +29,19 @@ use state::{
 };
 
 mod chrome;
+mod drops;
 mod ime;
 mod pane_tree;
 mod picker;
 mod sidebar;
 mod status;
 
-pub use sidebar::TreeMenu;
+pub use drops::DraggedTab;
+pub use sidebar::{DragPreview, DraggedEntry, TreeMenu};
 
 use crate::fonts::{Fonts, hsla};
+use crate::rendered::RenderedPane;
 use crate::rendered::raster::{Rasterized, Rasters};
-use crate::rendered::{RenderedPane, Shape};
 use chrome::{corners, round};
 use pane_tree::{DIVIDER, SPLIT_MIN_COLUMNS};
 use sidebar::fit_sidebar;
@@ -60,6 +61,8 @@ pub struct Workspace {
     pub preedit: String,
     pub session: SessionFile,
     pub drag: Drag,
+    /// The pane and zone a dragged file or tab would drop into.
+    pub drop_zone: Option<(PaneId, state::view::panes::Zone)>,
     /// Window edge under the pointer; a change redraws so the cursor follows it.
     pub resize_edge: Option<ResizeEdge>,
     /// Bounds drawn last frame, which drags measure against.
@@ -108,6 +111,8 @@ pub struct Areas {
     pub sidebar: Cell<Bounds<Pixels>>,
     /// The body of each pane showing a split, as last laid out.
     pub splits: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
+    /// Each drawing's body, which pen and mouse positions are measured from.
+    pub drawings: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
 }
 
 impl Workspace {
@@ -329,23 +334,6 @@ impl Render for Workspace {
             });
         rasters.frame += 1;
         drop(rasters);
-        // Typst pages are sized from the viewport their list was last laid out in.
-        for cache in self.rendered.values_mut() {
-            let size = cache.list.viewport_bounds().size;
-            match (&cache.measured.shape, cache.measured.height == size.height) {
-                (Shape::Pages { fit: Fit::Page, .. }, false) => cache.list.remeasure(),
-                (Shape::Pages { fit: Fit::Page, .. }, true)
-                | (
-                    Shape::Pages {
-                        fit: Fit::Width, ..
-                    }
-                    | Shape::Document { .. },
-                    _,
-                ) => {}
-            }
-            cache.measured.width = size.width;
-            cache.measured.height = size.height;
-        }
         let State {
             tree,
             project,

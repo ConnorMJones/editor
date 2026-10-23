@@ -1,10 +1,12 @@
 //! The binding tables, one per context, after helix's defaults.
 
 use model::command::{
-    Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand, Find, HunkOp,
-    HunkTarget, Inclusion, Join, Motion, ObjectScope, PagesCommand, Paste, Pending, PickerCommand,
+    Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
+    DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join, Motion,
+    ObjectScope, PageCommand, PageSide, PageStep, PagesCommand, Paste, Pending, PickerCommand,
     PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy,
-    Shown, SyntaxObject, Take, TreeCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
+    Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking,
+    ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -1050,7 +1052,106 @@ const PAGES: Bindings = &[
     ),
 ];
 
-pub(super) const TABLES: [&[Bindings]; Context::COUNT] = [
+/// A paged document or board.
+const fn tool(tool: InkTool) -> Command {
+    Command::Drawing(DrawingCommand::Ink(InkCommand::Tool(tool)))
+}
+
+const fn view(view: ViewCommand) -> Command {
+    Command::Drawing(DrawingCommand::View(view))
+}
+
+const fn page(page: PageCommand) -> Command {
+    Command::Drawing(DrawingCommand::Page(page))
+}
+
+const fn ink(ink: InkCommand) -> Command {
+    Command::Drawing(DrawingCommand::Ink(ink))
+}
+
+const DRAWING: Bindings = &[
+    (&[Key::char('b')], tool(InkTool::Brush)),
+    (&[Key::char('e')], tool(InkTool::Eraser)),
+    (&[Key::char('s')], tool(InkTool::BoxSelect)),
+    (&[Key::char('S')], tool(InkTool::LassoSelect)),
+    (&[Key::char('t'), Key::char('l')], tool(InkTool::Line)),
+    (&[Key::char('t'), Key::char('a')], tool(InkTool::Arrow)),
+    (&[Key::char('t'), Key::char('r')], tool(InkTool::Rectangle)),
+    (&[Key::char('t'), Key::char('o')], tool(InkTool::Ellipse)),
+    (
+        &[Key::char('d'), Key::char('d')],
+        ink(InkCommand::DeletePicked),
+    ),
+    (&[Key::code(KeyCode::Delete)], ink(InkCommand::DeletePicked)),
+    (&[Key::char('u')], Command::Undo),
+    (&[Key::char('U')], Command::Redo),
+    (&[Key::char('+')], view(ViewCommand::Zoom(ZoomBy::In))),
+    (&[Key::char('-')], view(ViewCommand::Zoom(ZoomBy::Out))),
+    (&[Key::char('=')], view(ViewCommand::Zoom(ZoomBy::Reset))),
+    (
+        &[Key::char('z'), Key::char('f')],
+        view(ViewCommand::ToggleFit),
+    ),
+    (&[Key::char('h')], view(ViewCommand::Pan(Side::Left))),
+    (
+        &[Key::code(KeyCode::Left)],
+        view(ViewCommand::Pan(Side::Left)),
+    ),
+    (&[Key::char('l')], view(ViewCommand::Pan(Side::Right))),
+    (
+        &[Key::code(KeyCode::Right)],
+        view(ViewCommand::Pan(Side::Right)),
+    ),
+    (&[Key::char('k')], view(ViewCommand::Pan(Side::Up))),
+    (&[Key::code(KeyCode::Up)], view(ViewCommand::Pan(Side::Up))),
+    (&[Key::char('j')], view(ViewCommand::Pan(Side::Down))),
+    (
+        &[Key::code(KeyCode::Down)],
+        view(ViewCommand::Pan(Side::Down)),
+    ),
+    (
+        &[Key::char(']'), Key::char('p')],
+        page(PageCommand::Go(PageStep::Next)),
+    ),
+    (
+        &[Key::char('['), Key::char('p')],
+        page(PageCommand::Go(PageStep::Previous)),
+    ),
+    (
+        &[Key::char('g'), Key::char('g')],
+        page(PageCommand::Go(PageStep::First)),
+    ),
+    (&[Key::char('G')], page(PageCommand::Go(PageStep::Last))),
+    (
+        &[Key::char('o')],
+        page(PageCommand::Insert(PageSide::Below)),
+    ),
+    (
+        &[Key::char('O')],
+        page(PageCommand::Insert(PageSide::Above)),
+    ),
+    (&[Key::char('d'), Key::char('p')], page(PageCommand::Remove)),
+    (
+        &[Key::char(']'), Key::char('l')],
+        ink(InkCommand::Layer(Direction::Forward)),
+    ),
+    (
+        &[Key::char('['), Key::char('l')],
+        ink(InkCommand::Layer(Direction::Backward)),
+    ),
+    (
+        &[SPACE, Key::char('l'), Key::char('h')],
+        ink(InkCommand::ToggleLayer),
+    ),
+    (
+        &[SPACE, Key::char('l'), Key::char('n')],
+        ink(InkCommand::NewLayer),
+    ),
+    (&[Key::char(':')], Command::CommandMode),
+    (&SAVE_ALL, Command::WriteAll),
+];
+
+pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
         COMMON,
         NORMAL,
@@ -1102,4 +1203,5 @@ pub(super) const TABLES: [&[Bindings]; Context::COUNT] = [
         SPACE_WINDOW,
         GOTO_BUFFER,
     ],
+    &[DRAWING, WORKSPACE, WINDOW, SPACE_WINDOW, GOTO_BUFFER],
 ];

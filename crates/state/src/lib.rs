@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod drawing;
 pub mod git;
 pub mod input;
 pub mod job;
@@ -43,7 +44,8 @@ use crate::sidebar::changes::ChangesList;
 use crate::sidebar::tree::{Dir, Fold, Listing, Tree, TreeEdit};
 use crate::text::buffer::{Buffer, BufferId, Read, ReadId};
 use crate::text::registers::{ClipboardUse, Registers};
-use crate::view::layout::Layout;
+use crate::view::layout::{Layout, PaneId};
+use crate::view::tab::Opened;
 use model::job::{InFlight, Start, Then};
 
 /// Canonical path of an existing directory the editor was opened on.
@@ -159,6 +161,11 @@ pub struct State {
     pub documents: Documents,
     /// Compiles of the buffers pages views show, while any is open.
     pub compiles: Compiles,
+    /// Open paged documents and boards, as text has `buffers`.
+    pub pageds: drawing::PagedFiles,
+    pub boards: drawing::BoardFiles,
+    /// What new ink tabs draw with.
+    pub ink: drawing::InkSettings,
 }
 
 impl State {
@@ -219,6 +226,69 @@ impl State {
             figures: typeset::Figures::new(look),
             documents: Documents::new(),
             compiles: Compiles::new(),
+            pageds: SlotMap::with_key(),
+            boards: SlotMap::with_key(),
+            ink: drawing::InkSettings::default(),
+        })
+    }
+
+    /// Every open file: text buffers, then paged documents, then boards.
+    pub fn files(&self) -> impl Iterator<Item = Opened> + '_ {
+        (self.buffers.keys().map(Opened::Text))
+            .chain(self.pageds.keys().map(Opened::Paged))
+            .chain(self.boards.keys().map(Opened::Board))
+    }
+
+    /// The disk state of `opened`'s file.
+    pub fn disk_of(&self, opened: Opened) -> text::buffer::Disk {
+        match opened {
+            Opened::Text(buffer) => self.buffers[buffer].disk,
+            Opened::Paged(id) => self.pageds[id].disk,
+            Opened::Board(id) => self.boards[id].disk,
+        }
+    }
+
+    /// Whether `opened` holds changes its file doesn't.
+    pub fn is_modified(&self, opened: Opened) -> bool {
+        match opened {
+            Opened::Text(buffer) => self.buffers[buffer].doc.is_modified(),
+            Opened::Paged(id) => self.pageds[id].is_modified(),
+            Opened::Board(id) => self.boards[id].is_modified(),
+        }
+    }
+
+    pub fn path_of(&self, opened: Opened) -> &std::path::Path {
+        match opened {
+            Opened::Text(buffer) => &self.buffers[buffer].path,
+            Opened::Paged(id) => &self.pageds[id].path,
+            Opened::Board(id) => &self.boards[id].path,
+        }
+    }
+
+    /// Drops `opened`'s file unless a tab still shows it.
+    pub fn release(&mut self, opened: Opened) {
+        match self.shown(opened, None) {
+            true => return,
+            false => {}
+        }
+        match opened {
+            Opened::Text(buffer) => {
+                self.buffers.remove(buffer);
+            }
+            Opened::Paged(id) => {
+                self.pageds.remove(id);
+            }
+            Opened::Board(id) => {
+                self.boards.remove(id);
+            }
+        }
+    }
+
+    /// Whether any tab in any pane shows `opened`, other than item `except` of its pane.
+    pub fn shown(&self, opened: Opened, except: Option<(PaneId, usize)>) -> bool {
+        (self.layout.panes().iter()).any(|(pane, panel)| {
+            (panel.items().iter().enumerate())
+                .any(|(at, item)| item.tab.opened() == opened && Some((pane, at)) != except)
         })
     }
 }
@@ -394,20 +464,20 @@ pub enum Exit {
     AfterWrite(Waiting),
 }
 
-/// Buffers whose writes a quit waits for; never empty.
+/// Files whose writes a quit waits for; never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Waiting(Vec<BufferId>);
+pub struct Waiting(Vec<Opened>);
 
 impl Waiting {
-    pub fn new(buffers: Vec<BufferId>) -> Option<Waiting> {
-        match buffers.is_empty() {
+    pub fn new(files: Vec<Opened>) -> Option<Waiting> {
+        match files.is_empty() {
             true => None,
-            false => Some(Waiting(buffers)),
+            false => Some(Waiting(files)),
         }
     }
 
-    pub fn one(buffer: BufferId) -> Waiting {
-        Waiting(vec![buffer])
+    pub fn one(file: Opened) -> Waiting {
+        Waiting(vec![file])
     }
 }
 
@@ -418,12 +488,12 @@ pub enum AfterWrite {
 }
 
 impl Exit {
-    pub fn written(&mut self, buffer: BufferId) -> AfterWrite {
+    pub fn written(&mut self, file: Opened) -> AfterWrite {
         match std::mem::replace(self, Exit::Running) {
             Exit::Running => AfterWrite::Stay,
-            Exit::AfterWrite(Waiting(mut buffers)) => {
-                buffers.retain(|waiting| *waiting != buffer);
-                match Waiting::new(buffers) {
+            Exit::AfterWrite(Waiting(mut files)) => {
+                files.retain(|waiting| *waiting != file);
+                match Waiting::new(files) {
                     Some(waiting) => {
                         *self = Exit::AfterWrite(waiting);
                         AfterWrite::Stay
@@ -434,11 +504,9 @@ impl Exit {
         }
     }
 
-    pub fn failed(&mut self, buffer: BufferId) {
+    pub fn failed(&mut self, file: Opened) {
         match self {
-            Exit::AfterWrite(Waiting(buffers)) if buffers.contains(&buffer) => {
-                *self = Exit::Running
-            }
+            Exit::AfterWrite(Waiting(files)) if files.contains(&file) => *self = Exit::Running,
             Exit::AfterWrite(_) | Exit::Running => {}
         }
     }

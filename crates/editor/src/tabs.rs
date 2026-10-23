@@ -7,10 +7,11 @@ use model::command::Shown;
 use slotmap::Key as _;
 use state::apply::Force;
 use state::view::layout::{Pane, PaneId, Tabs};
-use state::view::panes::{self, Click};
+use state::view::panes::{self, Click, Dragged};
+use state::view::tab::{Opened, Tab};
 
 use crate::fonts::hsla;
-use crate::workspace::Workspace;
+use crate::workspace::{DragPreview, DraggedEntry, DraggedTab, Workspace};
 
 const TAB_HEIGHT: gpui::Pixels = px(28.);
 /// Top edge of every tab; the focused pane's active tab draws it in the accent colour.
@@ -32,6 +33,8 @@ impl Workspace {
         let state = &self.state;
         let focused = pane == state.layout.focus();
         let pane_key = pane.data().as_ffi();
+        let (preview_bg, preview_fg) = (hsla(theme.chrome.title), hsla(theme.text));
+        let drop_bg = hsla(theme.chrome.selection);
         let bar = div()
             .id(ElementId::NamedInteger("tab-bar".into(), pane_key))
             .flex_none()
@@ -45,8 +48,8 @@ impl Workspace {
             .font(fonts.ui.clone())
             .text_size(fonts.ui_size);
         let tabs_iter = tabs.items().iter().enumerate().map(|(index, item)| {
-            let buffer = &state.buffers[item.tab.buffer()];
-            let path = buffer.path.as_path();
+            let opened = item.tab.opened();
+            let path = state.path_of(opened);
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -55,7 +58,7 @@ impl Workspace {
             let parent = path.parent().unwrap_or(Path::new(""));
             let depth = (state.layout.panes().values())
                 .flat_map(Pane::items)
-                .map(|other| state.buffers[other.tab.buffer()].path.as_path())
+                .map(|other| state.path_of(other.tab.opened()))
                 .filter(|other| *other != path && other.file_name() == path.file_name())
                 .map(|other| {
                     let other = other.parent().unwrap_or(Path::new(""));
@@ -75,7 +78,7 @@ impl Workspace {
                     .to_string()
             });
             let active = index == tabs.active();
-            let modified = buffer.doc.is_modified();
+            let modified = state.is_modified(opened);
             let (bg, fg, edge, bottom) = match (active, focused) {
                 (true, true) => (
                     hsla(theme.background),
@@ -96,22 +99,31 @@ impl Workspace {
                     hsla(theme.chrome.border),
                 ),
             };
+            let preview_name: gpui::SharedString = name.clone().into();
             let label = div().child(name);
             let label = match tabs.preview() == Some(index) {
                 true => label.italic(),
                 false => label,
             };
             // A diff or rendering gets a muted icon before the file name, as zed marks diffs.
-            let icon = match item.tab.shown() {
-                Shown::Source => None,
-                Shown::Diff => Some("±"),
-                Shown::Render => Some("◉"),
-                Shown::Split => Some("◧"),
+            let icon = match &item.tab {
+                Tab::Text(text) => match text.shown() {
+                    Shown::Source => None,
+                    Shown::Diff => Some("±"),
+                    Shown::Render => Some("◉"),
+                    Shown::Split => Some("◧"),
+                },
+                Tab::Ink(_) => Some("✎"),
             }
             .map(|icon| div().text_color(hsla(theme.muted)).child(icon));
-            let key = item.tab.buffer().data().as_ffi();
+            // Ids from different stores can be equal, so the kind is part of the name.
+            let (tab_name, close_name, key) = match opened {
+                Opened::Text(buffer) => ("tab-text", "tab-close-text", buffer.data().as_ffi()),
+                Opened::Paged(id) => ("tab-paged", "tab-close-paged", id.data().as_ffi()),
+                Opened::Board(id) => ("tab-board", "tab-close-board", id.data().as_ffi()),
+            };
             let close = div()
-                .id(ElementId::NamedInteger("tab-close".into(), key))
+                .id(ElementId::NamedInteger(close_name.into(), key))
                 .absolute()
                 .top_0()
                 .left_0()
@@ -155,7 +167,7 @@ impl Workspace {
                 (false, false) => end.child(hover(close)),
             };
             div()
-                .id(ElementId::NamedInteger("tab".into(), key))
+                .id(ElementId::NamedInteger(tab_name.into(), key))
                 .group(GROUP)
                 .flex_none()
                 .h_full()
@@ -168,6 +180,28 @@ impl Workspace {
                 .when(!active, |tab| {
                     tab.hover(|style| style.bg(hsla(theme.chrome.hover)))
                 })
+                .on_drag(DraggedTab { pane, index }, move |_, _, _, cx| {
+                    cx.new(|_| DragPreview {
+                        name: preview_name.clone(),
+                        bg: preview_bg,
+                        fg: preview_fg,
+                    })
+                })
+                .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(drop_bg))
+                .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(drop_bg))
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                    let tab = Dragged::Tab {
+                        pane: dragged.pane,
+                        index: dragged.index,
+                    };
+                    this.drop_on_tabs(pane, index, tab, window, cx)
+                }))
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedEntry, window, cx| {
+                        let file = Dragged::File(dragged.path.clone());
+                        this.drop_on_tabs(pane, index, file, window, cx)
+                    }),
+                )
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     let click = Click::of(event.click_count());
                     panes::click_tab(&mut this.state, pane, index, click);
@@ -201,8 +235,25 @@ impl Workspace {
                 )
                 .child(div().flex_none().h(px(1.)).bg(bottom))
         });
+        let end = tabs.items().len();
         bar.children(tabs_iter).child(
             div()
+                .id(ElementId::NamedInteger("tab-bar-end".into(), pane_key))
+                .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(drop_bg))
+                .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(drop_bg))
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                    let tab = Dragged::Tab {
+                        pane: dragged.pane,
+                        index: dragged.index,
+                    };
+                    this.drop_on_tabs(pane, end, tab, window, cx)
+                }))
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedEntry, window, cx| {
+                        let file = Dragged::File(dragged.path.clone());
+                        this.drop_on_tabs(pane, end, file, window, cx)
+                    }),
+                )
                 .flex_1()
                 .min_w(px(8.))
                 .h_full()

@@ -94,6 +94,28 @@ following one asks `create <path>? y/n` and creates an empty note next to the li
 (or at the vault path the link names). `![[image.png]]` embeds images from anywhere in the
 vault; `![[note]]` shows a box naming the resolved note that opens it when clicked.
 
+## Drawings
+
+`.pdt` files are paged documents and `.bdt` files are boards; both open into panes like any file.
+The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
+Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
+
+| Keys | Context | Action |
+| --- | --- | --- |
+| `b` / `e` | drawing | The pen's tip draws / erases whole strokes. |
+| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to scale, the dot above to rotate. |
+| `tl` / `ta` / `tr` / `to` | drawing | The tip drags out a line / arrow / rectangle / ellipse. |
+| `dd`, `del` | drawing | Delete the selection. |
+| `u` / `U` | drawing | Undo / redo the drawing. |
+| `+` / `-` / `=` | drawing | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
+| `zf` | drawing | Fit pages to the pane's width, or to its height. |
+| `h j k l`, arrows, wheel | drawing | Pan; pages stay on screen. |
+| `]p` / `[p`, `gg` / `G` | drawing | Next / previous page, first / last page. |
+| `o` / `O` | drawing | A blank page below / above the page in focus. |
+| `dp` | drawing | Remove the page in focus. |
+| `]l` / `[l` | drawing | Next / previous layer becomes active. |
+| `space l h` / `space l n` | drawing | Hide or show the active layer / add a layer. |
+
 ## Typed commands (`:`)
 
 | Names |
@@ -909,6 +931,82 @@ vault; `![[note]]` shows a box naming the resolved note that opens it when click
 | `C-w >` | `ResizeSplit(Widen)` |
 | `C-w =` | `ResizeSplit(Even)` |
 | `space l` | `Picker(Open(Backlinks))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |
+
+## Drawing
+
+| Keys | Command |
+| --- | --- |
+| `b` | `Drawing(Ink(Tool(Brush)))` |
+| `e` | `Drawing(Ink(Tool(Eraser)))` |
+| `s` | `Drawing(Ink(Tool(BoxSelect)))` |
+| `S` | `Drawing(Ink(Tool(LassoSelect)))` |
+| `t l` | `Drawing(Ink(Tool(Line)))` |
+| `t a` | `Drawing(Ink(Tool(Arrow)))` |
+| `t r` | `Drawing(Ink(Tool(Rectangle)))` |
+| `t o` | `Drawing(Ink(Tool(Ellipse)))` |
+| `d d` | `Drawing(Ink(DeletePicked))` |
+| `del` | `Drawing(Ink(DeletePicked))` |
+| `u` | `Undo` |
+| `U` | `Redo` |
+| `+` | `Drawing(View(Zoom(In)))` |
+| `-` | `Drawing(View(Zoom(Out)))` |
+| `=` | `Drawing(View(Zoom(Reset)))` |
+| `z f` | `Drawing(View(ToggleFit))` |
+| `h` | `Drawing(View(Pan(Left)))` |
+| `left` | `Drawing(View(Pan(Left)))` |
+| `l` | `Drawing(View(Pan(Right)))` |
+| `right` | `Drawing(View(Pan(Right)))` |
+| `k` | `Drawing(View(Pan(Up)))` |
+| `up` | `Drawing(View(Pan(Up)))` |
+| `j` | `Drawing(View(Pan(Down)))` |
+| `down` | `Drawing(View(Pan(Down)))` |
+| `] p` | `Drawing(Page(Go(Next)))` |
+| `[ p` | `Drawing(Page(Go(Previous)))` |
+| `g g` | `Drawing(Page(Go(First)))` |
+| `G` | `Drawing(Page(Go(Last)))` |
+| `o` | `Drawing(Page(Insert(Below)))` |
+| `O` | `Drawing(Page(Insert(Above)))` |
+| `d p` | `Drawing(Page(Remove))` |
+| `] l` | `Drawing(Ink(Layer(Forward)))` |
+| `[ l` | `Drawing(Ink(Layer(Backward)))` |
+| `space l h` | `Drawing(Ink(ToggleLayer))` |
+| `space l n` | `Drawing(Ink(NewLayer))` |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
 | `space e` | `Tree(Toggle)` |
 | `space f` | `Picker(Open(Files))` |
 | `space b` | `Picker(Open(Buffers))` |

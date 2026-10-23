@@ -1,28 +1,31 @@
 //! The pane tree: splits, their dividers, and each pane's tabs and body.
 
 use gpui::{
-    AnyElement, Context, Div, Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels, canvas, div,
-    prelude::*, px,
+    AnyElement, Context, Div, ElementId, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PenEvent, Pixels, ScrollWheelEvent, canvas, div, prelude::*, px,
 };
 use model::window::Axis;
+use slotmap::Key as _;
+use state::drawing::pen::{PenPhase, Stylus};
 
 use state::view::layout::{Node, Pane, SplitPath};
 use state::view::mode;
 use state::view::panes;
-use state::view::tab::{Beside, Share, Showing};
+use state::view::tab::{Beside, Share, Showing, Tab};
 
 use super::{Drag, Workspace};
+use crate::drawing::{self, DrawingElement};
 use crate::fonts::hsla;
 use crate::text::TextElement;
 use state::view::draws::Part;
 
 /// Hit width of split and sidebar dividers; a 1px line is drawn in the middle.
-pub(super) const DIVIDER: Pixels = px(5.0);
+pub const DIVIDER: Pixels = px(5.0);
 /// Columns of the monospace font each side of a split keeps, however far its divider goes.
-pub(super) const SPLIT_MIN_COLUMNS: f32 = 12.0;
+pub const SPLIT_MIN_COLUMNS: f32 = 12.0;
 
 /// A draggable gap between panes along `axis`, or beside the sidebar.
-pub(super) fn divider(axis: Axis, color: Hsla) -> Div {
+pub fn divider(axis: Axis, color: Hsla) -> Div {
     match axis {
         Axis::Row => div()
             .flex_none()
@@ -46,12 +49,7 @@ pub(super) fn divider(axis: Axis, color: Hsla) -> Div {
 
 impl Workspace {
     /// `path` holds the child indices from the root down to `node`.
-    pub(super) fn node(
-        &self,
-        node: &Node,
-        path: &mut SplitPath,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub fn node(&self, node: &Node, path: &mut SplitPath, cx: &mut Context<Self>) -> AnyElement {
         match node {
             Node::Pane(pane) => {
                 let pane = *pane;
@@ -69,7 +67,105 @@ impl Workspace {
                     part,
                 };
                 let body = match target.and_then(Pane::active) {
-                    Some(view) => {
+                    Some(Tab::Ink(_)) => div().flex_1().min_h_0().overflow_hidden().child(
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "drawing-input".into(),
+                                pane.data().as_ffi(),
+                            ))
+                            .size_full()
+                            .on_pen_event(cx.listener(move |this, event: &PenEvent, window, cx| {
+                                let phase = match event.phase {
+                                    gpui::PenPhase::Down => {
+                                        window.focus(&this.focus, cx);
+                                        PenPhase::Down(drawing::stylus(event.tool))
+                                    }
+                                    gpui::PenPhase::Move => PenPhase::Move,
+                                    gpui::PenPhase::Up => PenPhase::Up,
+                                    gpui::PenPhase::Enter
+                                    | gpui::PenPhase::Hover
+                                    | gpui::PenPhase::Leave => return,
+                                };
+                                let at = event.position;
+                                match drawing::sample(
+                                    this,
+                                    pane,
+                                    at,
+                                    event.time,
+                                    Some(event.pressure),
+                                    Some(event.tilt),
+                                ) {
+                                    Some(sample) => drawing::input(this, pane, phase, sample, cx),
+                                    None => {}
+                                }
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    window.focus(&this.focus, cx);
+                                    match drawing::sample(
+                                        this,
+                                        pane,
+                                        event.position,
+                                        drawing::now(),
+                                        None,
+                                        None,
+                                    ) {
+                                        Some(sample) => {
+                                            let phase = PenPhase::Down(Stylus::Tip);
+                                            drawing::input(this, pane, phase, sample, cx)
+                                        }
+                                        None => {}
+                                    }
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(
+                                move |this, event: &MouseMoveEvent, _, cx| match (
+                                    event.pressed_button,
+                                    drawing::sample(
+                                        this,
+                                        pane,
+                                        event.position,
+                                        drawing::now(),
+                                        None,
+                                        None,
+                                    ),
+                                ) {
+                                    (Some(MouseButton::Left), Some(sample)) => {
+                                        drawing::input(this, pane, PenPhase::Move, sample, cx)
+                                    }
+                                    (Some(_) | None, _) => {}
+                                },
+                            ))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                                    match drawing::sample(
+                                        this,
+                                        pane,
+                                        event.position,
+                                        drawing::now(),
+                                        None,
+                                        None,
+                                    ) {
+                                        Some(sample) => {
+                                            drawing::input(this, pane, PenPhase::Up, sample, cx)
+                                        }
+                                        None => {}
+                                    }
+                                }),
+                            )
+                            .on_scroll_wheel(cx.listener(
+                                move |this, event: &ScrollWheelEvent, _, cx| {
+                                    drawing::wheel(this, pane, event, cx)
+                                },
+                            ))
+                            .child(DrawingElement {
+                                workspace: cx.entity(),
+                                pane,
+                            }),
+                    ),
+                    Some(Tab::Text(view)) => {
                         match view.showing() {
                             Showing::Source(_) => div()
                                 .flex_1()
@@ -189,12 +285,12 @@ impl Workspace {
                         }),
                     )
                     .children(bar)
-                    .child(body)
+                    .child(self.drop_target(pane, body, cx))
                     .child(self.statusline(pane))
                     .into_any_element()
             }
-            Node::Split { axis, children } => {
-                let axis = *axis;
+            Node::Split(split) => {
+                let (axis, children) = (split.axis(), split.children());
                 let container = div()
                     .size_full()
                     .flex()

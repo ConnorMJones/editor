@@ -53,13 +53,7 @@ fn follow_link(
 }
 
 /// Styled text with clickable links; with math it flows as words and formulas on one baseline.
-pub(super) fn inline(
-    draw: &Draw,
-    text: &Inline,
-    index: usize,
-    ink: Ink,
-    base: Modifiers,
-) -> AnyElement {
+pub fn inline(draw: &Draw, text: &Inline, index: usize, ink: Ink, base: Modifiers) -> AnyElement {
     let theme = draw.theme;
     let fonts = draw.fonts;
     let flows = (text.spans.iter()).any(|span| matches!(span.kind, SpanKind::Math(_)));

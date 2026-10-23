@@ -122,7 +122,7 @@ pub fn read(state: &mut State, register: Register) -> Values {
             let path = state
                 .layout
                 .focused()
-                .active()
+                .active_text()
                 .map(|view| &state.buffers[view.buffer()])
                 .map(|buffer| {
                     let path = buffer.path.strip_prefix(state.project.root.path());

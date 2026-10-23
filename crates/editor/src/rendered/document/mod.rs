@@ -56,7 +56,7 @@ enum Ink {
 }
 
 /// Root block `index` of `pane`'s document view, in the reading column.
-pub(super) fn item(
+pub fn item(
     this: &Workspace,
     pane: PaneId,
     buffer: BufferId,

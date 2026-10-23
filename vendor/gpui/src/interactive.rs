@@ -223,6 +223,9 @@ pub struct PenEvent {
     pub buttons: PenButtons,
     /// The keyboard modifiers held during the event.
     pub modifiers: Modifiers,
+    /// When the tool reported this, from an origin the platform picks; only differences mean
+    /// anything.
+    pub time: std::time::Duration,
 }
 
 impl Sealed for PenEvent {}

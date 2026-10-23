@@ -1,3 +1,4 @@
+mod drawing;
 mod fonts;
 mod input;
 mod preview;
@@ -192,6 +193,7 @@ fn main() -> anyhow::Result<()> {
                         picker_scroll: UniformListScrollHandle::new(),
                         session: session_file,
                         drag: Drag::Idle,
+                        drop_zone: None,
                         resize_edge: None,
                         areas: Default::default(),
                         tab_scroll: Default::default(),

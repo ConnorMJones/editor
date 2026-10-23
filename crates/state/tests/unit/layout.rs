@@ -1,21 +1,35 @@
 use model::window::{Axis, Side};
-use state::view::layout::{Child, CloseError, Flex, Layout, MIN_SHARE, Node, Pane, Rect};
+use state::project::path::TextKind;
+use state::text::buffer::BufferId;
+use state::view::layout::{
+    Child, CloseError, Flex, Item, Layout, MIN_SHARE, Node, PaneId, Rect, Split, Tabs, Tick,
+};
+use state::view::tab::{Tab, TextTabs};
 
-fn pane() -> Pane {
-    Pane::EMPTY
+/// A pane split off the focused one along `axis`, after it, holding one tab.
+fn split_off(layout: &mut Layout, axis: Axis) -> PaneId {
+    let side = match axis {
+        Axis::Row => Side::Right,
+        Axis::Column => Side::Down,
+    };
+    let tab = Tab::Text(TextTabs::open(BufferId::default(), TextKind::Code));
+    let tabs = Tabs::one(Item {
+        tab,
+        used: Tick::default(),
+    });
+    layout
+        .split(layout.focus(), side, tabs)
+        .expect("the focus is in the layout")
 }
 
 fn split<const N: usize>(axis: Axis, children: [(f32, Node); N]) -> Node {
-    Node::Split {
-        axis,
-        children: children
-            .into_iter()
-            .map(|(flex, node)| Child {
-                flex: Flex::new(flex).expect("positive"),
-                node,
-            })
-            .collect(),
-    }
+    let children = (children.into_iter())
+        .map(|(flex, node)| Child {
+            flex: Flex::new(flex).expect("positive"),
+            node,
+        })
+        .collect();
+    Node::Split(Split::new(axis, children).expect("a valid split"))
 }
 
 #[track_caller]
@@ -27,8 +41,8 @@ fn assert_close(a: f32, b: f32) {
 fn same_axis_splits_stay_flat() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Row, pane());
+    let b = split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Row);
     // Splitting evens out the split it joins.
     assert_eq!(
         *layout.root(),
@@ -49,8 +63,8 @@ fn same_axis_splits_stay_flat() {
 fn cross_axis_split_nests() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Column, pane());
+    let b = split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Column);
     assert_eq!(
         *layout.root(),
         split(
@@ -70,9 +84,9 @@ fn cross_axis_split_nests() {
 fn close_collapses_and_merges() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Column, pane());
-    let d = layout.split(Axis::Row, pane());
+    let b = split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Column);
+    let d = split_off(&mut layout, Axis::Row);
     // d nests in a row beside c; closing c collapses that row back into the column.
     layout.close(c).unwrap();
     assert_eq!(
@@ -104,8 +118,8 @@ fn close_collapses_and_merges() {
 fn neighbours_follow_geometry() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Column, pane());
+    let b = split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Column);
     // a | b
     //   | c
     assert_eq!(layout.neighbour(Side::Up), Some(b));
@@ -122,8 +136,8 @@ fn neighbours_follow_geometry() {
 #[test]
 fn only_keeps_focused() {
     let mut layout = Layout::new();
-    layout.split(Axis::Row, pane());
-    let kept = layout.split(Axis::Column, pane());
+    split_off(&mut layout, Axis::Row);
+    let kept = split_off(&mut layout, Axis::Column);
     layout.only();
     assert_eq!(*layout.root(), Node::Pane(kept));
     assert_eq!(layout.panes().len(), 1);
@@ -133,8 +147,8 @@ fn only_keeps_focused() {
 fn rects_follow_flex_weights() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Row, pane());
+    let b = split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Row);
     let rects = layout.rects();
     assert_eq!(rects[0].0, a);
     assert_close(rects[0].1.w, 1.0 / 3.0);
@@ -149,8 +163,8 @@ fn rects_follow_flex_weights() {
 #[test]
 fn dragging_a_divider_moves_only_its_neighbours() {
     let mut layout = Layout::new();
-    layout.split(Axis::Row, pane());
-    layout.split(Axis::Row, pane());
+    split_off(&mut layout, Axis::Row);
+    split_off(&mut layout, Axis::Row);
     layout.drag_divider(&[], 0, 0.3);
     let widths: Vec<f32> = layout.rects().iter().map(|(_, r)| r.w).collect();
     assert_close(widths[0], 0.3);
@@ -173,8 +187,8 @@ fn dragging_a_divider_moves_only_its_neighbours() {
 fn nested_divider_drags_within_its_split() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Column, pane());
+    split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Column);
     // The column split occupies the right half; its divider position is in editor fractions.
     layout.drag_divider(&[1], 0, 0.25);
     let rects = layout.rects();
@@ -204,10 +218,10 @@ fn nested_divider_drags_within_its_split() {
 fn merging_a_same_axis_split_evens_it_out() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
-    let c = layout.split(Axis::Column, pane());
+    let b = split_off(&mut layout, Axis::Row);
+    let c = split_off(&mut layout, Axis::Column);
     layout.set_focus(c).unwrap();
-    let d = layout.split(Axis::Row, pane());
+    let d = split_off(&mut layout, Axis::Row);
     // a | b
     //   | c d
     layout.close(b).unwrap();
@@ -234,18 +248,18 @@ fn flex_rejects_non_positive_weights() {
 fn closing_evens_out_the_split_and_focuses_the_neighbour() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
+    let b = split_off(&mut layout, Axis::Row);
     let before = layout.root().clone();
     // Opening and closing a split beside b, again and again, returns to even halves.
     for _ in 0..3 {
-        let c = layout.split(Axis::Row, pane());
+        let c = split_off(&mut layout, Axis::Row);
         layout.close(c).unwrap();
         assert_eq!(*layout.root(), before);
         assert_eq!(layout.focus(), b, "focus goes to the pane beside it");
         layout.set_focus(b).unwrap();
     }
     // Closing the middle of three leaves two even halves.
-    let c = layout.split(Axis::Row, pane());
+    let c = split_off(&mut layout, Axis::Row);
     layout.set_focus(b).unwrap();
     layout.close(b).unwrap();
     assert_eq!(
@@ -254,7 +268,7 @@ fn closing_evens_out_the_split_and_focuses_the_neighbour() {
     );
     assert_eq!(layout.focus(), a);
     layout.close(c).unwrap();
-    let b = layout.split(Axis::Row, pane());
+    let b = split_off(&mut layout, Axis::Row);
     // A first child's neighbour is the sibling after it.
     layout.set_focus(a).unwrap();
     layout.close(a).unwrap();
@@ -267,9 +281,9 @@ fn closing_evens_out_the_split_and_focuses_the_neighbour() {
 fn closing_a_pane_outside_the_layout_fails() {
     let mut layout = Layout::new();
     let a = layout.focus();
-    let b = layout.split(Axis::Row, pane());
+    let b = split_off(&mut layout, Axis::Row);
     layout.close(b).unwrap();
-    layout.split(Axis::Row, pane());
+    split_off(&mut layout, Axis::Row);
     assert_eq!(layout.close(b), Err(CloseError::NotInLayout));
     assert_eq!(layout.leaves().len(), 2);
     assert_eq!(layout.leaves()[0], a);

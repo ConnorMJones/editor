@@ -21,10 +21,10 @@ use super::pane_tree::{DIVIDER, divider};
 use super::{Drag, Workspace};
 use crate::fonts::{Fonts, hsla};
 
-pub(super) const INDENT: f32 = 14.0;
+pub const INDENT: f32 = 14.0;
 /// Sidebar widths in ems of the interface font.
-pub(super) const SIDEBAR_DEFAULT: f32 = 20.0;
-pub(super) const SIDEBAR_MIN: f32 = 8.0;
+pub const SIDEBAR_DEFAULT: f32 = 20.0;
+pub const SIDEBAR_MIN: f32 = 8.0;
 
 pub struct TreeMenu {
     pub target: TreeTarget,
@@ -55,7 +55,7 @@ impl Render for DragPreview {
 }
 
 impl Workspace {
-    pub(super) fn sidebar(&self, focus: Focus, window: Pixels, cx: &mut Context<Self>) -> Div {
+    pub fn sidebar(&self, focus: Focus, window: Pixels, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
         let fonts = &self.fonts;
         let drop_bg = hsla(theme.chrome.selection);
@@ -193,6 +193,8 @@ impl Workspace {
                                         }
                                         ListRow::Entry(index) => {
                                             let changed = &entries[index];
+                                            let (preview_bg, preview_fg) =
+                                                (hsla(theme.chrome.title), hsla(theme.text));
                                             let (letter, status) = match changed.entry {
                                                 Entry::Conflict => ("C", GitStatus::Conflicted),
                                                 Entry::Unstaged(Work::Untracked) => {
@@ -283,6 +285,18 @@ impl Workspace {
                                                 .pr_2()
                                                 .bg(row_bg(theme, row, cursor, focus))
                                                 .hover(|style| style.bg(hsla(theme.chrome.hover)))
+                                                .on_drag(
+                                                    DraggedEntry {
+                                                        path: changed.path.clone(),
+                                                    },
+                                                    move |dragged, _, _, cx| {
+                                                        cx.new(|_| DragPreview {
+                                                            name: dragged.path.name().to_owned().into(),
+                                                            bg: preview_bg,
+                                                            fg: preview_fg,
+                                                        })
+                                                    },
+                                                )
                                                 .on_click(cx.listener(
                                                     move |this, event: &ClickEvent, window, cx| {
                                                         panes::click_changes(
@@ -490,7 +504,7 @@ impl Workspace {
             ))
     }
 
-    pub(super) fn tree_menu(&self, cx: &mut Context<Self>) -> Option<Deferred> {
+    pub fn tree_menu(&self, cx: &mut Context<Self>) -> Option<Deferred> {
         let menu = self.tree_menu.as_ref()?;
         let theme = &self.theme;
         let fonts = &self.fonts;
@@ -550,7 +564,7 @@ impl Workspace {
 }
 
 /// A Changes row button, shown while its row is hovered.
-pub(super) fn row_button(
+pub fn row_button(
     theme: &Theme,
     id: (&'static str, usize),
     glyph: &'static str,
@@ -581,7 +595,7 @@ pub(super) fn row_button(
 }
 
 /// Fits a sidebar width between its minimum and the window, as zed fits its docks.
-pub(super) fn fit_sidebar(width: Pixels, fonts: &Fonts, window: Pixels) -> Pixels {
+pub fn fit_sidebar(width: Pixels, fonts: &Fonts, window: Pixels) -> Pixels {
     width.min(window - DIVIDER).max(fonts.ui_size * SIDEBAR_MIN)
 }
 

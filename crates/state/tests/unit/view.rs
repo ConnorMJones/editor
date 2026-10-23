@@ -106,7 +106,7 @@ fn edits_elsewhere_shift_other_views_anchor() {
     let before = h.view().scroll.anchor;
     let original = h.state.layout.focus();
     h.keys("<C-w>vggxd");
-    match h.state.layout.panes()[original].active() {
+    match h.state.layout.panes()[original].active_text() {
         Some(view) => assert_eq!(view.text().scroll.anchor, before - 2),
         None => panic!("no view"),
     }

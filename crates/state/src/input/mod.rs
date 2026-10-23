@@ -28,22 +28,27 @@ pub fn context(state: &State) -> Context {
         (
             Overlay::None,
             Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
-        ) => match state.layout.focused().active().map(Tab::showing) {
-            Some(Showing::Document(_, _, Beside::Alone)) => Context::Document,
-            Some(Showing::Pages(_, _, Beside::Alone)) => Context::Pages,
-            // Beside its rendering, the source takes the keys.
-            Some(
+        ) => match state.layout.focused().active() {
+            Some(Tab::Ink(_)) => Context::Drawing,
+            Some(Tab::Text(text)) => match text.showing() {
+                Showing::Document(_, _, Beside::Alone) => Context::Document,
+                Showing::Pages(_, _, Beside::Alone) => Context::Pages,
+                // Beside its rendering, the source takes the keys.
                 Showing::Source(_)
                 | Showing::Diff(..)
                 | Showing::Document(_, _, Beside::Source(..))
-                | Showing::Pages(_, _, Beside::Source(..)),
-            )
-            | None => match state.input.mode {
-                Mode::Normal => Context::Normal,
-                Mode::Insert => Context::Insert,
-                Mode::Select => Context::Select,
+                | Showing::Pages(_, _, Beside::Source(..)) => mode_context(state),
             },
+            None => mode_context(state),
         },
+    }
+}
+
+fn mode_context(state: &State) -> Context {
+    match state.input.mode {
+        Mode::Normal => Context::Normal,
+        Mode::Insert => Context::Insert,
+        Mode::Select => Context::Select,
     }
 }
 
@@ -110,7 +115,8 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::Changes
             | Context::Confirm
             | Context::Document
-            | Context::Pages),
+            | Context::Pages
+            | Context::Drawing),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -126,7 +132,7 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
 }
 
 /// Handles one insert-mode key without recording it; `.` replays through here.
-pub(crate) fn insert_key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
+pub fn insert_key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
     if let Some(command) = step(state, Context::Insert, key) {
         run(state, command, out);
     }
@@ -310,6 +316,7 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::Changes
         | Context::Confirm
         | Context::Document
-        | Context::Pages => None,
+        | Context::Pages
+        | Context::Drawing => None,
     }
 }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use helix_core::Rope;
 use model::color::{Palette, Rgb};
 use model::notice::Notice;
+use model::sheet::{PageSize, Stack};
 use model::typeset::{
     Compilation, Diagnostic, DocumentError, Jump, Origin, PagePoint, SourceFile, Svg,
 };
@@ -14,14 +15,15 @@ use model::units::Pt;
 use slotmap::SlotMap;
 
 use crate::job::Job;
+use crate::project::path::TextKind;
 use crate::render::document::Documents;
 #[cfg(feature = "typeset")]
 use crate::render::markdown::FigureKind;
-use crate::render::markdown::{Block, BlockKind, Figure, Format, SpanKind};
-use crate::render::pages::{self, Compiles, PagesScroll};
+use crate::render::markdown::{Block, BlockKind, Figure, SpanKind};
+use crate::render::pages::{self, Compiles, Locating};
 use crate::text::buffer::{Buffer, BufferId};
 use crate::view::layout::PaneId;
-use crate::view::tab::{BesideMut, ShowingMut, Tab};
+use crate::view::tab::{BesideMut, ShowingMut, TextTabs};
 use crate::{Effect, State};
 use model::job::Busy;
 
@@ -154,8 +156,8 @@ pub struct Typst {
 pub struct Compiled {
     pub version: u64,
     pub pages: Vec<Svg>,
-    /// Width and height bits of each page, parallel to `pages`.
-    pub sizes: Vec<u64>,
+    /// The pages' sizes stacked, in step with `pages`.
+    pub stack: Stack,
     pub warnings: Vec<Diagnostic>,
 }
 
@@ -307,14 +309,16 @@ pub fn export_pdf(state: &mut State, out: &mut Vec<Effect>) {
         .layout
         .panes()
         .get(focus)
-        .and_then(|pane| pane.active())
+        .and_then(|pane| pane.active_text())
     else {
         state.notice = Some(Notice::NoBuffer);
         return;
     };
-    let Buffer { path, doc, .. } = &state.buffers[view.buffer()];
-    let notice = match Format::of(path) {
-        Some(Format::Typst) => {
+    let Buffer {
+        path, kind, doc, ..
+    } = &state.buffers[view.buffer()];
+    let notice = match kind {
+        TextKind::Typst => {
             out.push(Effect::Typeset(Request::Pdf {
                 root: root_of(state.project.root.path(), path).to_owned(),
                 main: path.clone(),
@@ -323,8 +327,8 @@ pub fn export_pdf(state: &mut State, out: &mut Vec<Effect>) {
             }));
             return;
         }
-        Some(Format::Markdown) => Notice::MarkdownExport,
-        None => Notice::NotTypst { path: path.clone() },
+        TextKind::Markdown => Notice::MarkdownExport,
+        TextKind::Code => Notice::NotTypst { path: path.clone() },
     };
     state.notice = Some(notice);
 }
@@ -383,18 +387,30 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
             match (version == current, result) {
                 (false, _) => {}
                 (true, Ok(pages)) => {
-                    typst.pages = Some(Compiled {
-                        version,
-                        sizes: (pages.pages.iter())
-                            .map(|page| {
-                                u64::from(page.width.0.to_bits()) << 32
-                                    | u64::from(page.height.0.to_bits())
-                            })
-                            .collect(),
-                        pages: pages.pages,
-                        warnings: pages.warnings,
-                    });
-                    typst.outcome = Outcome::Compiled;
+                    let sizes = (pages.pages.iter())
+                        .map(|page| PageSize::new(page.width.0, page.height.0).ok())
+                        .collect::<Option<Vec<PageSize>>>()
+                        .and_then(Stack::new);
+                    match sizes {
+                        Some(stack) => {
+                            typst.pages = Some(Compiled {
+                                version,
+                                stack,
+                                pages: pages.pages,
+                                warnings: pages.warnings,
+                            });
+                            typst.outcome = Outcome::Compiled;
+                        }
+                        None => {
+                            let error = Diagnostic {
+                                origin: Origin::Detached,
+                                message: "the document has a page with no area, or no pages"
+                                    .to_owned(),
+                                hints: Vec::new(),
+                            };
+                            typst.outcome = Outcome::Failed(vec![error]);
+                        }
+                    }
                 }
                 (true, Err(error)) => {
                     let errors = errors_of(error);
@@ -423,16 +439,14 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
             // Pages waiting on a source line, or beside the source, go to where it landed.
             for pane in layout.panes_mut().map(|(_, pane)| pane) {
                 let Some(ShowingMut::Pages(text, view, beside)) =
-                    pane.active_mut().map(Tab::showing_mut)
+                    pane.active_text_mut().map(TextTabs::showing_mut)
                 else {
                     continue;
                 };
-                match (text.buffer() == buffer, view.scroll, beside, at) {
-                    (true, PagesScroll::Line(_), _, None) => view.scroll = PagesScroll::page(0),
-                    (true, PagesScroll::Line(_), _, Some(at))
-                    | (true, _, BesideMut::Source(..), Some(at)) => {
-                        view.scroll = PagesScroll::Point(at)
-                    }
+                match (text.buffer() == buffer, view.locating, beside, at) {
+                    (true, Locating::Line(_), _, None) => view.locating = Locating::Settled,
+                    (true, Locating::Line(_), _, Some(at))
+                    | (true, _, BesideMut::Source(..), Some(at)) => view.show(at),
                     (true, _, _, _) | (false, _, _, _) => {}
                 }
             }
@@ -448,7 +462,7 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
             })) => state.notice = Some(Notice::OutsideProject { file }),
             Ok(Some(Jump::Url(url))) => out.push(Effect::OpenUrl(url)),
             Ok(Some(Jump::Page(at))) => match state.layout.pages_mut(pane) {
-                Some((_, view, _)) => view.scroll = PagesScroll::Point(at),
+                Some((_, view, _)) => view.show(at),
                 None => {}
             },
             Ok(None) => {}

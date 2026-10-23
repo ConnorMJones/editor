@@ -175,7 +175,7 @@ impl Tone {
 pub const CONFLICT_LABEL: Style = Style::fg(Base04).with(Modifiers::ITALIC);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Alpha(u8);
+pub struct Alpha(u8); // private: checked by its constructor
 
 impl Alpha {
     pub const OPAQUE: Alpha = Alpha(100);
@@ -183,6 +183,18 @@ impl Alpha {
     pub const fn percent(percent: u8) -> Alpha {
         assert!(percent <= 100, "alpha is a percentage");
         Alpha(percent)
+    }
+
+    /// `None` above 100.
+    pub const fn new(percent: u8) -> Option<Alpha> {
+        match percent <= 100 {
+            true => Some(Alpha(percent)),
+            false => None,
+        }
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
     }
 
     pub fn fraction(self) -> f32 {

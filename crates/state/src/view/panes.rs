@@ -2,12 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use helix_core::Selection;
 use model::command::{
     ChangesCommand, Command, Cycle, PickerCommand, PickerKind, Shown, TreeCommand, WindowCommand,
 };
 use model::config::OpenAs;
+use model::geom::{self, Point};
 use model::notice::Notice;
+use model::sheet::Viewport;
+use model::window::{Axis, Side};
 use nucleo::Matcher;
 
 use crate::apply::{Force, apply};
@@ -19,17 +21,17 @@ use crate::job::{FsOp, Job};
 use crate::project::Project;
 use crate::project::backlinks::{self, Build};
 use crate::project::files::{FileIndex, Indexed};
+use crate::project::path::TextKind;
 use crate::project::path::{Folder, RelPath};
 use crate::render::Opening;
-use crate::render::markdown::Format;
 use crate::sidebar::changes::{self, ListRow};
 use crate::sidebar::tree::{
     self, Dir, EntryKind, Fold, Listing, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget,
 };
 use crate::text::buffer::{BufferId, Position, Target};
-use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Tabs, TextView, Tick};
-use crate::view::tab::{NoMode, Tab};
-use crate::{Effect, Files, Focus, Overlay, Sidebar, State, view::scroll};
+use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Place, Tabs, Tick};
+use crate::view::tab::{NoMode, Opened, Tab, TextTabs};
+use crate::{Effect, Files, Focus, Overlay, Sidebar, State};
 
 /// The mode a shown tab arrives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,34 +42,34 @@ pub enum Arrive {
     In(Shown),
 }
 
-/// Zed's preview rules; a modified buffer opens permanently and a modified preview stays.
+/// Zed's preview rules; a modified file opens permanently and a modified preview stays.
 pub fn show(
     state: &mut State,
     pane: PaneId,
-    buffer: BufferId,
+    opened: Opened,
     arrive: Arrive,
     open: OpenAs,
 ) -> &mut Tab {
-    let open = match state.buffers[buffer].doc.is_modified() {
+    let open = match state.is_modified(opened) {
         true => OpenAs::Permanent,
         false => open,
     };
     let now = state.layout.tick();
-    let State {
-        layout, buffers, ..
-    } = state;
-    let target = layout.pane(pane);
-    match target.active().map(Tab::text) {
-        Some(view) => buffers[view.buffer()].doc.commit(&view.selection),
+    let target = state.layout.pane(pane);
+    match target.active_text().map(TextTabs::text) {
+        Some(view) => state.buffers[view.buffer()].doc.commit(&view.selection),
         None => {}
     }
-    let tab = Tab::open(buffer, &buffers[buffer].path);
+    let tab = Tab::open(opened, state);
+    let preview = (state.layout.pane(pane).tabs.as_ref())
+        .and_then(|tabs| tabs.preview().map(|index| tabs.items()[index].tab.opened()));
+    let keep = preview.is_some_and(|preview| state.is_modified(preview));
+    let target = state.layout.pane(pane);
     let displaced = match &mut target.tabs {
         Some(tabs) => {
-            let preview = tabs.preview().map(|p| tabs.items()[p].tab.buffer());
-            match preview.map(|b| buffers[b].doc.is_modified()) {
-                Some(true) => tabs.keep(),
-                Some(false) | None => {}
+            match keep {
+                true => tabs.keep(),
+                false => {}
             }
             tabs.open(tab, open, now)
         }
@@ -76,85 +78,41 @@ pub fn show(
             None
         }
     };
-    // The replaced preview's buffer goes once no pane shows it.
-    match displaced.map(|item| item.tab.buffer()) {
-        Some(displaced) => {
-            let elsewhere = (layout.panes().values()).any(|pane| {
-                pane.items()
-                    .iter()
-                    .any(|item| item.tab.buffer() == displaced)
-            });
-            match (elsewhere, buffers[displaced].doc.is_modified()) {
-                (false, false) => {
-                    buffers.remove(displaced);
-                }
-                (false, true) | (true, _) => {}
-            }
-        }
+    // The replaced preview's file goes once no pane shows it.
+    match displaced.map(|item| item.tab.opened()) {
+        Some(displaced) => match state.is_modified(displaced) {
+            false => state.release(displaced),
+            true => {}
+        },
         None => {}
     }
+    let State {
+        layout, buffers, ..
+    } = state;
     let tab = (layout.pane(pane).active_mut()).expect("the pane shows the tab it just opened");
-    match arrive {
-        Arrive::In(shown) if shown != tab.shown() => {
-            let rope = buffers[buffer].doc.text.slice(..);
-            let line = rope.char_to_line(tab.text().selection.primary().cursor(rope));
-            match tab.enter(shown, Opening::Line(line)) {
+    match (arrive, &mut *tab) {
+        (Arrive::In(shown), Tab::Text(text)) if shown != text.shown() => {
+            let rope = buffers[text.buffer()].doc.text.slice(..);
+            let line = rope.char_to_line(text.text().selection.primary().cursor(rope));
+            match text.enter(shown, Opening::Line(line)) {
                 Ok(()) | Err(NoMode) => {}
             }
         }
-        Arrive::In(_) | Arrive::AsIs => {}
+        (Arrive::In(_) | Arrive::AsIs, Tab::Text(_) | Tab::Ink(_)) => {}
     }
     tab
 }
 
-/// Where the cursor of a shown text tab goes.
-pub struct Place {
-    pub selection: Selection,
-    /// Char to keep at the top; `None` scrolls just enough to show the cursor.
-    pub anchor: Option<usize>,
-}
-
-/// As `show`, then puts the cursor at `place` and scrolls to it.
-pub fn show_at(
-    state: &mut State,
-    pane: PaneId,
-    buffer: BufferId,
-    arrive: Arrive,
-    open: OpenAs,
-    place: Place,
-) -> &mut TextView {
-    let text = show(state, pane, buffer, arrive, open).text_mut();
-    text.selection = place.selection;
-    match place.anchor {
-        Some(anchor) => {
-            text.scroll.anchor = anchor;
-            text.scroll.rows = 0;
-        }
-        None => {}
-    }
-    scroll::follow_cursor(state, pane);
-    (state.layout.pane(pane).active_mut())
-        .expect("the pane shows the tab it just placed")
-        .text_mut()
-}
-
-/// Drops the buffer with its last view, unless unsaved edits refuse it.
+/// Drops the file with its last tab, unless unsaved changes refuse it.
 pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
-    let Some(buffer) = (state.layout.panes().get(pane))
+    let Some(opened) = (state.layout.panes().get(pane))
         .and_then(|target| target.items().get(index))
-        .map(|item| item.tab.buffer())
+        .map(|item| item.tab.opened())
     else {
         return;
     };
-    // The same pane may also show the buffer, as text beside its diff.
-    let elsewhere = state.layout.panes().iter().any(|(id, other)| {
-        other
-            .items()
-            .iter()
-            .enumerate()
-            .any(|(at, item)| item.tab.buffer() == buffer && (id, at) != (pane, index))
-    });
-    let modified = state.buffers[buffer].doc.is_modified();
+    let elsewhere = state.shown(opened, Some((pane, index)));
+    let modified = state.is_modified(opened);
     match (elsewhere, modified, force) {
         (false, true, Force::No) => {
             state.notice = Some(Notice::UnsavedBuffers { count: 1 });
@@ -163,12 +121,7 @@ pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
         (true, _, _) | (false, false, _) | (false, true, Force::Yes) => {}
     }
     state.layout.remove_tab(pane, index);
-    match elsewhere {
-        true => {}
-        false => {
-            state.buffers.remove(buffer);
-        }
-    }
+    state.release(opened);
 }
 
 fn touch(layout: &mut Layout) {
@@ -184,12 +137,14 @@ pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) 
     match command {
         // Like zed, the new pane holds only the active item; see `Tabs::split_copy`.
         WindowCommand::Split(axis) => {
-            let now = layout.tick();
-            let tabs = layout
-                .focused()
-                .active()
-                .map(|view| Tabs::split_copy(view.clone(), now));
-            layout.split(axis, Pane { tabs });
+            let side = match axis {
+                Axis::Row => Side::Right,
+                Axis::Column => Side::Down,
+            };
+            match layout.split_copy(layout.focus(), side) {
+                Some(_) => {}
+                None => state.notice = Some(Notice::NothingToSplit),
+            }
         }
         WindowCommand::Focus(side) => {
             layout.focus_side(side);
@@ -221,7 +176,7 @@ pub fn cycle_tab(state: &mut State, cycle: Cycle) {
     tabs.activate(next, now);
 }
 
-pub(crate) fn focus_editor(state: &mut State) {
+pub fn focus_editor(state: &mut State) {
     state.sidebar = match state.sidebar {
         Sidebar::Files(_) => Sidebar::Files(Files::Editor),
         Sidebar::Changes(_) => Sidebar::Changes(Focus::Editor),
@@ -418,7 +373,7 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                         .map(|id| {
                             let used = (state.layout.panes().values())
                                 .flat_map(Pane::items)
-                                .filter(|item| item.tab.buffer() == id)
+                                .filter(|item| item.tab.opened() == Opened::Text(id))
                                 .map(|item| item.used)
                                 .max()
                                 .unwrap_or_default();
@@ -445,20 +400,15 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                 }),
                 PickerKind::Commands => Items::Commands,
                 PickerKind::Backlinks => {
-                    let Some(path) = state
-                        .layout
-                        .focused()
-                        .active()
-                        .map(|view| state.buffers[view.buffer()].path.clone())
+                    let Some(buffer) = (state.layout.focused().active_text())
+                        .map(|view| &state.buffers[view.buffer()])
                     else {
                         return state.notice = Some(Notice::NoBuffer);
                     };
-                    let note = match (
-                        Format::of(&path),
-                        RelPath::new(state.project.root.path(), &path),
-                    ) {
-                        (Some(Format::Markdown), Ok(note)) => note,
-                        (Some(Format::Markdown | Format::Typst) | None, _) => {
+                    let path = buffer.path.clone();
+                    let note = match (buffer.kind, RelPath::new(state.project.root.path(), &path)) {
+                        (TextKind::Markdown, Ok(note)) => note,
+                        (TextKind::Markdown | TextKind::Typst | TextKind::Code, _) => {
                             return state.notice = Some(Notice::NotANote { path });
                         }
                     };
@@ -542,7 +492,13 @@ fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
         Items::Buffers(buffers) => {
             let focus = state.layout.focus();
             let buffer = buffers[index].0;
-            show(state, focus, buffer, Arrive::AsIs, OpenAs::Permanent);
+            show(
+                state,
+                focus,
+                Opened::Text(buffer),
+                Arrive::AsIs,
+                OpenAs::Permanent,
+            );
             focus_editor(state);
         }
         Items::Grep(Grep { hits, .. }) | Items::Backlinks(Referrers { hits, .. }) => {
@@ -647,12 +603,16 @@ pub enum Close {
 
 /// Refused while buffers have unsaved edits, with a notice.
 pub fn request_close(state: &mut State) -> Close {
-    match state
-        .buffers
-        .values()
+    let unsaved = (state.buffers.values())
         .filter(|b| b.doc.is_modified())
         .count()
-    {
+        + (state.pageds.values())
+            .filter(|file| file.is_modified())
+            .count()
+        + (state.boards.values())
+            .filter(|file| file.is_modified())
+            .count();
+    match unsaved {
         0 => Close::Allowed,
         count => {
             state.notice = Some(Notice::UnsavedBuffers { count });
@@ -833,5 +793,93 @@ pub fn move_entry(state: &mut State, from: RelPath, onto: TreeTarget, out: &mut 
             root: state.project.root.path().to_owned(),
             op: FsOp::Rename { from, to },
         })),
+    }
+}
+
+/// Something dragged over the panes: a file from the tree or the Changes list, or a tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dragged {
+    File(RelPath),
+    Tab { pane: PaneId, index: usize },
+}
+
+/// Where a drag is dropped: on a pane's body, or on its tab bar before tab `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropOn {
+    Pane { pane: PaneId, zone: Zone },
+    Tabs { pane: PaneId, at: usize },
+}
+
+/// The part of a pane's body a drop lands in: the middle, or near an edge, which splits that way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Zone {
+    Centre,
+    Edge(Side),
+}
+
+/// How far from an edge a drop splits, as a part of the pane along that axis.
+const EDGE: f32 = 0.25;
+
+impl Zone {
+    /// The zone `at` falls in on a pane of `viewport`: the nearest edge within its band.
+    pub fn at(at: Point<geom::Pane>, viewport: Viewport) -> Zone {
+        let (x, y) = (at.x / viewport.width.get(), at.y / viewport.height.get());
+        [
+            (Side::Left, x),
+            (Side::Right, 1.0 - x),
+            (Side::Up, y),
+            (Side::Down, 1.0 - y),
+        ]
+        .into_iter()
+        .filter(|(_, distance)| *distance < EDGE)
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map_or(Zone::Centre, |(side, _)| Zone::Edge(side))
+    }
+}
+
+/// Opens a dropped file or moves a dropped tab; a pane closed since the drag began takes nothing.
+pub fn dropped(state: &mut State, dragged: Dragged, on: DropOn, out: &mut Vec<Effect>) {
+    match dragged {
+        Dragged::Tab { pane: from, index } => {
+            let to = match on {
+                DropOn::Pane {
+                    pane,
+                    zone: Zone::Centre,
+                } => Place::Into { pane, at: None },
+                DropOn::Pane {
+                    pane,
+                    zone: Zone::Edge(side),
+                } => Place::Beside { pane, side },
+                DropOn::Tabs { pane, at } => Place::Into { pane, at: Some(at) },
+            };
+            match state.layout.move_tab(from, index, to) {
+                Some(_) => {
+                    touch(&mut state.layout);
+                    focus_editor(state);
+                }
+                None => {}
+            }
+        }
+        Dragged::File(file) => {
+            let into = match on {
+                // A pane with nothing to copy beside it takes the file itself.
+                DropOn::Pane {
+                    pane,
+                    zone: Zone::Edge(side),
+                } => state.layout.split_copy(pane, side).unwrap_or(pane),
+                DropOn::Pane {
+                    pane,
+                    zone: Zone::Centre,
+                }
+                | DropOn::Tabs { pane, .. } => pane,
+            };
+            match state.layout.set_focus(into) {
+                Ok(()) => {}
+                Err(NotInLayout(_)) => return,
+            }
+            focus_editor(state);
+            let path = file.to_path(state.project.root.path());
+            crate::apply::open(state, path, Arrive::AsIs, None, OpenAs::Permanent, out);
+        }
     }
 }

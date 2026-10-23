@@ -15,10 +15,9 @@ use crate::render::{Opening, Rendering, step, typeset};
 use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::panes;
-use crate::view::tab::{Beside, BesideMut, Showing, Tab};
+use crate::view::tab::{Beside, BesideMut, Opened, Showing, TextTabs};
 use crate::{Effect, State};
 
-/// The current parse of every buffer a document view shows.
 pub type Documents = SecondaryMap<BufferId, Parsed>;
 
 pub struct Parsed {
@@ -29,7 +28,6 @@ pub struct Parsed {
     pub markdown: Markdown,
 }
 
-/// Where a rendered markdown tab stands, and how the reader folded it.
 #[derive(Clone)]
 pub struct DocumentState {
     pub scroll: DocumentScroll,
@@ -43,7 +41,6 @@ pub enum DocumentScroll {
     /// Source line to bring to the top once the buffer is parsed.
     Line(usize),
     At(DocumentAt),
-    /// Keys moved the view from `from` by `by`.
     Moved {
         from: DocumentAt,
         by: DocumentMotion,
@@ -57,14 +54,12 @@ pub struct DocumentAt {
     pub offset: Px,
 }
 
-/// A distance in the host's measured lines and viewport heights.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DocumentMotion {
     pub lines: i32,
     pub half_pages: i32,
 }
 
-/// The source position both sides of a split last agreed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DocumentSeen {
     pub cursor: usize,
@@ -164,9 +159,11 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     } = state;
     let before = documents.len();
     documents.retain(|buffer, _| {
-        (layout.panes().values().flat_map(Pane::items)).any(|item| match item.tab.showing() {
-            Showing::Document(text, ..) => text.buffer() == buffer,
-            Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..) => false,
+        (layout.panes().values().flat_map(Pane::items)).any(|item| {
+            match item.tab.as_text().map(TextTabs::showing) {
+                Some(Showing::Document(text, ..)) => text.buffer() == buffer,
+                Some(Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..)) | None => false,
+            }
         })
     });
     let mut parses = match documents.len() == before {
@@ -175,7 +172,9 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     };
     let mut shown: SmallVec<[Shown; 4]> = SmallVec::new();
     for (pane, target) in layout.panes().iter() {
-        let Some(Showing::Document(text, view, beside)) = target.active().map(Tab::showing) else {
+        let Some(Showing::Document(text, view, beside)) =
+            target.active_text().map(TextTabs::showing)
+        else {
             continue;
         };
         let buffer = text.buffer();
@@ -450,7 +449,7 @@ pub fn toggle_task(state: &mut State, buffer: BufferId, version: u64, marker: us
     );
     doc.apply(&tx, &selection, languages);
     map_views(layout, buffer, tx.changes(), doc.text.slice(..));
-    layout.keep(buffer);
+    layout.keep(Opened::Text(buffer));
     let after = selection.map(tx.changes());
     doc.commit(&after);
 }

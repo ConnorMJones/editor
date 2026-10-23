@@ -6,7 +6,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Canvas, Corners, DevicePixels, RenderImage, Size, SvgSize, WeakEntity, canvas, prelude::*,
+    App, Bounds, Canvas, Corners, DevicePixels, Pixels, RenderImage, Size, SvgSize, WeakEntity,
+    Window, canvas, prelude::*,
 };
 use model::typeset::Svg;
 
@@ -41,100 +42,113 @@ pub enum Rasterized {
 }
 
 /// Draws `svg` over its bounds, rasterised in the background at their device size.
-pub(super) fn svg_canvas(
+pub fn svg_canvas(
     rasters: &Rc<RefCell<Rasters>>,
     workspace: &WeakEntity<Workspace>,
     svg: &Svg,
 ) -> Canvas<Option<Arc<RenderImage>>> {
     let (rasters, workspace, bytes) = (rasters.clone(), workspace.clone(), svg.bytes.clone());
     canvas(
-        move |bounds, window, cx| {
-            let size = match bounds.size.to_device_pixels(window.scale_factor()) {
-                size @ Size {
-                    width: DevicePixels(1..),
-                    height: DevicePixels(1..),
-                } => size,
-                Size { .. } => return None,
-            };
-            let key = RasterKey {
-                svg: Arc::as_ptr(&bytes) as *const u8 as usize,
-                size,
-            };
-            let mut rasters = rasters.borrow_mut();
-            let Rasters { frame, entries } = &mut *rasters;
-            let frame = *frame;
-            match entries.get_mut(&key) {
-                Some(raster) => raster.drawn = frame,
-                // One raster of an SVG is made at a time, so a live resize settles on the last size.
-                None => match (entries.values_mut()).find(|raster| {
-                    Arc::ptr_eq(&raster.svg, &bytes) && matches!(raster.image, Rasterized::Pending)
-                }) {
-                    Some(pending) => pending.drawn = frame,
-                    None => {
-                        entries.insert(
-                            key,
-                            Raster {
-                                svg: bytes.clone(),
-                                image: Rasterized::Pending,
-                                drawn: frame,
-                            },
-                        );
-                        let renderer = cx.svg_renderer();
-                        let svg = bytes.clone();
-                        let job = cx.background_spawn(async move {
-                            (renderer.parse_svg(&svg)).and_then(|tree| {
-                                renderer.render_parsed(&tree, SvgSize::ExactSize(size))
-                            })
-                        });
-                        let workspace = workspace.clone();
-                        cx.spawn(async move |cx| {
-                            let image = job.await;
-                            workspace.update(cx, |this, cx| {
-                                match this.rasters.borrow_mut().entries.get_mut(&key) {
-                                    Some(raster) => {
-                                        raster.image = match image {
-                                            Ok(image) => Rasterized::Ready(image),
-                                            Err(error) => {
-                                                tracing::warn!(%error, "rasterising an SVG failed");
-                                                Rasterized::Failed
-                                            }
-                                        };
-                                        cx.notify();
-                                    }
-                                    None => {}
-                                }
-                            })
-                        })
-                        .detach();
-                    }
-                },
-            }
-            match entries.get(&key) {
-                Some(Raster {
-                    image: Rasterized::Ready(image),
-                    ..
-                }) => return Some(image.clone()),
-                Some(_) | None => {}
-            }
-            // While this size is made, a raster of another size stands in.
-            (entries.values_mut())
-                .filter(|raster| Arc::ptr_eq(&raster.svg, &bytes))
-                .find_map(|raster| match &raster.image {
-                    Rasterized::Ready(image) => {
-                        raster.drawn = frame;
-                        Some(image.clone())
-                    }
-                    Rasterized::Pending | Rasterized::Failed => None,
-                })
-        },
+        move |bounds, window, cx| raster(&rasters, &workspace, &bytes, bounds, window, cx),
         |bounds, image, window, _| match image {
-            Some(image) => {
-                match window.paint_image(bounds, bounds, Corners::default(), image, 0, false) {
-                    Ok(()) => {}
-                    Err(error) => tracing::warn!(%error, "painting an SVG raster failed"),
-                }
-            }
+            Some(image) => paint_raster(bounds, image, window),
             None => {}
         },
     )
+}
+
+pub fn paint_raster(bounds: Bounds<Pixels>, image: Arc<RenderImage>, window: &mut Window) {
+    match window.paint_image(bounds, bounds, Corners::default(), image, 0, false) {
+        Ok(()) => {}
+        Err(error) => tracing::warn!(%error, "painting an SVG raster failed"),
+    }
+}
+
+/// The raster of `bytes` at `bounds`' device size, asked for in the background when missing;
+/// meanwhile a raster of another size stands in.
+pub fn raster(
+    rasters: &Rc<RefCell<Rasters>>,
+    workspace: &WeakEntity<Workspace>,
+    bytes: &Arc<[u8]>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let bytes = bytes.clone();
+    let size = match bounds.size.to_device_pixels(window.scale_factor()) {
+        size @ Size {
+            width: DevicePixels(1..),
+            height: DevicePixels(1..),
+        } => size,
+        Size { .. } => return None,
+    };
+    let key = RasterKey {
+        svg: Arc::as_ptr(&bytes) as *const u8 as usize,
+        size,
+    };
+    let mut rasters = rasters.borrow_mut();
+    let Rasters { frame, entries } = &mut *rasters;
+    let frame = *frame;
+    match entries.get_mut(&key) {
+        Some(raster) => raster.drawn = frame,
+        // One raster of an SVG is made at a time, so a live resize settles on the last size.
+        None => match (entries.values_mut()).find(|raster| {
+            Arc::ptr_eq(&raster.svg, &bytes) && matches!(raster.image, Rasterized::Pending)
+        }) {
+            Some(pending) => pending.drawn = frame,
+            None => {
+                entries.insert(
+                    key,
+                    Raster {
+                        svg: bytes.clone(),
+                        image: Rasterized::Pending,
+                        drawn: frame,
+                    },
+                );
+                let renderer = cx.svg_renderer();
+                let svg = bytes.clone();
+                let job = cx.background_spawn(async move {
+                    (renderer.parse_svg(&svg))
+                        .and_then(|tree| renderer.render_parsed(&tree, SvgSize::ExactSize(size)))
+                });
+                let workspace = workspace.clone();
+                cx.spawn(async move |cx| {
+                    let image = job.await;
+                    workspace.update(cx, |this, cx| {
+                        match this.rasters.borrow_mut().entries.get_mut(&key) {
+                            Some(raster) => {
+                                raster.image = match image {
+                                    Ok(image) => Rasterized::Ready(image),
+                                    Err(error) => {
+                                        tracing::warn!(%error, "rasterising an SVG failed");
+                                        Rasterized::Failed
+                                    }
+                                };
+                                cx.notify();
+                            }
+                            None => {}
+                        }
+                    })
+                })
+                .detach();
+            }
+        },
+    }
+    match entries.get(&key) {
+        Some(Raster {
+            image: Rasterized::Ready(image),
+            ..
+        }) => return Some(image.clone()),
+        Some(_) | None => {}
+    }
+    // While this size is made, a raster of another size stands in.
+    (entries.values_mut())
+        .filter(|raster| Arc::ptr_eq(&raster.svg, &bytes))
+        .find_map(|raster| match &raster.image {
+            Rasterized::Ready(image) => {
+                raster.drawn = frame;
+                Some(image.clone())
+            }
+            Rasterized::Pending | Rasterized::Failed => None,
+        })
 }

@@ -10,17 +10,23 @@ use helix_core::regex::bytes::Regex;
 use helix_core::syntax::HighlighterError;
 use helix_core::syntax::Loader;
 use helix_core::{Language, Rope, Syntax};
+use ink::doc::{Board, PageSize, Paged};
+use ink::format::FormatError;
 use model::command::Dirs;
 
+use crate::drawing::{BoardId, PagedId};
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
 use crate::input::picker::{self, Hit, Preview, Search};
 use crate::project::files::{self, Rescan, Walked};
+use crate::project::path::{FileKind, TextKind};
 use crate::project::path::{Folder, RelPath};
 use crate::sidebar::tree::{self, Entry, EntryKind};
 use crate::text::buffer::{BufferId, Disk, ReadId, TextDoc};
 use crate::text::highlight;
+use crate::view::tab::Opened;
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
+use ink::history::Revision;
 
 /// Blocking work run off the UI thread.
 pub enum Job {
@@ -30,10 +36,9 @@ pub enum Job {
         languages: Arc<Loader>,
     },
     Write {
-        buffer: BufferId,
         path: PathBuf,
-        text: Rope,
-        revision: usize,
+        saving: Saving,
+        data: Data,
         dirs: Dirs,
     },
     Export {
@@ -56,7 +61,7 @@ pub enum Job {
         root: PathBuf,
     },
     Reload {
-        buffer: BufferId,
+        file: Opened,
         path: PathBuf,
         when: ReloadIf,
         policy: ReloadPolicy,
@@ -141,8 +146,9 @@ pub enum OnChange {
 }
 
 impl ReloadPolicy {
-    pub fn on_change(self, doc: &TextDoc) -> OnChange {
-        match (self, doc.is_modified()) {
+    /// What a change on disk does to a file with `unsaved` edits.
+    pub fn on_change(self, unsaved: bool) -> OnChange {
+        match (self, unsaved) {
             (ReloadPolicy::KeepEdits, true) => OnChange::Flag,
             (ReloadPolicy::KeepEdits, false) | (ReloadPolicy::Discard, _) => OnChange::Replace,
         }
@@ -162,9 +168,8 @@ pub enum JobResult {
         result: OpenRead,
     },
     Written {
-        buffer: BufferId,
         path: PathBuf,
-        revision: usize,
+        saving: Saving,
         result: io::Result<Written>,
     },
     Exported {
@@ -181,8 +186,7 @@ pub enum JobResult {
     Rescanned(Rescan),
     Git(Result<Option<git::Found>, git2::Error>),
     Reloaded {
-        buffer: BufferId,
-        read: DiskRead,
+        read: Reloaded,
         policy: ReloadPolicy,
     },
     Fs {
@@ -244,19 +248,100 @@ pub struct Written {
     pub mtime: SystemTime,
 }
 
+/// What a write saves, at the revision it was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Saving {
+    Text { buffer: BufferId, revision: usize },
+    Paged { file: PagedId, revision: Revision },
+    Board { file: BoardId, revision: Revision },
+}
+
+impl Saving {
+    pub fn opened(self) -> Opened {
+        match self {
+            Saving::Text { buffer, .. } => Opened::Text(buffer),
+            Saving::Paged { file, .. } => Opened::Paged(file),
+            Saving::Board { file, .. } => Opened::Board(file),
+        }
+    }
+}
+
+/// What a write puts in the file.
+pub enum Data {
+    Text(Rope),
+    Bytes(Vec<u8>),
+}
+
 pub enum OpenRead {
-    Text { doc: TextDoc, disk: Disk },
+    Text {
+        kind: TextKind,
+        doc: TextDoc,
+        disk: Disk,
+    },
+    Paged {
+        drawing: Paged,
+        disk: Disk,
+    },
+    Board {
+        drawing: Board,
+        disk: Disk,
+    },
     NotUtf8,
     NotAFile,
     Failed(io::Error),
+    Unreadable(FormatError),
 }
 
-pub enum DiskRead {
+/// A file read again, as its own kind.
+pub enum Reloaded {
+    Text(BufferId, DiskRead<Rope, NotUtf8>),
+    Paged(PagedId, DiskRead<Paged, FormatError>),
+    Board(BoardId, DiskRead<Board, FormatError>),
+}
+
+/// What reading a file again found; `E` is why its bytes weren't its kind.
+pub enum DiskRead<T, E> {
+    Changed { content: T, mtime: SystemTime },
+    Unreadable(E),
+    Missed(Missed),
+}
+
+/// A read that found nothing to load.
+pub enum Missed {
     Unchanged,
-    Changed { text: Rope, mtime: SystemTime },
     Missing,
-    NotUtf8,
     Failed(io::Error),
+}
+
+/// Bytes that aren't UTF-8, where text was expected.
+pub struct NotUtf8;
+
+/// `path` read again unless `when` says it hasn't changed, and parsed with `parse`.
+fn read_again<T, E>(
+    path: &Path,
+    when: ReloadIf,
+    parse: impl FnOnce(Vec<u8>) -> Result<T, E>,
+) -> DiskRead<T, E> {
+    match modified(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => DiskRead::Missed(Missed::Missing),
+        Err(error) => DiskRead::Missed(Missed::Failed(error)),
+        Ok(now) => match when {
+            ReloadIf::ChangedSince(known) if now == known => DiskRead::Missed(Missed::Unchanged),
+            ReloadIf::ChangedSince(_) | ReloadIf::Always => match std::fs::read(path) {
+                Ok(bytes) => match parse(bytes) {
+                    Ok(content) => DiskRead::Changed {
+                        content,
+                        mtime: now,
+                    },
+                    Err(error) => DiskRead::Unreadable(error),
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    DiskRead::Missed(Missed::Missing)
+                }
+                Err(error) => DiskRead::Missed(Missed::Failed(error)),
+            },
+        },
+    }
 }
 
 fn modified(path: &Path) -> io::Result<SystemTime> {
@@ -294,10 +379,9 @@ pub fn run(job: Job) -> JobResult {
             result: read_file(&path, &languages),
         },
         Job::Write {
-            buffer,
             path,
-            text,
-            revision,
+            saving,
+            data,
             dirs,
         } => {
             let parent = match (dirs, path.parent()) {
@@ -306,19 +390,27 @@ pub fn run(job: Job) -> JobResult {
             };
             let result = parent.and_then(|()| File::create(&path)).and_then(|file| {
                 let mut writer = BufWriter::new(file);
-                for chunk in text.chunks() {
-                    writer.write_all(chunk.as_bytes())?;
-                }
+                let bytes = match &data {
+                    Data::Text(text) => {
+                        for chunk in text.chunks() {
+                            writer.write_all(chunk.as_bytes())?;
+                        }
+                        text.len_bytes()
+                    }
+                    Data::Bytes(bytes) => {
+                        writer.write_all(bytes)?;
+                        bytes.len()
+                    }
+                };
                 writer.flush()?;
                 Ok(Written {
-                    bytes: text.len_bytes(),
+                    bytes,
                     mtime: modified(&path)?,
                 })
             });
             JobResult::Written {
-                buffer,
                 path,
-                revision,
+                saving,
                 result,
             }
         }
@@ -334,34 +426,28 @@ pub fn run(job: Job) -> JobResult {
         Job::Rescan { root, paths } => JobResult::Rescanned(files::rescan(&root, &paths)),
         Job::GitStatus { root } => JobResult::Git(git::status(&root)),
         Job::Reload {
-            buffer,
+            file,
             path,
             when,
             policy,
         } => {
-            let read = match modified(&path) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => DiskRead::Missing,
-                Err(error) => DiskRead::Failed(error),
-                Ok(now) => match when {
-                    ReloadIf::ChangedSince(known) if now == known => DiskRead::Unchanged,
-                    ReloadIf::ChangedSince(_) | ReloadIf::Always => match std::fs::read(&path)
-                        .map(String::from_utf8)
-                    {
-                        Ok(Ok(text)) => DiskRead::Changed {
-                            text: Rope::from(text),
-                            mtime: now,
-                        },
-                        Ok(Err(_)) => DiskRead::NotUtf8,
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => DiskRead::Missing,
-                        Err(error) => DiskRead::Failed(error),
-                    },
-                },
+            let read = match file {
+                Opened::Text(buffer) => Reloaded::Text(
+                    buffer,
+                    read_again(&path, when, |bytes| {
+                        (String::from_utf8(bytes).map(Rope::from)).map_err(|_| NotUtf8)
+                    }),
+                ),
+                Opened::Paged(id) => Reloaded::Paged(
+                    id,
+                    read_again(&path, when, |bytes| ink::format::read_paged(&bytes)),
+                ),
+                Opened::Board(id) => Reloaded::Board(
+                    id,
+                    read_again(&path, when, |bytes| ink::format::read_board(&bytes)),
+                ),
             };
-            JobResult::Reloaded {
-                buffer,
-                read,
-                policy,
-            }
+            JobResult::Reloaded { read, policy }
         }
         Job::Fs { root, op } => {
             let result = match &op {
@@ -533,22 +619,17 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
     match result {
         JobResult::Opened { read, result } => apply::opened(state, read, result, out),
         JobResult::Written {
-            buffer,
             path,
-            revision,
+            saving,
             result,
-        } => apply::written(state, buffer, path, revision, result, out),
+        } => apply::written(state, saving, path, result, out),
         JobResult::Exported { path, result } => typeset::exported(state, path, result),
         JobResult::Typeset(done) => typeset::finish(state, done, out),
         JobResult::Indexed(walked) => files::indexed(state, walked, out),
         JobResult::Listed { dir, result } => tree::listed(state, dir, result, out),
         JobResult::Rescanned(rescan) => files::rescanned(state, rescan, out),
         JobResult::Git(result) => crate::git_refreshed(state, result, out),
-        JobResult::Reloaded {
-            buffer,
-            read,
-            policy,
-        } => apply::reloaded(state, buffer, read, policy),
+        JobResult::Reloaded { read, policy } => apply::reloaded(state, read, policy),
         JobResult::Fs { op, result } => tree::fs_done(state, op, result, out),
         JobResult::Grepped {
             generation,
@@ -583,9 +664,47 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
 /// Reads `path` into a document; a missing file opens empty, to be created on write.
 pub fn read_file(path: &Path, languages: &Loader) -> OpenRead {
     let _span = tracing::info_span!("read", ?path).entered();
+    match FileKind::of(path) {
+        FileKind::Text(kind) => read_text(path, kind, languages),
+        FileKind::Paged => read_drawing(
+            path,
+            ink::format::read_paged,
+            || Paged::new(PageSize::A4, crate::drawing::PAPER),
+            |drawing, disk| OpenRead::Paged { drawing, disk },
+        ),
+        FileKind::Board => read_drawing(
+            path,
+            ink::format::read_board,
+            || Board::new(crate::drawing::PAPER),
+            |drawing, disk| OpenRead::Board { drawing, disk },
+        ),
+    }
+}
+
+/// A drawing's file, read with `read`; a missing file starts as `blank`.
+fn read_drawing<D>(
+    path: &Path,
+    read: fn(&[u8]) -> Result<D, FormatError>,
+    blank: impl FnOnce() -> D,
+    open: impl FnOnce(D, Disk) -> OpenRead,
+) -> OpenRead {
+    match (std::fs::read(path), modified(path)) {
+        (Ok(bytes), Ok(mtime)) => match read(&bytes) {
+            Ok(drawing) => open(drawing, Disk::Synced { mtime }),
+            Err(error) => OpenRead::Unreadable(error),
+        },
+        (Ok(_), Err(error)) => OpenRead::Failed(error),
+        (Err(error), _) if error.kind() == io::ErrorKind::NotFound => open(blank(), Disk::New),
+        (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
+        (Err(error), _) => OpenRead::Failed(error),
+    }
+}
+
+fn read_text(path: &Path, kind: TextKind, languages: &Loader) -> OpenRead {
     match std::fs::read(path) {
         Ok(bytes) => match (String::from_utf8(bytes), modified(path)) {
             (Ok(text), Ok(mtime)) => OpenRead::Text {
+                kind,
                 doc: TextDoc::unparsed(Rope::from(text), path, languages),
                 disk: Disk::Synced { mtime },
             },
@@ -593,6 +712,7 @@ pub fn read_file(path: &Path, languages: &Loader) -> OpenRead {
             (Ok(_), Err(error)) => OpenRead::Failed(error),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => OpenRead::Text {
+            kind,
             doc: TextDoc::unparsed(Rope::new(), path, languages),
             disk: Disk::New,
         },

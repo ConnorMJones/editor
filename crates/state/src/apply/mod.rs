@@ -5,11 +5,13 @@ use model::mode::Mode;
 use model::notice::Notice;
 use model::register::Register;
 
+use crate::drawing;
 use crate::git::navigate::{self};
 use crate::job::{FsOp, Job};
 use crate::sidebar::tree::EntryKind;
-use crate::text::buffer::{Disk, HistoryStep};
+use crate::text::buffer::HistoryStep;
 use crate::view::panes::Arrive;
+use crate::view::tab::Tab;
 use crate::{
     Confirm, Effect, Exit, LastMotion, Overlay, PromptKind, State, Sticky, Waiting,
     git::conflict,
@@ -30,12 +32,14 @@ use crate::{
 mod files;
 mod focused;
 
-use files::{close_active, focused_buffer, reload_job, write_focused, write_job, write_modified};
+use files::{
+    close_active, focused_file, reload_job, renamed, write_focused, write_job, write_modified,
+};
 use focused::{step_history, tree_select};
 
 pub use files::Force;
-pub(crate) use files::{open, opened, place, read_now, reloaded, written};
-pub(crate) use focused::{
+pub use files::{open, opened, place, read_now, reloaded, written};
+pub use focused::{
     Focused, commit_focused, count_of, edit, exit_select_mode, focused, focused_text, map_views,
     movement_of, reselect, select, selected_lines, try_edit, try_select,
 };
@@ -208,8 +212,18 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         }
         Command::ReplaceFrom(register) => edit::replace_from(state, register, out),
 
-        Command::Undo => step_history(state, HistoryStep::Undo, Notice::AlreadyOldest),
-        Command::Redo => step_history(state, HistoryStep::Redo, Notice::AlreadyNewest),
+        Command::Undo => match state.layout.focused().active() {
+            Some(Tab::Ink(_)) => drawing::command::step(state, drawing::command::Step::Undo),
+            Some(Tab::Text(_)) | None => {
+                step_history(state, HistoryStep::Undo, Notice::AlreadyOldest)
+            }
+        },
+        Command::Redo => match state.layout.focused().active() {
+            Some(Tab::Ink(_)) => drawing::command::step(state, drawing::command::Step::Redo),
+            Some(Tab::Text(_)) | None => {
+                step_history(state, HistoryStep::Redo, Notice::AlreadyNewest)
+            }
+        },
         Command::Earlier => step_history(state, HistoryStep::Earlier, Notice::AlreadyOldest),
         Command::Later => step_history(state, HistoryStep::Later, Notice::AlreadyNewest),
         Command::CommitUndoCheckpoint => commit_focused(state),
@@ -241,39 +255,29 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::ForceWrite => write_focused(state, Dirs::Create, out),
         Command::WriteAs(path, dirs) => {
             let path = helix_stdx::path::normalize(state.project.root.path().join(path));
-            match focused_buffer(&state.layout) {
-                Ok(id) => {
-                    let buffer = &mut state.buffers[id];
-                    buffer.path = path;
-                    buffer.disk = Disk::New;
-                    let job = write_job(&mut state.layout, id, buffer, dirs);
+            match focused_file(&state.layout).and_then(|opened| renamed(state, opened, path)) {
+                Ok(opened) => {
+                    let job = write_job(state, opened, dirs);
                     out.push(Effect::Job(job));
                 }
                 Err(refused) => state.notice = Some(refused),
             }
         }
         Command::WriteAll => {
-            write_modified(&mut state.layout, &mut state.buffers, out);
+            write_modified(state, out);
         }
-        Command::WriteQuit => match focused_buffer(&state.layout) {
-            Ok(id) => {
-                let job = write_job(
-                    &mut state.layout,
-                    id,
-                    &mut state.buffers[id],
-                    Dirs::Existing,
-                );
+        Command::WriteQuit => match focused_file(&state.layout) {
+            Ok(opened) => {
+                let job = write_job(state, opened, Dirs::Existing);
                 out.push(Effect::Job(job));
-                state.exit = Exit::AfterWrite(Waiting::one(id));
+                state.exit = Exit::AfterWrite(Waiting::one(opened));
             }
             Err(_) => apply(state, Command::Quit, out),
         },
-        Command::WriteAllQuit => {
-            match Waiting::new(write_modified(&mut state.layout, &mut state.buffers, out)) {
-                Some(waiting) => state.exit = Exit::AfterWrite(waiting),
-                None => apply(state, Command::Quit, out),
-            }
-        }
+        Command::WriteAllQuit => match Waiting::new(write_modified(state, out)) {
+            Some(waiting) => state.exit = Exit::AfterWrite(waiting),
+            None => apply(state, Command::Quit, out),
+        },
         Command::Quit => match panes::request_close(state) {
             panes::Close::Allowed => out.push(Effect::Quit),
             panes::Close::Refused => {}
@@ -281,16 +285,17 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::ForceQuit => out.push(Effect::Quit),
         Command::CloseBuffer => close_active(state, Force::No),
         Command::ForceCloseBuffer => close_active(state, Force::Yes),
-        Command::Reload => match focused_buffer(&state.layout) {
-            Ok(id) => {
-                let job = reload_job(&state.layout, id, &mut state.buffers[id]);
+        Command::Reload => match focused_file(&state.layout) {
+            Ok(opened) => {
+                let job = reload_job(state, opened);
                 out.push(Effect::Job(job))
             }
             Err(refused) => state.notice = Some(refused),
         },
         Command::ReloadAll => {
-            for (id, buffer) in state.buffers.iter_mut() {
-                out.push(Effect::Job(reload_job(&state.layout, id, buffer)));
+            let files: Vec<_> = state.files().collect();
+            for opened in files {
+                out.push(Effect::Job(reload_job(state, opened)));
             }
         }
         Command::GotoLine(line) => {
@@ -348,6 +353,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::Read(command) => render::read(state, command),
         Command::Document(command) => document::command(state, command),
         Command::Pages(command) => pages::command(state, command),
+        Command::Drawing(command) => drawing::command::command(state, command),
         Command::ExportPdf => crate::render::typeset::export_pdf(state, out),
     }
 }

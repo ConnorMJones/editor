@@ -1,29 +1,32 @@
-//! Pages views: typst pages drawn as a list, under a strip of its diagnostics.
+//! Pages views: typst pages fitted to the pane by the shared sheet view, under a strip of its
+//! diagnostics.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, IntoElement, MouseButton, Pixels, SharedString,
-    canvas, div, prelude::*, px, white,
+    AnyElement, App, Bounds, ClickEvent, ContentMask, Context, DispatchPhase, Element, ElementId,
+    Entity, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, Pixels, RenderImage, ScrollWheelEvent, SharedString, Style,
+    Window, div, fill, point, prelude::*, px, relative, white,
 };
-use model::typeset::{Diagnostic, Origin, PagePoint, SourceFile, Svg};
-use model::units::Pt;
-use state::render::pages::{Fit, PagesState, Zoom};
+use helix_core::SmallVec;
+use model::geom::{Point, Vector};
+use model::sheet::Viewport;
+use model::typeset::{Diagnostic, Origin, SourceFile};
+use model::units::Px;
+use slotmap::Key as _;
+use state::render::pages::{Measure, Wheel};
 use state::render::typeset::{Compiled, Outcome, Typst};
-use state::text::buffer::BufferId;
 use state::view::layout::PaneId;
 
-use super::raster::svg_canvas;
-use super::{Measured, update};
-use crate::fonts::hsla;
+use super::raster::{paint_raster, raster};
+use super::update;
+use crate::drawing::WHEEL_PER_DOUBLING;
+use crate::fonts::{PROSE_LINE, hsla};
 use crate::workspace::Workspace;
 
-/// Space between typst pages.
-pub(super) const PAGE_GAP: Pixels = px(16.);
-
 /// The strip above the pages: the first error or warning, or that a first compile runs.
-pub(super) fn header(
+pub fn header(
     workspace: &Workspace,
     pane: PaneId,
     typst: &Typst,
@@ -103,78 +106,212 @@ pub(super) fn header(
     }
 }
 
-/// Page `index` of `pane`'s pages view, panned with the list.
-pub(super) fn item(
-    this: &Workspace,
-    pane: PaneId,
-    buffer: BufferId,
-    view: &PagesState,
-    index: usize,
-    cx: &mut Context<Workspace>,
-) -> AnyElement {
-    let typst = this.state.compiles.get(buffer);
-    let (Some(typst), Some(cache)) = (typst, this.rendered.get(pane)) else {
-        return div().into_any_element();
-    };
-    let Some(page) = (typst.pages.as_ref()).and_then(|compiled| compiled.pages.get(index)) else {
-        return div().into_any_element();
-    };
-    let width = page_width(&cache.measured, view.fit, view.zoom, page);
-    let scale = width / px(page.width.0);
-    // Recorded each frame so a click turns into a point on the page.
-    let bounds = Rc::new(Cell::new(Bounds::default()));
-    let (recorded, workspace) = (bounds.clone(), cx.weak_entity());
-    let sheet = div()
-        .relative()
-        .flex_none()
-        .mx_auto()
-        .w(width)
-        .h(width * (page.height.0 / page.width.0))
-        .bg(white())
-        .shadow_md()
-        .child(svg_canvas(&this.rasters, &cx.weak_entity(), page).size_full())
-        .child(
-            canvas(move |area, _, _| recorded.set(area), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
-        )
-        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-            cx.stop_propagation();
-            let origin = bounds.get().origin;
-            let at = PagePoint {
-                page: index,
-                x: Pt((event.position.x - origin.x) / px(1.) / scale),
-                y: Pt((event.position.y - origin.y) / px(1.) / scale),
-            };
-            update(&workspace, window, cx, |this| {
-                state::render::pages::click_page(&mut this.state, pane, at, &mut this.effects)
-            });
-        });
-    let sheet = match typst.outcome {
-        Outcome::Failed(_) => sheet.opacity(0.45),
-        Outcome::Pending | Outcome::Compiled => sheet,
-    };
-    div()
-        .w_full()
-        .overflow_hidden()
-        .px(PAGE_GAP)
-        .pt(match index {
-            0 => PAGE_GAP,
-            _ => px(0.),
-        })
-        .pb(PAGE_GAP)
-        .child(div().relative().left(-cache.left).flex().child(sheet))
-        .into_any_element()
+/// A pages view's body: the pages a frame of its view shows, each drawn as its raster.
+pub struct PagesElement {
+    pub workspace: Entity<Workspace>,
+    pub pane: PaneId,
 }
 
-/// Drawn width of typst page `page` under `fit` and `zoom`, in a viewport measured at `measured`.
-pub(super) fn page_width(measured: &Measured, fit: Fit, zoom: Zoom, page: &Svg) -> Pixels {
-    let room = (measured.width - PAGE_GAP * 2.).max(px(1.));
-    let fitted = match fit {
-        Fit::Width => room,
-        Fit::Page => {
-            room.min((measured.height - PAGE_GAP * 2.).max(px(1.)) * (page.width.0 / page.height.0))
+/// Whether the pages shown are from the last compile, or from before one that failed.
+#[derive(Clone, Copy)]
+enum Look {
+    Current,
+    Stale,
+}
+
+pub struct Prepared {
+    hitbox: Hitbox,
+    viewport: Viewport,
+    /// Each page on screen, with its raster once made.
+    pages: SmallVec<[(Bounds<Pixels>, Option<Arc<RenderImage>>); 4]>,
+    look: Look,
+}
+
+impl IntoElement for PagesElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for PagesElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<Prepared>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::NamedInteger(
+            "pages".into(),
+            self.pane.data().as_ffi(),
+        ))
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Prepared> {
+        let pane = self.pane;
+        let viewport = Viewport::new(
+            Px(f32::from(bounds.size.width)),
+            Px(f32::from(bounds.size.height)),
+        )?;
+        let workspace = self.workspace.read(cx);
+        let (text, view) = workspace.state.layout.pages(pane)?;
+        let typst = workspace.state.compiles.get(text.buffer())?;
+        let compiled = typst.pages.as_ref()?;
+        let measure = Measure {
+            viewport,
+            line: Px(f32::from(workspace.fonts.prose_size) * PROSE_LINE),
+        };
+        let unreported = match view.last {
+            Some(seen) if seen == measure => None,
+            Some(_) | None => Some(measure),
+        };
+        let frame = view.view.frame(&compiled.stack, viewport);
+        let shown: SmallVec<[(Bounds<Pixels>, Arc<[u8]>); 4]> = (frame.shown(&compiled.stack))
+            .map(|page| {
+                let top = page.to_pane.apply(Point::new(0.0, 0.0));
+                let bottom = page
+                    .to_pane
+                    .apply(Point::new(page.size.width.get(), page.size.height.get()));
+                let area = Bounds::from_corners(
+                    bounds.origin + point(px(top.x), px(top.y)),
+                    bounds.origin + point(px(bottom.x), px(bottom.y)),
+                );
+                (area, compiled.pages[page.index.0].bytes.clone())
+            })
+            .collect();
+        let look = match typst.outcome {
+            Outcome::Failed(_) => Look::Stale,
+            Outcome::Pending | Outcome::Compiled => Look::Current,
+        };
+        let (rasters, entity) = (workspace.rasters.clone(), self.workspace.downgrade());
+        // Keys that move by lines or part of the pane hear of a new size after this frame.
+        match unreported {
+            Some(measure) => {
+                let entity = self.workspace.clone();
+                window.defer(cx, move |_, cx| {
+                    entity.update(cx, |workspace, _| {
+                        state::render::pages::measured(&mut workspace.state, pane, measure)
+                    })
+                });
+            }
+            None => {}
         }
-    };
-    fitted * zoom.factor()
+        let pages = (shown.into_iter())
+            .map(|(area, bytes)| (area, raster(&rasters, &entity, &bytes, area, window, cx)))
+            .collect();
+        Some(Prepared {
+            hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            viewport,
+            pages,
+            look,
+        })
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        prepared: &mut Option<Prepared>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(prepared) = prepared.take() else {
+            return;
+        };
+        let surface = hsla(self.workspace.read(cx).theme.surface);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for (area, image) in &prepared.pages {
+                window.paint_quad(fill(*area, white()));
+                match image {
+                    Some(image) => paint_raster(*area, image.clone(), window),
+                    None => {}
+                }
+                match prepared.look {
+                    Look::Stale => window.paint_quad(fill(*area, surface.opacity(0.55))),
+                    Look::Current => {}
+                }
+            }
+        });
+        let (pane, viewport, origin) = (self.pane, prepared.viewport, bounds.origin);
+        let on_pane = move |position: gpui::Point<Pixels>| {
+            Point::new(
+                f32::from(position.x - origin.x),
+                f32::from(position.y - origin.y),
+            )
+        };
+        window.on_mouse_event({
+            let (workspace, hitbox) = (self.workspace.downgrade(), prepared.hitbox.clone());
+            move |event: &MouseDownEvent, phase, window, cx| match (
+                phase,
+                event.button,
+                hitbox.is_hovered(window),
+            ) {
+                (DispatchPhase::Bubble, MouseButton::Left, true) => {
+                    cx.stop_propagation();
+                    let at = on_pane(event.position);
+                    update(&workspace, window, cx, |this| {
+                        state::render::pages::click(
+                            &mut this.state,
+                            pane,
+                            at,
+                            viewport,
+                            &mut this.effects,
+                        )
+                    });
+                }
+                (DispatchPhase::Bubble | DispatchPhase::Capture, ..) => {}
+            }
+        });
+        window.on_mouse_event({
+            let (workspace, hitbox) = (self.workspace.downgrade(), prepared.hitbox);
+            move |event: &ScrollWheelEvent, phase, window, cx| match (
+                phase,
+                hitbox.is_hovered(window),
+            ) {
+                (DispatchPhase::Bubble, true) => {
+                    cx.stop_propagation();
+                    let _ = workspace.update(cx, |this, cx| {
+                        let delta = event.delta.pixel_delta(this.fonts.cell.height);
+                        let (x, y) = (f32::from(delta.x), f32::from(delta.y));
+                        let wheel = match event.modifiers.control {
+                            true => Wheel::Zoom {
+                                at: on_pane(event.position),
+                                factor: (y / WHEEL_PER_DOUBLING).exp2(),
+                            },
+                            false => Wheel::Pan(Vector::new(-x, -y)),
+                        };
+                        state::render::pages::wheeled(&mut this.state, pane, wheel, viewport);
+                        cx.notify();
+                    });
+                }
+                (DispatchPhase::Bubble | DispatchPhase::Capture, _) => {}
+            }
+        });
+    }
 }

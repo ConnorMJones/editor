@@ -10,7 +10,7 @@ use gpui::{
     WindowDecorations, WindowKind, WindowParams, WindowVisibility, popup::PopupNotSupportedError,
     px,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{CompositorGpuHint, WgpuMeshes, WgpuRenderer, WgpuSurfaceConfig};
 
 use collections::FxHashSet;
 use gpui_util::{ResultExt, maybe};
@@ -272,6 +272,8 @@ pub struct X11WindowState {
     /// Taken when the window is dropped. Its GPU objects use the X connection, so they mustn't
     /// outlive the window, which a display mode switch relies on.
     renderer: Option<WgpuRenderer>,
+    /// The renderer's meshes, which outlive device recovery.
+    meshes: Arc<WgpuMeshes>,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -835,6 +837,7 @@ impl X11WindowState {
                 visual_id: visual.id,
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
+                meshes: renderer.meshes().clone(),
                 renderer: Some(renderer),
                 atoms: *atoms,
                 input_handler: None,
@@ -1782,6 +1785,10 @@ impl PlatformWindow for X11Window {
             .expect("the renderer is only taken when the window is dropped")
             .sprite_atlas()
             .clone()
+    }
+
+    fn meshes(&self) -> Arc<dyn gpui::PlatformMeshes> {
+        self.0.state.borrow().meshes.clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {

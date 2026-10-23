@@ -15,11 +15,7 @@ use crate::fonts::hsla;
 use crate::preview::PreviewElement;
 
 impl Workspace {
-    pub(super) fn picker(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
+    pub fn picker(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let Overlay::Picker(picker) = &self.state.overlay else {
             return None;
         };

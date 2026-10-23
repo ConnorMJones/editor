@@ -1,6 +1,6 @@
 use std::fs;
 
-use state::project::session::{self, Session, SessionError, SessionPane};
+use state::project::session::{self, Session, SessionError, SessionPane, SessionView};
 use state::{Files, Sidebar};
 
 use crate::harness::Harness;
@@ -103,7 +103,10 @@ fn a_primary_selection_that_does_not_exist_is_rejected() {
     before.keys(":o a.txt<ret>");
     let mut saved = session::snapshot(&before.state);
     match &mut saved.panes[0] {
-        SessionPane::Tabs { tabs, .. } => tabs[0].primary = 1,
+        SessionPane::Tabs { tabs, .. } => match &mut tabs[0].view {
+            SessionView::Text { primary, .. } => *primary = 1,
+            SessionView::Paged { .. } | SessionView::Board { .. } => panic!("a.txt is text"),
+        },
         SessionPane::Empty => panic!("the pane has a tab"),
     }
 

@@ -11,7 +11,6 @@ use crate::view::tab::Showing;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Text,
-    /// A diff's read-only HEAD side.
     Head,
     /// A diff's buffer side, which takes the keys.
     Buffer,
@@ -72,7 +71,7 @@ impl<'a> Rows<'a> {
 }
 
 pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
-    let Some(tab) = state.layout.panes().get(pane).and_then(Pane::active) else {
+    let Some(tab) = state.layout.panes().get(pane).and_then(Pane::active_text) else {
         return Drawing {
             draws: Draws::Absent,
             gutter: Gutter::new(1),

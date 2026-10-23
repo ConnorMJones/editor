@@ -1360,3 +1360,40 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
 
     return ycbcr_to_RGB * y_cb_cr;
 }
+
+// --- meshes --- //
+
+struct MeshVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+    //TODO: use `clip_distance` once Naga supports it
+    @location(3) clip_distances: vec4<f32>,
+}
+
+// The rotation and scale arrive row-major, as `TransformationMatrix` stores them.
+@vertex
+fn vs_mesh(
+    @location(0) position: vec2<f32>,
+    @location(1) rotation_scale: vec4<f32>,
+    @location(2) translation: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) clip: vec4<f32>,
+) -> MeshVarying {
+    let screen = vec2<f32>(
+        rotation_scale.x * position.x + rotation_scale.y * position.y,
+        rotation_scale.z * position.x + rotation_scale.w * position.y,
+    ) + translation;
+    var out = MeshVarying();
+    out.position = to_device_position_impl(screen);
+    out.color = hsla_to_rgba(Hsla(color.x, color.y, color.z, color.w));
+    out.clip_distances = distance_from_clip_rect_impl(screen, Bounds(clip.xy, clip.zw));
+    return out;
+}
+
+@fragment
+fn fs_mesh(input: MeshVarying) -> @location(0) vec4<f32> {
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(input.color.rgb * input.color.a, input.color.a);
+}

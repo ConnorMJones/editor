@@ -194,8 +194,7 @@ mod editing {
 
     #[test]
     fn empty_submit_reruns_the_last_command() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut h = harness(&dir);
+        let mut h = Harness::with("t.txt", "#[a|]#\n");
         h.keys(":vsplit<ret>");
         let panes = h.state.layout.panes().len();
         h.keys(":<ret>");

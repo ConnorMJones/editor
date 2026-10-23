@@ -3,13 +3,14 @@ use std::fs;
 use model::job::Busy;
 use model::notice::Notice;
 use model::typeset::{Origin, SourceFile};
+use model::units::Px;
 use state::render::document;
 use state::render::markdown::Figure;
-use state::render::pages::{self, PagesScroll};
+use state::render::pages::{self, Locating};
 use state::render::typeset::{self, Outcome, Render, SPARE, Typst};
 
 use state::view::layout::PaneId;
-use state::view::tab::{Showing, Tab};
+use state::view::tab::{Showing, TextTabs};
 
 use crate::harness::{Harness, Typesetting};
 
@@ -79,7 +80,9 @@ fn preview(h: &Harness) -> PaneId {
         .iter()
         .find(|pane| {
             matches!(
-                h.state.layout.panes()[**pane].active().map(Tab::showing),
+                h.state.layout.panes()[**pane]
+                    .active_text()
+                    .map(TextTabs::showing),
                 Some(Showing::Pages(..))
             )
         })
@@ -272,8 +275,39 @@ fn split_pages_go_to_the_page_under_the_cursor() {
     let pane = h.state.layout.focus();
     // Line 4 is "= Two", on the second page; the cursor sits before its text.
     h.keys("4gg");
-    match h.state.layout.pages(pane).map(|(_, view)| view.scroll) {
-        Some(PagesScroll::Point(at)) => assert_eq!(at.page, 1),
-        other => panic!("not located: {other:?}"),
+    match h.state.layout.pages(pane).map(|(_, view)| *view) {
+        Some(view) => {
+            assert_eq!(view.view.centre.page.0, 1);
+            assert_eq!(view.locating, Locating::Settled);
+        }
+        None => panic!("the split shows pages"),
     }
+}
+
+#[test]
+fn pages_fit_the_pane_and_keys_move_between_them() {
+    let (_dir, mut h) = open("main.typ", DOC);
+    h.keys("<space>V");
+    let pane = h.state.layout.focus();
+    let measure = pages::Measure {
+        viewport: model::sheet::Viewport::new(Px(600.0), Px(400.0)).unwrap(),
+        line: Px(20.0),
+    };
+    h.run(|state, _| pages::measured(state, pane, measure));
+    let view = |h: &Harness| {
+        h.state
+            .layout
+            .pages(pane)
+            .map(|(_, view)| view.view)
+            .unwrap()
+    };
+    h.keys("ge");
+    assert_eq!(view(&h).centre.page.0, 1, "the last page");
+    h.keys("gg");
+    assert_eq!(view(&h).centre.page.0, 0);
+    let top = view(&h);
+    h.keys("<C-d>");
+    let after = view(&h).centre;
+    let down = (after.page, after.at.y) > (top.centre.page, top.centre.at.y);
+    assert!(down, "half a pane down: {top:?} {after:?}");
 }

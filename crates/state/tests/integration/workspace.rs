@@ -108,7 +108,7 @@ fn split_focus_and_close_panes() {
 
     h.keys("<space>ws");
     assert_eq!(h.state.layout.panes().len(), 3);
-    assert!(matches!(&h.state.layout.root(), Node::Split { children, .. } if children.len() == 2));
+    assert!(matches!(&h.state.layout.root(), Node::Split(split) if split.children().len() == 2));
     h.keys("<C-w>k");
     assert_eq!(h.state.layout.focus(), second);
 
@@ -133,7 +133,7 @@ fn closing_buffer_keeps_panes_valid() {
     h.keys(":bc<ret>");
     assert_eq!(h.state.buffers.len(), 1);
     for pane in h.state.layout.panes().values() {
-        match pane.active() {
+        match pane.active_text() {
             Some(view) => assert!(h.state.buffers.contains_key(view.buffer())),
             None => panic!("pane lost its buffer"),
         }
@@ -363,7 +363,7 @@ fn grep_picker_jumps_to_hit() {
 fn command_palette_runs_command() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys("<space>?vsplit<ret>");
+    h.keys(":o a.txt<ret><space>?vsplit<ret>");
     assert_eq!(h.state.layout.panes().len(), 2);
 }
 
@@ -584,4 +584,13 @@ fn a_failed_tree_is_parsed_again_off_the_ui_thread_after_an_edit() {
     let root = syntax.tree().root_node();
     let kinds: Vec<&str> = root.children().map(|node| node.kind()).collect();
     assert_eq!(kinds, ["struct_item", "function_item"]);
+}
+
+#[test]
+fn an_empty_pane_is_not_split() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys("<C-w>v");
+    assert_eq!(h.state.layout.panes().len(), 1);
+    assert!(matches!(h.state.notice, Some(Notice::NothingToSplit)));
 }

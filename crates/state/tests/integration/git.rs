@@ -6,7 +6,7 @@ use model::command::{Answer, Command, FileOp};
 use model::notice::Notice;
 use state::Confirm;
 use state::apply::apply;
-use state::git::diff::{Base, BaseRead, Bases, Diff, Hunk, Stage, Tracked, stage};
+use state::git::diff::{Base, BaseRead, Bases, Hunk, Stage, Tracked, stage};
 use state::git::stage::Discard;
 use state::git::{RepoPath, track};
 use state::project::path::RelPath;

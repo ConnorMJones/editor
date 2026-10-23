@@ -18,18 +18,15 @@ pub enum Context {
     Tree,
     TreeInput,
     Picker,
-    /// The Changes sidebar has focus.
     Changes,
-    /// An action such as a discard waits for `y` or `n`.
     Confirm,
-    /// A document view, such as rendered markdown, has focus.
     Document,
-    /// A pages view, such as a typst preview, has focus.
     Pages,
+    Drawing,
 }
 
 impl Context {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
     pub const ALL: [Context; Context::COUNT] = [
         Context::Normal,
         Context::Insert,
@@ -42,6 +39,7 @@ impl Context {
         Context::Confirm,
         Context::Document,
         Context::Pages,
+        Context::Drawing,
     ];
 }
 
@@ -143,6 +141,7 @@ impl Keymap {
             confirm,
             document,
             pages,
+            drawing,
         ] = Context::ALL;
         Ok(Keymap {
             tries: [
@@ -157,6 +156,7 @@ impl Keymap {
                 build_trie(confirm)?,
                 build_trie(document)?,
                 build_trie(pages)?,
+                build_trie(drawing)?,
             ],
         })
     }

@@ -48,11 +48,11 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
     let mut relist: HashSet<Folder> = HashSet::new();
     crate::render::typeset::invalidate(&mut state.compiles, &paths);
     for path in paths {
-        for (id, buffer) in (state.buffers.iter()).filter(|(_, buffer)| buffer.path == path) {
+        for opened in (state.files()).filter(|opened| state.path_of(*opened) == path) {
             out.push(Effect::Job(Job::Reload {
-                buffer: id,
+                file: opened,
                 path: path.clone(),
-                when: match buffer.disk {
+                when: match state.disk_of(opened) {
                     Disk::Synced { mtime } | Disk::ChangedExternally { mtime } => {
                         ReloadIf::ChangedSince(mtime)
                     }

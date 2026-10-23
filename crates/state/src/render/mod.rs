@@ -8,7 +8,7 @@ pub mod typeset;
 use model::command::{Direction, ReadCommand, ScrollBy, Shown};
 
 use crate::view::mode;
-use crate::view::tab::{ShowingMut, Tab};
+use crate::view::tab::{ShowingMut, TextTabs};
 use crate::{Effect, State};
 
 /// Where a rendering opens: on a source line, placed once the rendering is ready, or at a block
@@ -46,7 +46,11 @@ pub fn read(state: &mut State, command: ReadCommand) {
         compiles,
         ..
     } = state;
-    match layout.focused_mut().active_mut().map(Tab::showing_mut) {
+    match layout
+        .focused_mut()
+        .active_text_mut()
+        .map(TextTabs::showing_mut)
+    {
         Some(ShowingMut::Document(text, view, _)) => {
             document::moved(view, documents.get(text.buffer()), motion)
         }

@@ -11,17 +11,18 @@ use crate::{
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration,
-    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
+    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Mesh, MeshData, MeshKey, MeshVersion,
+    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformMeshes, PlatformWindow, Point, PolychromeSprite, Priority,
+    PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle,
+    Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
     WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
 };
 
@@ -1232,6 +1233,7 @@ pub struct Window {
     is_resizable: bool,
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    meshes: Arc<dyn PlatformMeshes>,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -1645,6 +1647,7 @@ impl Window {
 
         let display_id = platform_window.display().map(|display| display.id());
         let sprite_atlas = platform_window.sprite_atlas();
+        let meshes = platform_window.meshes();
         let mouse_position = platform_window.mouse_position();
         let modifiers = platform_window.modifiers();
         let capslock = platform_window.capslock();
@@ -2132,6 +2135,7 @@ impl Window {
             is_resizable,
             is_minimizable,
             sprite_atlas,
+            meshes,
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -4675,6 +4679,47 @@ impl Window {
                 });
             }
         }
+    }
+
+    /// Paints the mesh `key` mapped by `transform`, uploading what `data` builds when the GPU
+    /// doesn't hold `key` at `version`; `bounds` holds the mapped mesh.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_mesh<'a>(
+        &mut self,
+        key: MeshKey,
+        version: MeshVersion,
+        bounds: Bounds<Pixels>,
+        transform: TransformationMatrix,
+        color: impl Into<Hsla>,
+        data: &mut dyn FnMut() -> MeshData<'a>,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask().scale(scale_factor);
+        let bounds = bounds.scale(scale_factor);
+        match bounds.intersect(&content_mask.bounds).is_empty() {
+            true => return,
+            false => {}
+        }
+        self.meshes.ensure(key, version, data);
+        let mut color: Hsla = color.into();
+        color.a *= self.element_opacity();
+        let scaled = TransformationMatrix {
+            rotation_scale: transform
+                .rotation_scale
+                .map(|row| row.map(|cell| cell * scale_factor)),
+            translation: transform.translation.map(|cell| cell * scale_factor),
+        };
+        self.next_frame.scene.insert_primitive(Mesh {
+            order: 0,
+            key,
+            transform: scaled,
+            color,
+            bounds,
+            content_mask,
+        });
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.

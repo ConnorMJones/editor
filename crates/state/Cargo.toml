@@ -19,6 +19,7 @@ helix-core.workspace = true
 helix-stdx.workspace = true
 ignore.workspace = true
 imara-diff.workspace = true
+ink.workspace = true
 model.workspace = true
 serde.workspace = true
 notify.workspace = true

@@ -22,9 +22,10 @@ through [nixGL](https://github.com/nix-community/nixGL) if the window fails to o
 
 ### From source
 
-You need Rust 1.98.1, the version `rust-toolchain.toml` pins ([rustup](https://rustup.rs) installs
-it), a C and C++ compiler, `pkg-config`, and the development files for libxcb, libxkbcommon, fontconfig, freetype and libgit2. At run time edt
-also loads Wayland and Vulkan. On Debian or Ubuntu that is:
+You need Rust 1.98.1, the version `rust-toolchain.toml` pins ([rustup](https://rustup.rs),
+a C and C++ compiler, `pkg-config`, and the development files for
+libxcb, libxkbcommon, fontconfig, freetype and libgit2.
+At run time edt also loads Wayland and Vulkan.
 
 ```sh
 sudo apt install build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
@@ -45,7 +46,13 @@ edt path/to/dir   # a folder
 edt notes.md      # a file, in its git repository (or its folder when it is not in one)
 ```
 
+## New file types
+
+`*.pdt` - paged drawing canvas
+`*.bdt` - board drawing canvas (general infinite whiteboard)
+
 ## Keybindings
+
 [docs/keymap.md](docs/keymap.md) for keybinding list.
 Keys are mostly helix with some custom ones.
 Arrow keys are also aliased with hjkl.
@@ -65,6 +72,15 @@ tiling mostly comes down to `w` (window).
 - `space w </>` resize split tiles. (you can also use mouse)
 
 os key + mouse you can move things around. 
+
+For drawing:
+- `u/U` for undo and redo respectively
+- `e/b` erase and draw
+- `A` adds a page for `*.pdt`
+- `+/-/=` zoom and fit to page
+- `hjkl` pan
+- `]l/[l` next and previous layer
+- `zh/zn` toggle active layer and add a new layer
 
 ## Configure
 

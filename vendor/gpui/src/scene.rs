@@ -9,6 +9,7 @@ use crate::{
     Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
+    borrow::Cow,
     fmt::Debug,
     iter::Peekable,
     ops::{Add, Range, Sub},
@@ -45,6 +46,7 @@ pub struct Scene {
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
+    pub meshes: Vec<Mesh>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
@@ -59,6 +61,7 @@ impl Scene {
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
+        self.meshes.clear();
         self.shadows.clear();
         self.quads.clear();
         self.underlines.clear();
@@ -113,6 +116,10 @@ impl Scene {
                 path.id = PathId(self.paths.len());
                 self.paths.push(path.clone());
             }
+            Primitive::Mesh(mesh) => {
+                mesh.order = order;
+                self.meshes.push(*mesh);
+            }
             Primitive::Underline(underline) => {
                 underline.order = order;
                 self.underlines.push(*underline);
@@ -152,6 +159,7 @@ impl Scene {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
+        self.meshes.sort_by_key(|mesh| mesh.order);
         self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
@@ -177,6 +185,8 @@ impl Scene {
             quads_iter: self.quads.iter().peekable(),
             paths_start: 0,
             paths_iter: self.paths.iter().peekable(),
+            meshes_start: 0,
+            meshes_iter: self.meshes.iter().peekable(),
             underlines_start: 0,
             underlines_iter: self.underlines.iter().peekable(),
             monochrome_sprites_start: 0,
@@ -204,6 +214,7 @@ pub(crate) enum PrimitiveKind {
     #[default]
     Quad,
     Path,
+    Mesh,
     Underline,
     MonochromeSprite,
     SubpixelSprite,
@@ -223,6 +234,7 @@ pub enum Primitive {
     Shadow(Shadow),
     Quad(Quad),
     Path(Path<ScaledPixels>),
+    Mesh(Mesh),
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
     SubpixelSprite(SubpixelSprite),
@@ -237,6 +249,7 @@ impl Primitive {
             Primitive::Shadow(shadow) => &shadow.bounds,
             Primitive::Quad(quad) => &quad.bounds,
             Primitive::Path(path) => &path.bounds,
+            Primitive::Mesh(mesh) => &mesh.bounds,
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
@@ -250,6 +263,7 @@ impl Primitive {
             Primitive::Shadow(shadow) => &shadow.content_mask,
             Primitive::Quad(quad) => &quad.content_mask,
             Primitive::Path(path) => &path.content_mask,
+            Primitive::Mesh(mesh) => &mesh.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
@@ -273,6 +287,8 @@ struct BatchIterator<'a> {
     quads_iter: Peekable<slice::Iter<'a, Quad>>,
     paths_start: usize,
     paths_iter: Peekable<slice::Iter<'a, Path<ScaledPixels>>>,
+    meshes_start: usize,
+    meshes_iter: Peekable<slice::Iter<'a, Mesh>>,
     underlines_start: usize,
     underlines_iter: Peekable<slice::Iter<'a, Underline>>,
     monochrome_sprites_start: usize,
@@ -296,6 +312,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             ),
             (self.quads_iter.peek().map(|q| q.order), PrimitiveKind::Quad),
             (self.paths_iter.peek().map(|q| q.order), PrimitiveKind::Path),
+            (
+                self.meshes_iter.peek().map(|m| m.order),
+                PrimitiveKind::Mesh,
+            ),
             (
                 self.underlines_iter.peek().map(|u| u.order),
                 PrimitiveKind::Underline,
@@ -369,6 +389,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.paths_start = paths_end;
                 Some(PrimitiveBatch::Paths(paths_start..paths_end))
+            }
+            PrimitiveKind::Mesh => {
+                let meshes_start = self.meshes_start;
+                let mut meshes_end = meshes_start + 1;
+                self.meshes_iter.next();
+                while self
+                    .meshes_iter
+                    .next_if(|mesh| (mesh.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    meshes_end += 1;
+                }
+                self.meshes_start = meshes_end;
+                Some(PrimitiveBatch::Meshes(meshes_start..meshes_end))
             }
             PrimitiveKind::Underline => {
                 let underlines_start = self.underlines_start;
@@ -478,6 +512,7 @@ pub enum PrimitiveBatch {
     Shadows(Range<usize>),
     Quads(Range<usize>),
     Paths(Range<usize>),
+    Meshes(Range<usize>),
     Underlines(Range<usize>),
     MonochromeSprites {
         texture_id: AtlasTextureId,
@@ -502,6 +537,7 @@ impl PrimitiveBatch {
             Self::Shadows(range) => format!("shadows ({})", range.len()),
             Self::Quads(range) => format!("quads ({})", range.len()),
             Self::Paths(range) => format!("paths ({})", range.len()),
+            Self::Meshes(range) => format!("meshes ({})", range.len()),
             Self::Underlines(range) => format!("underlines ({})", range.len()),
             Self::MonochromeSprites { texture_id, range } => {
                 format!(
@@ -776,6 +812,40 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+/// Names a mesh the renderer keeps on the GPU; the app keeps each key unique to one mesh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshKey(pub u64);
+
+/// A mesh's revision; painting a key at a new version uploads it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshVersion(pub u64);
+
+/// Triangles in a mesh's own space, indexing `vertices`.
+pub struct MeshData<'a> {
+    /// Vertex positions.
+    pub vertices: Cow<'a, [[f32; 2]]>,
+    /// Three indices per triangle.
+    pub indices: Cow<'a, [u32]>,
+}
+
+/// A mesh kept on the GPU, drawn mapped by `transform` and filled with `color`.
+#[derive(Clone, Copy, Debug)]
+#[expect(missing_docs)]
+pub struct Mesh {
+    pub order: DrawOrder,
+    pub key: MeshKey,
+    pub transform: TransformationMatrix,
+    pub color: Hsla,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+}
+
+impl From<Mesh> for Primitive {
+    fn from(mesh: Mesh) -> Self {
+        Primitive::Mesh(mesh)
     }
 }
 

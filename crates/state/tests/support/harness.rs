@@ -15,6 +15,7 @@ use state::text::buffer::{BufferId, TextDoc};
 use state::project::watch::{self, Watcher};
 use state::render::typeset::{Look, Request};
 use state::view::layout::{PaneId, TextView};
+use state::view::tab::Tab;
 use state::{Confirm, Effect, Overlay, Root, State, input, job, text::registers};
 
 pub struct Harness {
@@ -249,14 +250,14 @@ impl Harness {
 
     /// Text of the focused pane's active tab, which every mode shares.
     pub fn view(&self) -> &TextView {
-        match self.state.layout.focused().active() {
+        match self.state.layout.focused().active_text() {
             Some(view) => view.text(),
             None => panic!("focused pane has no tab"),
         }
     }
 
     pub fn view_mut(&mut self) -> &mut TextView {
-        match self.state.layout.focused_mut().active_mut() {
+        match self.state.layout.focused_mut().active_text_mut() {
             Some(view) => view.text_mut(),
             None => panic!("focused pane has no tab"),
         }
@@ -276,7 +277,7 @@ impl Harness {
 
     pub fn focused_path(&self) -> Option<PathBuf> {
         let pane = &self.state.layout.panes()[self.state.layout.focus()];
-        pane.active()
+        pane.active_text()
             .map(|view| self.state.buffers[view.buffer()].path.clone())
     }
 
@@ -290,13 +291,16 @@ impl Harness {
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let path = &self.state.buffers[item.tab.buffer()].path;
+                let path = self.state.path_of(item.tab.opened());
                 let name = path.file_name().unwrap().to_string_lossy();
-                let kind = match item.tab.shown() {
-                    Shown::Source => "",
-                    Shown::Diff => "±",
-                    Shown::Render => "◉",
-                    Shown::Split => "◧",
+                let kind = match &item.tab {
+                    Tab::Text(text) => match text.shown() {
+                        Shown::Source => "",
+                        Shown::Diff => "±",
+                        Shown::Render => "◉",
+                        Shown::Split => "◧",
+                    },
+                    Tab::Ink(_) => "✎",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),

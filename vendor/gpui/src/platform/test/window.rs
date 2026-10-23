@@ -539,6 +539,13 @@ impl PlatformWindow for TestWindow {
         self.0.lock().sprite_atlas.clone()
     }
 
+    fn meshes(&self) -> sync::Arc<dyn crate::PlatformMeshes> {
+        match &self.0.lock().renderer {
+            Some(renderer) => renderer.meshes(),
+            None => sync::Arc::new(crate::NoMeshes),
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<RgbaImage> {
         let scale_factor = self.scale_factor();

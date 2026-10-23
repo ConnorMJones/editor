@@ -3,91 +3,47 @@
 use helix_core::SmallVec;
 use model::command::{Direction, PagesCommand, ReadMove, Shown, ZoomBy};
 use model::config::OpenAs;
+use model::geom::{self, Point, Vector};
 use model::job::Busy;
 use model::notice::Notice;
+use model::sheet::{Fit, PageIndex, SheetView, Spot, Viewport, Zoom};
 use model::typeset::{LineColumn, Origin, PagePoint, SourceFile};
-use model::units::Px;
+use model::units::{Pt, Px};
 use slotmap::SecondaryMap;
 
 use crate::project::Project;
 use crate::render::typeset::{self, Compiled, Outcome, Typst};
 use crate::render::{Opening, Rendering, step};
-use crate::text::buffer::{Buffer, BufferId, Position, Target};
+use crate::text::buffer::{BufferId, Position, Target};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::panes::{self, Arrive};
-use crate::view::tab::{BesideMut, Showing, Tab};
+use crate::view::tab::{BesideMut, Showing, TextTabs};
 use crate::{Effect, State};
 
 /// The compile state of every buffer a pages view shows.
 pub type Compiles = SecondaryMap<BufferId, Typst>;
 
-/// Where a rendered typst tab stands, and how its pages scale.
-#[derive(Clone)]
-pub struct PagesState {
-    pub scroll: PagesScroll,
-    pub fit: Fit,
-    pub zoom: Zoom,
-}
-
-/// Where a pages view stands, or is asked to move for the host to measure.
+/// Where a rendered typst tab looks, and how it scales its pages.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PagesScroll {
-    /// Source line to bring to the top once the typesetter locates it.
+pub struct PagesState {
+    pub view: SheetView,
+    pub locating: Locating,
+    /// The pane as last drawn, for keys that move by its lines or part of it.
+    pub last: Option<Measure>,
+}
+
+/// Whether the view waits for the typesetter to place a source line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locating {
+    Settled,
     Line(usize),
-    /// A point on a page; the host turns it into a place at its drawn scale.
-    Point(PagePoint),
-    At(PagesAt),
-    /// Keys moved the view from `from` by `by`.
-    Moved {
-        from: PagesAt,
-        by: PagesMotion,
-    },
 }
 
-/// The top of a pages view: `offset` below the top of `page`, panned `left` to the right.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PagesAt {
-    pub page: usize,
-    pub offset: Px,
-    pub left: Px,
-}
-
-/// A distance in the host's measured lines and viewport heights; `columns` move sideways.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PagesMotion {
-    pub lines: i32,
-    pub half_pages: i32,
-    pub columns: i32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fit {
-    /// Pages span the pane width.
-    Width,
-    /// Each page fits the pane whole.
-    Page,
-}
-
-/// Page scale in steps of 1.25× from the fit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Zoom(i8);
-
-impl Zoom {
-    pub const FIT: Zoom = Zoom(0);
-    const OUT: i8 = -6;
-    const IN: i8 = 8;
-
-    pub fn step(self, by: ZoomBy) -> Zoom {
-        match by {
-            ZoomBy::In => Zoom((self.0 + 1).min(Zoom::IN)),
-            ZoomBy::Out => Zoom((self.0 - 1).max(Zoom::OUT)),
-            ZoomBy::Reset => Zoom::FIT,
-        }
-    }
-
-    pub fn factor(self) -> f32 {
-        1.25f32.powi(self.0.into())
-    }
+/// A pane's size and its line height, as the host drew it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measure {
+    pub viewport: Viewport,
+    pub line: Px,
 }
 
 /// The source cursor a split's pages last went to.
@@ -100,32 +56,26 @@ impl Rendering for PagesState {
     type Seen = PagesSeen;
 
     fn open(at: Opening) -> PagesState {
+        let (page, locating) = match at {
+            Opening::Line(line) => (0, Locating::Line(line)),
+            Opening::Item(page) => (page, Locating::Settled),
+        };
         PagesState {
-            scroll: match at {
-                Opening::Line(line) => PagesScroll::Line(line),
-                Opening::Item(page) => PagesScroll::page(page),
-            },
-            fit: Fit::Width,
-            zoom: Zoom::FIT,
+            view: SheetView::on(PageIndex(page)),
+            locating,
+            last: None,
         }
     }
 }
 
-impl PagesScroll {
-    pub fn page(page: usize) -> PagesScroll {
-        PagesScroll::At(PagesAt {
-            page,
-            offset: Px(0.0),
-            left: Px(0.0),
-        })
-    }
-
-    /// The place moves start from, once the line or point is resolved.
-    pub fn anchor(self) -> Option<PagesAt> {
-        match self {
-            PagesScroll::Line(_) | PagesScroll::Point(_) => None,
-            PagesScroll::At(at) | PagesScroll::Moved { from: at, .. } => Some(at),
-        }
+impl PagesState {
+    /// Centres the view on `at`, which settles a wait for a line.
+    pub fn show(&mut self, at: PagePoint) {
+        self.view.centre = Spot {
+            page: PageIndex(at.page),
+            at: Point::new(at.x.0, at.y.0),
+        };
+        self.locating = Locating::Settled;
     }
 }
 
@@ -139,14 +89,18 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         ..
     } = state;
     compiles.retain(|buffer, _| {
-        (layout.panes().values().flat_map(Pane::items)).any(|item| match item.tab.showing() {
-            Showing::Pages(text, ..) => text.buffer() == buffer,
-            Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => false,
+        (layout.panes().values().flat_map(Pane::items)).any(|item| {
+            match item.tab.as_text().map(TextTabs::showing) {
+                Some(Showing::Pages(text, ..)) => text.buffer() == buffer,
+                Some(Showing::Source(_) | Showing::Diff(..) | Showing::Document(..)) | None => {
+                    false
+                }
+            }
         })
     });
     let shown: SmallVec<[(PaneId, BufferId); 4]> = (layout.panes().iter())
         .filter_map(
-            |(pane, target)| match target.active().map(|tab| tab.showing()) {
+            |(pane, target)| match target.active_text().map(|tab| tab.showing()) {
                 Some(Showing::Pages(text, ..)) => Some((pane, text.buffer())),
                 Some(Showing::Source(_) | Showing::Diff(..) | Showing::Document(..)) | None => None,
             },
@@ -174,9 +128,9 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         let at = text.selection.primary().cursor(rope);
         let cursor = rope.char_to_line(at);
         // Beside the source the pages follow its cursor, seen once its lookup starts.
-        let wanted = match (&typst.pages, view.scroll, beside) {
+        let wanted = match (&typst.pages, view.locating, beside) {
             (None, _, _) => None,
-            (Some(_), PagesScroll::Line(line), _) => Some((
+            (Some(_), Locating::Line(line), _) => Some((
                 doc.text.line_to_byte(line.min(doc.text.len_lines() - 1)),
                 None,
             )),
@@ -202,97 +156,129 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
 }
 
-/// The host measured `pane`'s pages view at `to`.
-pub fn scrolled(state: &mut State, pane: PaneId, to: PagesAt) {
+/// The host drew `pane`'s pages view at `measure`.
+pub fn measured(state: &mut State, pane: PaneId, measure: Measure) {
     match state.layout.pages_mut(pane) {
-        Some((_, view, _)) => view.scroll = PagesScroll::At(to),
+        Some((_, view, _)) => view.last = Some(measure),
         None => {}
     }
 }
 
-/// Moves wait for the line or point to resolve into a place.
-pub fn moved(view: &mut PagesState, typst: Option<&Typst>, motion: ReadMove) {
-    let Some(from) = view.scroll.anchor() else {
+/// The wheel moved `pane`'s pages by `by`, or zoomed them by `factor` about a point.
+pub fn wheeled(state: &mut State, pane: PaneId, wheel: Wheel, viewport: Viewport) {
+    let State {
+        layout, compiles, ..
+    } = state;
+    let Some((text, view, _)) = layout.pages_mut(pane) else {
         return;
     };
-    view.scroll = match motion {
-        ReadMove::Scroll(direction, by) => {
-            let (lines, half_pages) = step(direction, by);
-            let step = PagesMotion {
-                lines,
-                half_pages,
-                columns: 0,
-            };
-            moved_by(view.scroll, from, step)
-        }
-        ReadMove::Top => PagesScroll::page(0),
-        ReadMove::Bottom => {
-            let pages = (typst.and_then(|typst| typst.pages.as_ref()))
-                .map_or(0, |compiled| compiled.pages.len());
-            PagesScroll::page(pages.saturating_sub(1))
-        }
+    let Some(Compiled { stack, .. }) = compiles.get(text.buffer()).and_then(|t| t.pages.as_ref())
+    else {
+        return;
     };
+    match wheel {
+        Wheel::Pan(by) => view.view.pan(stack, viewport, by),
+        Wheel::Zoom { at, factor } => view.view.zoom_about(stack, viewport, at, factor),
+    }
 }
 
-fn moved_by(scroll: PagesScroll, from: PagesAt, step: PagesMotion) -> PagesScroll {
-    let before = match scroll {
-        PagesScroll::Moved { by, .. } => by,
-        PagesScroll::At(_) | PagesScroll::Line(_) | PagesScroll::Point(_) => PagesMotion::default(),
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wheel {
+    Pan(Vector<geom::Pane>),
+    Zoom { at: Point<geom::Pane>, factor: f32 },
+}
+
+/// Keys move by the host's lines and viewports; before the first draw or compile they wait.
+pub fn moved(view: &mut PagesState, typst: Option<&Typst>, motion: ReadMove) {
+    let Some(Compiled { stack, .. }) = typst.and_then(|typst| typst.pages.as_ref()) else {
+        return;
     };
-    PagesScroll::Moved {
-        from,
-        by: PagesMotion {
-            lines: before.lines + step.lines,
-            half_pages: before.half_pages + step.half_pages,
-            columns: before.columns + step.columns,
+    match motion {
+        ReadMove::Scroll(direction, by) => match view.last {
+            Some(Measure { viewport, line }) => {
+                let (lines, half_pages) = step(direction, by);
+                let down = line.0 * lines as f32 + viewport.height.get() * 0.5 * half_pages as f32;
+                view.view.pan(stack, viewport, Vector::new(0.0, down))
+            }
+            None => {}
         },
+        ReadMove::Top => view.view.go_to(stack, PageIndex(0), viewport(view)),
+        ReadMove::Bottom => view.view.go_to(stack, stack.last(), viewport(view)),
     }
+}
+
+fn viewport(view: &PagesState) -> Option<Viewport> {
+    view.last.map(|measure| measure.viewport)
 }
 
 pub fn command(state: &mut State, command: PagesCommand) {
     let focus = state.layout.focus();
-    let Some((_, view, _)) = state.layout.pages_mut(focus) else {
+    let State {
+        layout, compiles, ..
+    } = state;
+    let Some((text, view, _)) = layout.pages_mut(focus) else {
         return;
     };
     match command {
         PagesCommand::Fit => {
-            view.fit = match view.fit {
-                Fit::Width => Fit::Page,
-                Fit::Page => Fit::Width,
+            view.view.fit = match view.view.fit {
+                Fit::Width => Fit::Height,
+                Fit::Height => Fit::Width,
             }
         }
-        PagesCommand::Zoom(by) => view.zoom = view.zoom.step(by),
-        PagesCommand::Pan(direction) => match view.scroll.anchor() {
-            // Moves wait for the line or point to resolve into a place.
-            None => {}
-            Some(from) => {
-                let columns = match direction {
-                    Direction::Forward => 1,
-                    Direction::Backward => -1,
-                };
-                view.scroll = moved_by(
-                    view.scroll,
-                    from,
-                    PagesMotion {
-                        columns,
-                        ..PagesMotion::default()
-                    },
-                );
+        PagesCommand::Zoom(by) => {
+            view.view.zoom = match by {
+                ZoomBy::In => view.view.zoom.by(Zoom::STEP),
+                ZoomBy::Out => view.view.zoom.by(1.0 / Zoom::STEP),
+                ZoomBy::Reset => Zoom::ONE,
             }
-        },
+        }
+        PagesCommand::Pan(direction) => {
+            let pages = compiles.get(text.buffer()).and_then(|t| t.pages.as_ref());
+            match (pages, view.last) {
+                (Some(Compiled { stack, .. }), Some(Measure { viewport, line })) => {
+                    let across = match direction {
+                        Direction::Forward => line.0,
+                        Direction::Backward => -line.0,
+                    };
+                    view.view.pan(stack, viewport, Vector::new(across, 0.0))
+                }
+                // Not compiled or drawn yet.
+                (None, _) | (_, None) => {}
+            }
+        }
     }
 }
 
-/// A click at `at` on a page of `pane`'s pages view; the typesetter says where it leads.
-pub fn click_page(state: &mut State, pane: PaneId, at: PagePoint, out: &mut Vec<Effect>) {
-    let Some((text, _)) = state.layout.pages(pane) else {
+/// A click at `at` on `pane`'s pages view drawn at `viewport`; the typesetter says where a
+/// click on a page leads.
+pub fn click(
+    state: &mut State,
+    pane: PaneId,
+    at: Point<geom::Pane>,
+    viewport: Viewport,
+    out: &mut Vec<Effect>,
+) {
+    let Some((text, view)) = state.layout.pages(pane) else {
         return;
     };
-    let Buffer { path, .. } = &state.buffers[text.buffer()];
+    let buffer = text.buffer();
+    let Some(Compiled { stack, .. }) = state.compiles.get(buffer).and_then(|t| t.pages.as_ref())
+    else {
+        return;
+    };
+    // Between pages there is nothing to follow.
+    let Some((page, on)) = view.view.frame(stack, viewport).hit(stack, at) else {
+        return;
+    };
     out.push(Effect::Typeset(typeset::Request::Click {
         pane,
-        main: path.clone(),
-        at,
+        main: state.buffers[buffer].path.clone(),
+        at: PagePoint {
+            page: page.index.0,
+            x: Pt(on.x),
+            y: Pt(on.y),
+        },
     }));
 }
 
@@ -343,8 +329,8 @@ pub fn goto_source(
         .layout
         .panes()
         .get(pane)
-        .and_then(Pane::active)
-        .map(Tab::shown)
+        .and_then(Pane::active_text)
+        .map(TextTabs::shown)
     {
         Some(Shown::Split) => Arrive::In(Shown::Split),
         Some(Shown::Source | Shown::Diff | Shown::Render) | None => Arrive::In(Shown::Source),

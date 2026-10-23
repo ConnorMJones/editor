@@ -14,7 +14,7 @@ use crate::text::buffer::{Buffer, BufferId, Target};
 use crate::view::layout::PaneId;
 use crate::view::panes::Arrive;
 use crate::view::scroll;
-use crate::view::tab::Tab;
+use crate::view::tab::TextTabs;
 use crate::{Effect, Repo, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub fn land(state: &mut State, buffer: BufferId) {
         Edge::First => tracked.hunks.first(),
         Edge::Last => tracked.hunks.last(),
     };
-    let view = layout.tab_of(landing.pane, buffer).map(Tab::text_mut);
+    let view = layout.tab_of(landing.pane, buffer).map(TextTabs::text_mut);
     match (hunk, view) {
         (Some(hunk), Some(view)) => {
             let range = hunk_range(hunk, doc.text.slice(..));
@@ -113,7 +113,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
         notice,
         ..
     } = &mut *state;
-    let Some(tab) = layout.focused_mut().active_mut() else {
+    let Some(tab) = layout.focused_mut().active_text_mut() else {
         *notice = Some(Notice::NoBuffer);
         return;
     };
@@ -196,7 +196,7 @@ pub fn goto_hunk(state: &mut State, target: HunkTarget, out: &mut Vec<Effect>) {
 }
 
 /// Keeps `landing` until the diff's hunks are fresh, for `land` to apply.
-pub(crate) fn expect_landing(diff: &mut Diff, landing: Landing) {
+pub fn expect_landing(diff: &mut Diff, landing: Landing) {
     match &mut diff.bases {
         Bases::Loading { landing: waiting } => *waiting = Some(landing),
         Bases::Tracked(tracked) => tracked.landing = Some(landing),

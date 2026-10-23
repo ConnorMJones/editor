@@ -17,7 +17,7 @@ use crate::text::buffer::{Buffer, BufferId, Disk, TextDoc};
 use crate::view::display::{Indent, Shade, text_format};
 use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView};
 use crate::view::scroll::{self, Padding};
-use crate::view::tab::{Showing, ShowingMut, Tab};
+use crate::view::tab::{Showing, ShowingMut, TextTabs};
 use crate::{Effect, State};
 
 /// Index of the HEAD side in per-side arrays.
@@ -34,7 +34,7 @@ pub struct DiffSides {
 }
 
 impl DiffSides {
-    pub(crate) fn new() -> DiffSides {
+    pub fn new() -> DiffSides {
         DiffSides {
             left: Left::Pending,
             align: Align::default(),
@@ -387,7 +387,8 @@ fn active<'a>(
     &'a TextDoc,
     &'a Tracked,
 )> {
-    let ShowingMut::Diff(text, sides) = layout.find_pane(pane)?.active_mut()?.showing_mut() else {
+    let ShowingMut::Diff(text, sides) = layout.find_pane(pane)?.active_text_mut()?.showing_mut()
+    else {
         return None;
     };
     match &buffers[text.buffer()] {
@@ -492,8 +493,8 @@ enum Wanted<'a> {
 /// starting a parse when HEAD moved, then realigns.
 pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     let Some(Showing::Diff(text, diff)) = (state.layout.panes().get(pane))
-        .and_then(Pane::active)
-        .map(Tab::showing)
+        .and_then(Pane::active_text)
+        .map(TextTabs::showing)
     else {
         return;
     };
@@ -522,26 +523,32 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
             // Another view of the same blob shares its parse, done or under way.
             let shared = (state.layout.panes().values())
                 .flat_map(Pane::items)
-                .find_map(|item| match item.tab.showing() {
-                    Showing::Diff(text, other) if text.buffer() == buffer => match &other.left {
-                        Left::Head {
-                            oid: theirs, doc, ..
-                        } if *theirs == oid => Some(Left::Head {
-                            oid,
-                            doc: doc.clone(),
-                            scroll: Scroll::default(),
-                        }),
-                        Left::Parsing { oid: theirs } if *theirs == oid => {
-                            Some(Left::Parsing { oid })
+                .find_map(|item| match item.tab.as_text().map(TextTabs::showing) {
+                    Some(Showing::Diff(text, other)) if text.buffer() == buffer => {
+                        match &other.left {
+                            Left::Head {
+                                oid: theirs, doc, ..
+                            } if *theirs == oid => Some(Left::Head {
+                                oid,
+                                doc: doc.clone(),
+                                scroll: Scroll::default(),
+                            }),
+                            Left::Parsing { oid: theirs } if *theirs == oid => {
+                                Some(Left::Parsing { oid })
+                            }
+                            Left::Pending
+                            | Left::Absent
+                            | Left::Parsing { .. }
+                            | Left::Head { .. } => None,
                         }
-                        Left::Pending | Left::Absent | Left::Parsing { .. } | Left::Head { .. } => {
-                            None
-                        }
-                    },
-                    Showing::Diff(..)
-                    | Showing::Source(_)
-                    | Showing::Document(..)
-                    | Showing::Pages(..) => None,
+                    }
+                    Some(
+                        Showing::Diff(..)
+                        | Showing::Source(_)
+                        | Showing::Document(..)
+                        | Showing::Pages(..),
+                    )
+                    | None => None,
                 });
             Some(match shared {
                 Some(left) => left,
@@ -561,8 +568,8 @@ pub fn refresh_pane(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
     match (
         next,
         (state.layout.find_pane(pane))
-            .and_then(Pane::active_mut)
-            .map(Tab::showing_mut),
+            .and_then(Pane::active_text_mut)
+            .map(TextTabs::showing_mut),
     ) {
         (Some(left), Some(ShowingMut::Diff(_, diff))) => {
             diff.left = left;
@@ -590,8 +597,8 @@ pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) 
     let doc = Arc::new(doc);
     for pane in state.layout.panes_mut().map(|(_, pane)| pane) {
         for item in pane.items_mut() {
-            match item.tab.showing_mut() {
-                ShowingMut::Diff(text, diff) if text.buffer() == buffer => match diff.left {
+            match item.tab.as_text_mut().map(TextTabs::showing_mut) {
+                Some(ShowingMut::Diff(text, diff)) if text.buffer() == buffer => match diff.left {
                     Left::Parsing { oid: waiting } if waiting == oid => {
                         diff.left = Left::Head {
                             oid,
@@ -602,10 +609,13 @@ pub fn head_parsed(state: &mut State, buffer: BufferId, oid: Oid, doc: TextDoc) 
                     }
                     Left::Pending | Left::Absent | Left::Parsing { .. } | Left::Head { .. } => {}
                 },
-                ShowingMut::Diff(..)
-                | ShowingMut::Source(_)
-                | ShowingMut::Document(..)
-                | ShowingMut::Pages(..) => {}
+                Some(
+                    ShowingMut::Diff(..)
+                    | ShowingMut::Source(_)
+                    | ShowingMut::Document(..)
+                    | ShowingMut::Pages(..),
+                )
+                | None => {}
             }
         }
     }

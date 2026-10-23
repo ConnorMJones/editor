@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[serde(try_from = "String", into = "String")]
-pub struct RelPath(pub(crate) String);
+pub struct RelPath(String); // private: checked by `new` and `parse`
 
 /// A folder: the root, or one under it. Hashes and borrows as its path, empty for the root.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,6 +72,10 @@ impl RelPath {
         RelPath(format!("{}/{name}", self.0))
     }
 
+    pub fn kind(&self) -> FileKind {
+        FileKind::of(Path::new(&self.0))
+    }
+
     pub fn name(&self) -> &str {
         match self.0.rsplit_once('/') {
             Some((_, name)) => name,
@@ -126,7 +130,7 @@ impl RelPath {
 
 impl Folder {
     /// A folder path as `ancestors` yields it: empty for the root.
-    pub(crate) fn of(path: &str) -> Folder {
+    pub fn of(path: &str) -> Folder {
         match path {
             "" => Folder::Root,
             path => Folder::Sub(RelPath(path.to_owned())),
@@ -216,6 +220,33 @@ impl fmt::Display for Folder {
         match self {
             Folder::Root => f.write_str("."),
             Folder::Sub(path) => f.write_str(path.as_str()),
+        }
+    }
+}
+
+/// What a file holds, by its extension: the one place a file's kind is decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    Text(TextKind),
+    Paged,
+    Board,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextKind {
+    Code,
+    Markdown,
+    Typst,
+}
+
+impl FileKind {
+    pub fn of(path: &Path) -> FileKind {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("md" | "markdown") => FileKind::Text(TextKind::Markdown),
+            Some("typ") => FileKind::Text(TextKind::Typst),
+            Some("pdt") => FileKind::Paged,
+            Some("bdt") => FileKind::Board,
+            Some(_) | None => FileKind::Text(TextKind::Code),
         }
     }
 }

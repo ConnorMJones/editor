@@ -44,7 +44,7 @@ use gpui::{
     popup::PopupOptions,
     px, size,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{CompositorGpuHint, WgpuMeshes, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -115,6 +115,8 @@ pub struct WaylandWindowState {
     /// Taken when the window is dropped. Its GPU objects use the Wayland connection, so they
     /// mustn't outlive the window, which a display mode switch relies on.
     renderer: Option<WgpuRenderer>,
+    /// The renderer's meshes, which outlive device recovery.
+    meshes: Arc<WgpuMeshes>,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -613,6 +615,7 @@ impl WaylandWindowState {
             globals,
             outputs: HashMap::default(),
             display: None,
+            meshes: renderer.meshes().clone(),
             renderer: Some(renderer),
             bounds: options.bounds,
             scale: 1.0,
@@ -2012,6 +2015,10 @@ impl PlatformWindow for WaylandWindow {
             .expect("the renderer is only taken when the window is dropped")
             .sprite_atlas()
             .clone()
+    }
+
+    fn meshes(&self) -> Arc<dyn gpui::PlatformMeshes> {
+        self.borrow().meshes.clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {

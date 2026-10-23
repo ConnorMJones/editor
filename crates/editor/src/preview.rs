@@ -12,6 +12,7 @@ use state::input::picker::{self, Preview, PreviewSource};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, CursorShape, Focus, Frame};
 use state::view::layout::{Pane, Scroll, Viewport};
+use state::view::tab::TextTabs;
 
 use crate::fonts::hsla;
 use crate::workspace::Workspace;
@@ -104,8 +105,8 @@ impl Element for PreviewElement {
                             let doc = &entry.doc;
                             let cursor = (state.layout.panes().values())
                                 .flat_map(Pane::items)
-                                .find_map(|item| {
-                                    let view = item.tab.text();
+                                .filter_map(|item| item.tab.as_text().map(TextTabs::text))
+                                .find_map(|view| {
                                     (view.buffer() == buffer).then(|| view.selection.primary().head)
                                 });
                             Shown::Doc {

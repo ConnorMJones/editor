@@ -15,6 +15,7 @@ use slotmap::new_key_type;
 use crate::git::conflict::{self, Conflicts};
 use crate::git::diff::Diff;
 use crate::git::navigate::Edge;
+use crate::project::path::TextKind;
 use crate::view::layout::PaneId;
 use crate::view::panes::Arrive;
 use model::config::OpenAs;
@@ -28,6 +29,7 @@ new_key_type! {
 pub struct Buffer {
     /// Canonical when the file exists; root-joined and normalized for new files.
     pub path: PathBuf,
+    pub kind: TextKind,
     pub doc: TextDoc,
     pub disk: Disk,
     pub diff: Diff,
@@ -61,8 +63,8 @@ pub enum Target {
 /// A session's saved selection: at least one range, and a primary among them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Saved {
-    ranges: SmallVec<[Range; 1]>,
-    primary: usize,
+    ranges: SmallVec<[Range; 1]>, // private: checked by `new`
+    primary: usize,               // private: checked by `new`
     pub scroll: usize,
 }
 

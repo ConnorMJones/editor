@@ -15,7 +15,7 @@ use state::render::markdown::{LinkTarget, WikiLink};
 
 use state::view::layout::PaneId;
 use state::view::mode;
-use state::view::tab::{Beside, Share, Showing, Tab};
+use state::view::tab::{Beside, Share, Showing, TextTabs};
 use state::{Confirm, input};
 
 use crate::harness::Harness;
@@ -45,7 +45,10 @@ fn harness() -> (tempfile::TempDir, Harness) {
 }
 
 fn rendered_in(h: &Harness, pane: PaneId) -> &DocumentState {
-    match h.state.layout.panes()[pane].active().map(Tab::showing) {
+    match h.state.layout.panes()[pane]
+        .active_text()
+        .map(TextTabs::showing)
+    {
         Some(Showing::Document(_, view, _)) => view,
         Some(Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..)) | None => {
             panic!("pane shows no rendered document")
@@ -54,7 +57,12 @@ fn rendered_in(h: &Harness, pane: PaneId) -> &DocumentState {
 }
 
 fn shown(h: &Harness) -> Shown {
-    h.state.layout.focused().active().map(Tab::shown).unwrap()
+    h.state
+        .layout
+        .focused()
+        .active_text()
+        .map(TextTabs::shown)
+        .unwrap()
 }
 
 fn cursor_line(h: &Harness) -> usize {
@@ -63,7 +71,7 @@ fn cursor_line(h: &Harness) -> usize {
 }
 
 fn top_line(h: &Harness, pane: PaneId) -> usize {
-    let view = h.state.layout.panes()[pane].active().unwrap().text();
+    let view = h.state.layout.panes()[pane].active_text().unwrap().text();
     let doc = &h.state.buffers[view.buffer()].doc;
     doc.text.char_to_line(view.scroll.anchor)
 }
@@ -450,7 +458,13 @@ fn split_keys_and_drags_resize_the_source_side() {
     assert!(matches!(h.state.notice, Some(Notice::NotSplit)));
     h.keys("<space>v");
     let pane = h.state.layout.focus();
-    let share = |h: &Harness| match h.state.layout.focused().active().map(Tab::showing) {
+    let share = |h: &Harness| match h
+        .state
+        .layout
+        .focused()
+        .active_text()
+        .map(TextTabs::showing)
+    {
         Some(Showing::Document(_, _, Beside::Source(_, share))) => share.get(),
         Some(
             Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) | Showing::Pages(..),

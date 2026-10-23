@@ -39,10 +39,10 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
-    LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
-    ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
-    hash, point, px, size,
+    LineLayout, MeshData, MeshKey, MeshVersion, MissingGlyphSink, Pixels, PlatformGestures,
+    PlatformInput, Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
+    SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -1223,6 +1223,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn draw(&self, scene: &Scene);
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+    fn meshes(&self) -> Arc<dyn PlatformMeshes>;
     fn is_subpixel_rendering_supported(&self) -> bool;
 
     // macOS specific methods
@@ -1372,6 +1373,9 @@ pub trait PlatformHeadlessRenderer {
 
     /// Returns the sprite atlas used by this renderer.
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// Returns the meshes this renderer keeps on the GPU.
+    fn meshes(&self) -> Arc<dyn PlatformMeshes>;
 }
 
 /// Type alias for runnables with metadata.
@@ -1700,6 +1704,24 @@ pub trait PlatformAtlas {
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
     }
+}
+
+/// Meshes kept on the GPU between frames; the renderer frees those a frame stops drawing.
+pub trait PlatformMeshes {
+    /// Queues the mesh `data` builds for upload unless `key` is resident at `version`.
+    fn ensure<'a>(
+        &self,
+        key: MeshKey,
+        version: MeshVersion,
+        data: &mut dyn FnMut() -> MeshData<'a>,
+    );
+}
+
+/// The meshes of a window that draws nothing.
+pub struct NoMeshes;
+
+impl PlatformMeshes for NoMeshes {
+    fn ensure<'a>(&self, _: MeshKey, _: MeshVersion, _: &mut dyn FnMut() -> MeshData<'a>) {}
 }
 
 #[doc(hidden)]

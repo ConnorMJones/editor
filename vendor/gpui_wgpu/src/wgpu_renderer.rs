@@ -1,9 +1,9 @@
-use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
+use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext, WgpuMeshes};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
+    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Mesh, Path, Point, PrimitiveBatch,
     ScaledPixels, Scene, Size, get_gamma_correction_ratios,
 };
 use log::warn;
@@ -102,6 +102,40 @@ struct PathSprite {
     bounds: Bounds<ScaledPixels>,
 }
 
+/// The mesh pass's stencil, one reference per mesh.
+const MESH_STENCIL: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
+
+/// Meshes drawn before the stencil is cleared, one per reference other than zero.
+const MESHES_PER_STENCIL: usize = 255;
+
+/// A mesh's per-draw data, read as instance attributes by `vs_mesh`.
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct MeshInstance {
+    rotation_scale: [f32; 4],
+    translation: [f32; 2],
+    color: [f32; 4],
+    clip: [f32; 4],
+}
+
+impl MeshInstance {
+    fn of(mesh: &Mesh) -> MeshInstance {
+        let [[a, b], [c, d]] = mesh.transform.rotation_scale;
+        let clip = mesh.content_mask.bounds;
+        MeshInstance {
+            rotation_scale: [a, b, c, d],
+            translation: mesh.transform.translation,
+            color: [mesh.color.h, mesh.color.s, mesh.color.l, mesh.color.a],
+            clip: [
+                clip.origin.x.0,
+                clip.origin.y.0,
+                clip.size.width.0,
+                clip.size.height.0,
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 #[repr(C)]
 struct PathRasterizationVertex {
@@ -127,6 +161,7 @@ struct WgpuPipelines {
     quads: wgpu::RenderPipeline,
     shadows: wgpu::RenderPipeline,
     path_rasterization: wgpu::RenderPipeline,
+    meshes: wgpu::RenderPipeline,
     paths: wgpu::RenderPipeline,
     underlines: wgpu::RenderPipeline,
     mono_sprites: wgpu::RenderPipeline,
@@ -194,6 +229,11 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    /// Marks the samples each mesh has covered, so a translucent mesh blends over a sample once.
+    mesh_stencil_texture: Option<wgpu::Texture>,
+    mesh_stencil_view: Option<wgpu::TextureView>,
+    /// The instances of a frame's meshes, in scene order; grown as scenes need.
+    mesh_instances: Option<wgpu::Buffer>,
 }
 
 struct CachedTextureBindGroup {
@@ -207,12 +247,17 @@ impl WgpuResources {
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
         self.path_msaa_view = None;
+        self.mesh_stencil_texture = None;
+        self.mesh_stencil_view = None;
     }
 }
 
 struct WgpuRendererCore {
     resources: WgpuResources,
     atlas: Arc<WgpuAtlas>,
+    meshes: Arc<WgpuMeshes>,
+    /// Reused to gather a frame's mesh instances.
+    mesh_scratch: Vec<MeshInstance>,
     path_globals_offset: u64,
     gamma_offset: u64,
     instance_data_capacity: u64,
@@ -253,6 +298,7 @@ pub struct WgpuRenderer {
     state: RendererState,
     surface_config: wgpu::SurfaceConfiguration,
     atlas: Arc<WgpuAtlas>,
+    meshes: Arc<WgpuMeshes>,
     transparent_alpha_mode: wgpu::CompositeAlphaMode,
     opaque_alpha_mode: wgpu::CompositeAlphaMode,
     max_texture_size: u32,
@@ -336,6 +382,7 @@ impl WgpuRenderer {
         };
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
+        let meshes = Arc::new(WgpuMeshes::from_context(context));
 
         Self::new_internal(
             Some(Rc::clone(&gpu_context)),
@@ -344,6 +391,7 @@ impl WgpuRenderer {
             config,
             compositor_gpu,
             atlas,
+            meshes,
         )
     }
 
@@ -368,7 +416,8 @@ impl WgpuRenderer {
         config: WgpuSurfaceConfig,
     ) -> anyhow::Result<Self> {
         let atlas = Arc::new(WgpuAtlas::from_context(context));
-        Self::new_internal(None, context, surface, config, None, atlas)
+        let meshes = Arc::new(WgpuMeshes::from_context(context));
+        Self::new_internal(None, context, surface, config, None, atlas, meshes)
     }
 
     fn new_internal(
@@ -378,6 +427,7 @@ impl WgpuRenderer {
         config: WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
         atlas: Arc<WgpuAtlas>,
+        meshes: Arc<WgpuMeshes>,
     ) -> anyhow::Result<Self> {
         let surface_caps = surface.get_capabilities(&context.adapter);
         let preferred_formats = [
@@ -461,7 +511,13 @@ impl WgpuRenderer {
         // that this adapter can successfully configure this surface.
         surface.configure(&context.device, &surface_config);
 
-        let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
+        let core = WgpuRendererCore::new(
+            context,
+            atlas.clone(),
+            meshes.clone(),
+            surface_format,
+            alpha_mode,
+        );
 
         Ok(Self {
             context: gpu_context,
@@ -469,6 +525,7 @@ impl WgpuRenderer {
             state: RendererState::Ready { surface, core },
             surface_config,
             atlas,
+            meshes,
             transparent_alpha_mode,
             opaque_alpha_mode,
             max_texture_size,
@@ -814,6 +871,81 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        let once = wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::NotEqual,
+            fail_op: wgpu::StencilOperation::Keep,
+            depth_fail_op: wgpu::StencilOperation::Keep,
+            pass_op: wgpu::StencilOperation::Replace,
+        };
+        let meshes = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("meshes_layout"),
+                bind_group_layouts: &[Some(&layouts.globals)],
+                immediate_size: 0,
+            });
+            let instance_attributes = wgpu::vertex_attr_array![
+                1 => Float32x4,
+                2 => Float32x2,
+                3 => Float32x4,
+                4 => Float32x4,
+            ];
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("meshes"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader_module,
+                    entry_point: Some("vs_mesh"),
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<MeshInstance>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &instance_attributes,
+                        },
+                    ],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_module,
+                    entry_point: Some("fs_mesh"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                // A sample takes a mesh's colour only where that mesh hasn't covered it yet.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: MESH_STENCIL,
+                    depth_write_enabled: None,
+                    depth_compare: None,
+                    stencil: wgpu::StencilState {
+                        front: once,
+                        back: once,
+                        read_mask: 0xff,
+                        write_mask: 0xff,
+                    },
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: path_sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
         let paths_blend = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
@@ -934,6 +1066,7 @@ impl WgpuRendererCore {
             quads,
             shadows,
             path_rasterization,
+            meshes,
             paths,
             underlines,
             mono_sprites,
@@ -1039,6 +1172,9 @@ impl WgpuRenderer {
         if let Some(ref texture) = resources.path_msaa_texture {
             texture.destroy();
         }
+        if let Some(ref texture) = resources.mesh_stencil_texture {
+            texture.destroy();
+        }
 
         // Invalidate intermediate textures - they will be lazily recreated
         // in draw() after we confirm the surface is healthy. This avoids
@@ -1100,6 +1236,10 @@ impl WgpuRenderer {
         &self.atlas
     }
 
+    pub fn meshes(&self) -> &Arc<WgpuMeshes> {
+        &self.meshes
+    }
+
     pub fn supports_dual_source_blending(&self) -> bool {
         self.core().is_some_and(|core| core.dual_source_blending)
     }
@@ -1156,6 +1296,7 @@ impl WgpuRenderer {
             } else if self.failed_frame_count > 5 {
                 core.resources.invalidate_intermediate_textures();
                 self.atlas.clear();
+                self.meshes.clear();
                 self.needs_redraw = true;
                 self.failed_frame_count = 0;
                 return false;
@@ -1216,6 +1357,7 @@ impl WgpuRendererCore {
     fn new(
         context: &WgpuContext,
         atlas: Arc<WgpuAtlas>,
+        meshes: Arc<WgpuMeshes>,
         target_format: wgpu::TextureFormat,
         alpha_mode: wgpu::CompositeAlphaMode,
     ) -> Self {
@@ -1353,8 +1495,13 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                mesh_stencil_texture: None,
+                mesh_stencil_view: None,
+                mesh_instances: None,
             },
             atlas,
+            meshes,
+            mesh_scratch: Vec::new(),
             path_globals_offset,
             gamma_offset,
             instance_data_capacity,
@@ -1412,6 +1559,24 @@ impl WgpuRendererCore {
         .unwrap_or((None, None));
         resources.path_msaa_texture = path_msaa_texture;
         resources.path_msaa_view = path_msaa_view;
+
+        let stencil = resources.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mesh_stencil"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: path_sample_count.max(1),
+            dimension: wgpu::TextureDimension::D2,
+            format: MESH_STENCIL,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        resources.mesh_stencil_view =
+            Some(stencil.create_view(&wgpu::TextureViewDescriptor::default()));
+        resources.mesh_stencil_texture = Some(stencil);
     }
 
     fn render_frame(
@@ -1434,6 +1599,7 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
+        self.meshes.before_frame();
         self.ensure_intermediate_textures(size);
 
         let gamma_params = GammaParams {
@@ -1469,6 +1635,7 @@ impl WgpuRendererCore {
         );
 
         self.record_frame(scene, target_view, clear_color)
+            .inspect(|_| self.meshes.after_frame(scene))
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1497,6 +1664,7 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
+        self.write_mesh_instances(scene);
 
         let mut encoder =
             self.resources()
@@ -1547,28 +1715,38 @@ impl WgpuRendererCore {
                             paths,
                             &mut instance_offset,
                         )?;
-
-                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("main_pass_continued"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: frame_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
+                        pass = resume_main_pass(&mut encoder, frame_view);
 
                         if rasterized {
-                            self.draw_paths_from_intermediate(
-                                paths,
-                                &mut instance_offset,
-                                &mut pass,
-                            )?;
+                            let sprites = intermediate_sprites(
+                                paths[0].order == paths[paths.len() - 1].order,
+                                paths.iter().map(|path| path.clipped_bounds()),
+                            );
+                            self.draw_from_intermediate(&sprites, &mut instance_offset, &mut pass)?;
+                        }
+                    }
+                    PrimitiveBatch::Meshes(range) => {
+                        drop(pass);
+                        let rasterized =
+                            self.draw_meshes_to_intermediate(&mut encoder, scene, range.clone());
+                        pass = resume_main_pass(&mut encoder, frame_view);
+
+                        let meshes = &scene.meshes[range];
+                        match (rasterized, meshes.first(), meshes.last()) {
+                            (true, Some(first), Some(last)) => {
+                                let sprites = intermediate_sprites(
+                                    first.order == last.order,
+                                    meshes.iter().map(|mesh| {
+                                        mesh.bounds.intersect(&mesh.content_mask.bounds)
+                                    }),
+                                );
+                                self.draw_from_intermediate(
+                                    &sprites,
+                                    &mut instance_offset,
+                                    &mut pass,
+                                )?;
+                            }
+                            (false, _, _) | (_, None, _) | (_, _, None) => {}
                         }
                     }
                     PrimitiveBatch::Underlines(range) => self.draw_instances(
@@ -1789,34 +1967,18 @@ impl WgpuRendererCore {
         }
     }
 
-    fn draw_paths_from_intermediate(
+    /// Copies what a batch rasterized from the intermediate texture onto the frame.
+    fn draw_from_intermediate(
         &mut self,
-        paths: &[Path<ScaledPixels>],
+        sprites: &[PathSprite],
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> Result<()> {
-        let first_path = &paths[0];
-        let sprites: Vec<PathSprite> = if paths.last().map(|p| &p.order) == Some(&first_path.order)
-        {
-            paths
-                .iter()
-                .map(|p| PathSprite {
-                    bounds: p.clipped_bounds(),
-                })
-                .collect()
-        } else {
-            let mut bounds = first_path.clipped_bounds();
-            for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.clipped_bounds());
-            }
-            vec![PathSprite { bounds }]
-        };
-
         let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
             return Ok(());
         };
         let instances =
-            self.write_instance_binding("path_sprites_bind_group", instance_offset, &sprites)?;
+            self.write_instance_binding("path_sprites_bind_group", instance_offset, sprites)?;
         let texture = self.create_texture_bind_group(
             "path_intermediate_texture_bind_group",
             &path_intermediate_view,
@@ -1831,6 +1993,101 @@ impl WgpuRendererCore {
             instances.first_instance..instances.first_instance + sprites.len() as u32,
         );
         Ok(())
+    }
+
+    /// Writes every mesh's instance in scene order, so a batch's range indexes them directly.
+    fn write_mesh_instances(&mut self, scene: &Scene) {
+        self.mesh_scratch.clear();
+        self.mesh_scratch
+            .extend(scene.meshes.iter().map(MeshInstance::of));
+        let bytes: &[u8] = bytemuck::cast_slice(&self.mesh_scratch);
+        let resources = &mut self.resources;
+        let fits = (resources.mesh_instances.as_ref())
+            .is_some_and(|buffer| buffer.size() >= bytes.len() as u64);
+        match (bytes.is_empty(), fits) {
+            (true, _) => return,
+            (false, true) => {}
+            (false, false) => {
+                resources.mesh_instances =
+                    Some(resources.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("mesh_instances"),
+                        size: (bytes.len() as u64).next_power_of_two(),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }))
+            }
+        }
+        if let Some(buffer) = &resources.mesh_instances {
+            resources.queue.write_buffer(buffer, 0, bytes);
+        }
+    }
+
+    /// Rasterizes the meshes of `range` into the intermediate texture; meshes freed since a
+    /// cached view painted them are skipped.
+    fn draw_meshes_to_intermediate(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &Scene,
+        range: Range<usize>,
+    ) -> bool {
+        let resources = self.resources();
+        let (Some(intermediate), Some(instances), Some(stencil)) = (
+            resources.path_intermediate_view.as_ref(),
+            resources.mesh_instances.as_ref(),
+            resources.mesh_stencil_view.as_ref(),
+        ) else {
+            return false;
+        };
+        let (target_view, resolve_target) = match resources.path_msaa_view.as_ref() {
+            Some(msaa) => (msaa, Some(intermediate)),
+            None => (intermediate, None),
+        };
+        self.meshes.with_resident(|resident| {
+            // Each group of meshes starts from a clear stencil; only the first clears the colour.
+            let starts = range.clone().step_by(MESHES_PER_STENCIL);
+            for (group, start) in starts.enumerate() {
+                let load = match group {
+                    0 => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    _ => wgpu::LoadOp::Load,
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("mesh_rasterization_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: stencil,
+                        depth_ops: None,
+                        stencil_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                    }),
+                    ..Default::default()
+                });
+                pass.set_pipeline(&resources.pipelines.meshes);
+                pass.set_bind_group(0, &resources.path_globals_bind_group, &[]);
+                pass.set_vertex_buffer(1, instances.slice(..));
+                let end = (start + MESHES_PER_STENCIL).min(range.end);
+                for (reference, index) in (1..).zip(start..end) {
+                    let Some(mesh) = resident.get(&scene.meshes[index].key) else {
+                        continue;
+                    };
+                    pass.set_stencil_reference(reference);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    let instance = index as u32;
+                    pass.draw_indexed(0..mesh.index_count, 0, instance..instance + 1);
+                }
+            }
+        });
+        true
     }
 
     fn draw_paths_to_intermediate(
@@ -2263,6 +2520,7 @@ impl WgpuRenderer {
 
         self.state = RendererState::Released;
         self.atlas.handle_device_lost(context);
+        self.meshes.handle_device_lost(context);
 
         let is_bgr = self.is_bgr;
         *self = Self::new_internal(
@@ -2272,6 +2530,7 @@ impl WgpuRenderer {
             config,
             self.compositor_gpu,
             self.atlas.clone(),
+            self.meshes.clone(),
         )?;
         self.set_subpixel_layout(is_bgr);
 
@@ -2324,9 +2583,11 @@ impl WgpuHeadlessRenderer {
         // here on, including any while this renderer builds its pipelines.
         let observed_error_generation = context.errors().current_generation();
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
+        let meshes = Arc::new(WgpuMeshes::from_context(&context));
         let core = WgpuRendererCore::new(
             &context,
             atlas,
+            meshes,
             target_format,
             wgpu::CompositeAlphaMode::Opaque,
         );
@@ -2542,6 +2803,10 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.core.atlas.clone()
+    }
+
+    fn meshes(&self) -> Arc<dyn gpui::PlatformMeshes> {
+        self.core.meshes.clone()
     }
 }
 
@@ -2926,4 +3191,42 @@ mod tests {
             ]
         );
     }
+}
+
+/// Sprites copying a batch from the intermediate texture: one per item when the items share a
+/// draw order, else one covering them all.
+fn intermediate_sprites(
+    same_order: bool,
+    mut bounds: impl Iterator<Item = Bounds<ScaledPixels>>,
+) -> Vec<PathSprite> {
+    match same_order {
+        true => bounds.map(|bounds| PathSprite { bounds }).collect(),
+        false => bounds
+            .next()
+            .map(|first| bounds.fold(first, |union, next| union.union(&next)))
+            .map(|bounds| PathSprite { bounds })
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Continues drawing onto the frame after a batch rasterized into the intermediate texture.
+fn resume_main_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    frame_view: &wgpu::TextureView,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("main_pass_continued"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: frame_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        ..Default::default()
+    })
 }

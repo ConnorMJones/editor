@@ -8,11 +8,11 @@ use crate::State;
 use crate::render::{Opening, document};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::scroll;
-use crate::view::tab::{Beside, BesideMut, NoMode, Share, Showing, ShowingMut, Tab};
+use crate::view::tab::{Beside, BesideMut, NoMode, Share, Showing, ShowingMut, TextTabs};
 
 /// `space d`, `space V`: the focused tab in `shown`, or back to its source from there.
 pub fn toggle(state: &mut State, shown: Shown) {
-    match state.layout.focused().active().map(Tab::shown) {
+    match state.layout.focused().active_text().map(TextTabs::shown) {
         Some(current) if current == shown => show(state, Shown::Source),
         Some(_) => show(state, shown),
         None => state.notice = Some(Notice::NoBuffer),
@@ -24,7 +24,7 @@ pub fn cycle(state: &mut State, direction: Direction) {
     match state
         .layout
         .focused()
-        .active()
+        .active_text()
         .map(|tab| tab.next(direction))
     {
         Some(next) => show(state, next),
@@ -44,7 +44,7 @@ pub fn show(state: &mut State, shown: Shown) {
         notice,
         ..
     } = state;
-    let Some(tab) = layout.focused_mut().active_mut() else {
+    let Some(tab) = layout.focused_mut().active_text_mut() else {
         return *notice = Some(Notice::NoBuffer);
     };
     let buffer = tab.buffer();
@@ -97,7 +97,7 @@ pub fn show(state: &mut State, shown: Shown) {
 
 /// `C-w <`, `C-w >`, `C-w =`: the focused split's source side narrower, wider or even.
 pub fn resize(state: &mut State, resize: Resize) {
-    match (state.layout.focused_mut().active_mut()).map(Tab::showing_mut) {
+    match (state.layout.focused_mut().active_text_mut()).map(TextTabs::showing_mut) {
         Some(
             ShowingMut::Document(_, _, BesideMut::Source(_, share))
             | ShowingMut::Pages(_, _, BesideMut::Source(_, share)),
@@ -115,8 +115,8 @@ pub fn resize(state: &mut State, resize: Resize) {
 /// The host dragged `pane`'s split divider to `share`; ignored once the tab has left the split.
 pub fn drag(state: &mut State, pane: PaneId, share: Share) {
     match (state.layout.find_pane(pane))
-        .and_then(Pane::active_mut)
-        .map(Tab::showing_mut)
+        .and_then(Pane::active_text_mut)
+        .map(TextTabs::showing_mut)
     {
         Some(
             ShowingMut::Document(_, _, BesideMut::Source(_, held))

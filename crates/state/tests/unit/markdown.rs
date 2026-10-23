@@ -5,9 +5,10 @@ use model::markdown::CalloutKind;
 use model::typeset::Display;
 use state::project::links::{Index, Resolution};
 use state::project::path::RelPath;
+use state::project::path::{FileKind, TextKind};
 use state::render::markdown::{
-    self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, Format, ImageFile,
-    Level, LinkTarget, ListKind, Markdown, RowKind, SpanKind, Task, WikiLink,
+    self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, ImageFile, Level,
+    LinkTarget, ListKind, Markdown, RowKind, SpanKind, Task, WikiLink,
 };
 
 fn parse(text: &str) -> Markdown {
@@ -615,9 +616,15 @@ fn root_hashes_follow_content() {
 
 #[test]
 fn formats_by_extension() {
-    assert_eq!(Format::of(Path::new("a.md")), Some(Format::Markdown));
-    assert_eq!(Format::of(Path::new("a.markdown")), Some(Format::Markdown));
-    assert_eq!(Format::of(Path::new("a.typ")), Some(Format::Typst));
-    assert_eq!(Format::of(Path::new("a.rs")), None);
-    assert_eq!(Format::of(Path::new("README")), None);
+    let text = |kind| FileKind::Text(kind);
+    assert_eq!(FileKind::of(Path::new("a.md")), text(TextKind::Markdown));
+    assert_eq!(
+        FileKind::of(Path::new("a.markdown")),
+        text(TextKind::Markdown)
+    );
+    assert_eq!(FileKind::of(Path::new("a.typ")), text(TextKind::Typst));
+    assert_eq!(FileKind::of(Path::new("a.rs")), text(TextKind::Code));
+    assert_eq!(FileKind::of(Path::new("README")), text(TextKind::Code));
+    assert_eq!(FileKind::of(Path::new("notes.pdt")), FileKind::Paged);
+    assert_eq!(FileKind::of(Path::new("plan.bdt")), FileKind::Board);
 }

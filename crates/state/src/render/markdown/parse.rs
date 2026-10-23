@@ -27,7 +27,7 @@ fn figure(kind: FigureKind, text: &str) -> Figure {
     }
 }
 
-pub(crate) const OPTIONS: Options = Options::ENABLE_TABLES
+pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_FOOTNOTES)

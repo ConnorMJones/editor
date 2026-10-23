@@ -15,3 +15,13 @@ pub enum Side {
     Up,
     Down,
 }
+
+impl Side {
+    /// The axis panes on this side of each other lie along.
+    pub fn axis(self) -> Axis {
+        match self {
+            Side::Left | Side::Right => Axis::Row,
+            Side::Up | Side::Down => Axis::Column,
+        }
+    }
+}

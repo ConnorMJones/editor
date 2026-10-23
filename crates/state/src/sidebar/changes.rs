@@ -146,7 +146,7 @@ pub fn cursor_at(
 }
 
 /// Opens entry `index` in the focused pane: its diff, or its text when it has conflicts.
-pub(crate) fn open_entry(state: &mut State, index: usize, open: OpenAs, out: &mut Vec<Effect>) {
+pub fn open_entry(state: &mut State, index: usize, open: OpenAs, out: &mut Vec<Effect>) {
     let Some(changed) = state.project.git.changes().get(index).cloned() else {
         return;
     };

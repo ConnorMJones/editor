@@ -9,14 +9,14 @@ use state::git::diffview::{self, DiffSides, LEFT, Left, RIGHT, Right};
 use state::git::stage::Discard;
 use state::input;
 use state::input::keymap::Context;
-use state::project::session::{self, SessionMode, SessionPane, SessionSidebar};
+use state::project::session::{self, SessionMode, SessionPane, SessionSidebar, SessionView};
 use state::sidebar::changes::{self, ListCursor, ListRow};
 use state::sidebar::tree::Fold;
 use state::view::draws::{self, Draws, Part, Rows};
 use state::view::layout::Viewport;
 use state::view::panes::{self, Click};
 use state::view::scroll;
-use state::view::tab::{Showing, Tab};
+use state::view::tab::{Showing, TextTabs};
 use state::{Focus, Repo, Sidebar};
 
 use crate::git::{init, stage_path, staged_text};
@@ -25,7 +25,13 @@ use crate::harness::Harness;
 const FIVE: &str = "a\nb\nc\nd\ne\n";
 
 fn diff(h: &Harness) -> &DiffSides {
-    match h.state.layout.focused().active().map(Tab::showing) {
+    match h
+        .state
+        .layout
+        .focused()
+        .active_text()
+        .map(TextTabs::showing)
+    {
         Some(Showing::Diff(_, diff)) => diff,
         Some(Showing::Source(_) | Showing::Document(..) | Showing::Pages(..)) => {
             panic!("focused tab is not a diff")
@@ -35,7 +41,12 @@ fn diff(h: &Harness) -> &DiffSides {
 }
 
 fn shown(h: &Harness) -> Shown {
-    h.state.layout.focused().active().map(Tab::shown).unwrap()
+    h.state
+        .layout
+        .focused()
+        .active_text()
+        .map(TextTabs::shown)
+        .unwrap()
 }
 
 fn draws(h: &Harness, part: Part) -> Draws<'_> {
@@ -349,7 +360,13 @@ fn session_restores_diff_tabs_and_the_changes_sidebar() {
     match &saved.panes[0] {
         SessionPane::Tabs { tabs, active, .. } => {
             assert_eq!(tabs.len(), 1);
-            assert_eq!(tabs[0].mode, SessionMode::Diff);
+            assert!(matches!(
+                tabs[0].view,
+                SessionView::Text {
+                    mode: SessionMode::Diff,
+                    ..
+                }
+            ));
             assert_eq!(*active, 0);
         }
         SessionPane::Empty => panic!("pane lost its tabs"),

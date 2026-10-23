@@ -403,7 +403,7 @@ pub fn label(frame: &mut Frame, text: RopeSlice, conflicts: &Conflicts, height: 
 
 /// The focused text view and its document with conflicts parsed for the current text.
 fn focused(state: &mut State) -> Option<(&mut TextView, &TextDoc)> {
-    let view = state.layout.focused_mut().active_mut()?.text_mut();
+    let view = state.layout.focused_mut().active_text_mut()?.text_mut();
     let doc = &mut state.buffers[view.buffer()].doc;
     refresh(doc);
     Some((view, doc))

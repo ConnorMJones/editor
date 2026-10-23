@@ -8,24 +8,29 @@ use helix_core::{Rope, Selection, SmallVec};
 use model::command::{Command, Dirs};
 use model::config::OpenAs;
 use model::notice::Notice;
-use slotmap::SlotMap;
+
+use ink::doc::Drawing;
+use ink::format::FormatError;
 
 use super::map_views;
+use crate::drawing::{InkFile, InkTabs};
 use crate::git::diff::Diff;
 use crate::git::navigate::{self, Landing};
 use crate::git::track;
-use crate::job::{DiskRead, Job, OnChange, OpenRead, ReloadIf, ReloadPolicy, Written, read_file};
-use crate::text::buffer::{
-    Buffer, BufferId, Disk, Position, Read, ReadId, Target, TextDoc, Waiter,
+use crate::job::{
+    Data, DiskRead, Job, Missed, NotUtf8, OnChange, OpenRead, ReloadIf, ReloadPolicy, Reloaded,
+    Saving, Written, read_file,
 };
+use crate::project::path::FileKind;
+use crate::text::buffer::{Buffer, BufferId, Disk, Position, Read, ReadId, Target, Waiter};
 use crate::view::layout::{Layout, PaneId, Tabs};
 use crate::view::panes::Arrive;
-use crate::view::tab::{BesideMut, ShowingMut, Tab};
+use crate::view::tab::{BesideMut, Opened, ShowingMut, Tab, TextTabs};
 use crate::{
     AfterWrite, Effect, State,
     project::links,
     render::document::{self, DocumentScroll},
-    render::pages::PagesScroll,
+    render::pages::Locating,
     request_git,
     view::panes,
     view::scroll,
@@ -37,7 +42,7 @@ pub enum Force {
     Yes,
 }
 
-pub(super) fn close_active(state: &mut State, force: Force) {
+pub fn close_active(state: &mut State, force: Force) {
     let focus = state.layout.focus();
     match (state.layout.panes().get(focus))
         .and_then(|pane| pane.tabs.as_ref())
@@ -48,60 +53,84 @@ pub(super) fn close_active(state: &mut State, force: Force) {
     }
 }
 
-pub(super) fn focused_buffer(layout: &Layout) -> Result<BufferId, Notice> {
-    (layout.focused().active().map(Tab::buffer)).ok_or(Notice::NoBuffer)
+/// The file the focused tab shows, for commands on whole files.
+pub fn focused_file(layout: &Layout) -> Result<Opened, Notice> {
+    (layout.focused().active().map(Tab::opened)).ok_or(Notice::NoBuffer)
 }
 
-/// Commits pending edits first; writing keeps the buffer's preview tabs.
-pub(super) fn write_job(layout: &mut Layout, id: BufferId, buffer: &mut Buffer, dirs: Dirs) -> Job {
-    buffer.doc.commit(&layout.selection_of(id));
-    layout.keep(id);
+/// Commits pending text edits first; writing keeps the file's preview tabs.
+pub fn write_job(state: &mut State, opened: Opened, dirs: Dirs) -> Job {
+    state.layout.keep(opened);
+    let path = state.path_of(opened).to_owned();
+    let (saving, data) = match opened {
+        Opened::Text(buffer) => {
+            let entry = &mut state.buffers[buffer];
+            entry.doc.commit(&state.layout.selection_of(buffer));
+            let revision = entry.doc.history.current_revision();
+            (
+                Saving::Text { buffer, revision },
+                Data::Text(entry.doc.text.clone()),
+            )
+        }
+        Opened::Paged(file) => {
+            let edited = &state.pageds[file].edited;
+            let mut bytes = Vec::new();
+            ink::format::write_paged(edited.drawing(), &mut bytes);
+            let revision = edited.revision();
+            (Saving::Paged { file, revision }, Data::Bytes(bytes))
+        }
+        Opened::Board(file) => {
+            let edited = &state.boards[file].edited;
+            let mut bytes = Vec::new();
+            ink::format::write_board(edited.drawing(), &mut bytes);
+            let revision = edited.revision();
+            (Saving::Board { file, revision }, Data::Bytes(bytes))
+        }
+    };
     Job::Write {
-        buffer: id,
-        path: buffer.path.clone(),
-        text: buffer.doc.text.clone(),
-        revision: buffer.doc.history.current_revision(),
+        path,
+        saving,
+        data,
         dirs,
     }
 }
 
-pub(super) fn write_modified(
-    layout: &mut Layout,
-    buffers: &mut SlotMap<BufferId, Buffer>,
-    out: &mut Vec<Effect>,
-) -> Vec<BufferId> {
-    let modified = buffers
-        .iter_mut()
-        .filter(|(_, buffer)| buffer.doc.is_modified());
-    let mut written = Vec::new();
-    for (id, buffer) in modified {
-        written.push(id);
-        out.push(Effect::Job(write_job(layout, id, buffer, Dirs::Existing)));
+/// Writes every modified file, returning what is being written.
+pub fn write_modified(state: &mut State, out: &mut Vec<Effect>) -> Vec<Opened> {
+    let modified: Vec<Opened> = (state.files())
+        .filter(|opened| state.is_modified(*opened))
+        .collect();
+    for opened in &modified {
+        let job = write_job(state, *opened, Dirs::Existing);
+        out.push(Effect::Job(job));
     }
-    written
+    modified
 }
 
-/// `:reload` reads the file whatever its mtime and replaces unsaved edits.
-pub(super) fn reload_job(layout: &Layout, id: BufferId, buffer: &mut Buffer) -> Job {
-    buffer.doc.commit(&layout.selection_of(id));
+/// `:reload` reads the file whatever its mtime and replaces unsaved edits, which stay undoable.
+pub fn reload_job(state: &mut State, opened: Opened) -> Job {
+    match opened {
+        Opened::Text(id) => state.buffers[id].doc.commit(&state.layout.selection_of(id)),
+        Opened::Paged(_) | Opened::Board(_) => {}
+    }
     Job::Reload {
-        buffer: id,
-        path: buffer.path.clone(),
+        file: opened,
+        path: state.path_of(opened).to_owned(),
         when: ReloadIf::Always,
         policy: ReloadPolicy::Discard,
     }
 }
 
 /// Char index of `to`, with the column clamped to the line's end.
-pub(crate) fn line_column(text: &Rope, to: Position) -> usize {
+pub fn line_column(text: &Rope, to: Position) -> usize {
     let line = to.line.min(text.len_lines().saturating_sub(1));
     let start = text.line_to_char(line);
     (start + to.column).min(line_end_char_index(&text.slice(..), line))
 }
 
 /// Where a file stands once asked for.
-pub(crate) enum Found {
-    Open(BufferId),
+pub enum Found {
+    Open(Opened),
     Reading(ReadId),
 }
 
@@ -119,35 +148,62 @@ fn canonical(root: &Path, path: &Path) -> Result<PathBuf, Notice> {
     }
 }
 
-fn open_buffer(state: &State, path: &Path) -> Option<BufferId> {
-    (state.buffers.iter())
-        .find(|(_, buffer)| buffer.path == path)
-        .map(|(id, _)| id)
+/// What already holds `path`, in the store its kind of file lives in.
+fn open_file(state: &State, path: &Path) -> Option<Opened> {
+    match FileKind::of(path) {
+        FileKind::Text(_) => (state.buffers.iter())
+            .find(|(_, buffer)| buffer.path == path)
+            .map(|(id, _)| Opened::Text(id)),
+        FileKind::Paged => (state.pageds.iter())
+            .find(|(_, file)| file.path == path)
+            .map(|(id, _)| Opened::Paged(id)),
+        FileKind::Board => (state.boards.iter())
+            .find(|(_, file)| file.path == path)
+            .map(|(id, _)| Opened::Board(id)),
+    }
 }
 
+/// Puts a read file in its store, or says why it couldn't be read.
 fn insert(
     state: &mut State,
     path: PathBuf,
-    doc: TextDoc,
-    disk: Disk,
+    read: OpenRead,
     out: &mut Vec<Effect>,
-) -> BufferId {
-    let id = state.buffers.insert(Buffer {
-        path,
-        doc,
-        disk,
-        diff: Diff::LOADING,
-    });
-    track::request_bases(state, id, out);
-    id
+) -> Result<Opened, Notice> {
+    match read {
+        OpenRead::Text { kind, doc, disk } => {
+            let id = state.buffers.insert(Buffer {
+                path,
+                kind,
+                doc,
+                disk,
+                diff: Diff::LOADING,
+            });
+            track::request_bases(state, id, out);
+            Ok(Opened::Text(id))
+        }
+        OpenRead::Paged { drawing, disk } => Ok(Opened::Paged(
+            state.pageds.insert(InkFile::new(path, drawing, disk)),
+        )),
+        OpenRead::Board { drawing, disk } => Ok(Opened::Board(
+            state.boards.insert(InkFile::new(path, drawing, disk)),
+        )),
+        OpenRead::NotUtf8 => Err(Notice::NotUtf8 { path }),
+        OpenRead::NotAFile => Err(Notice::NotAFile { path }),
+        OpenRead::Failed(error) => Err(Notice::OpenFailed { path, error }),
+        OpenRead::Unreadable(error) => Err(Notice::DrawingUnreadable {
+            path,
+            reason: error.to_string(),
+        }),
+    }
 }
 
 /// The buffer of `path`, or the read of it, started as a job when it is new.
-pub(crate) fn load(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result<Found, Notice> {
+pub fn load(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result<Found, Notice> {
     let path = canonical(state.project.root.path(), path)?;
     let reading = (state.reads.iter()).find(|(_, read)| read.path == path);
-    match (open_buffer(state, &path), reading) {
-        (Some(id), _) => Ok(Found::Open(id)),
+    match (open_file(state, &path), reading) {
+        (Some(opened), _) => Ok(Found::Open(opened)),
         (None, Some((read, _))) => Ok(Found::Reading(read)),
         (None, None) => {
             let read = state.reads.insert(Read {
@@ -165,25 +221,19 @@ pub(crate) fn load(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Res
 }
 
 /// Reads `path` on the spot, for a session restored before anything draws.
-pub(crate) fn read_now(
-    state: &mut State,
-    path: &Path,
-    out: &mut Vec<Effect>,
-) -> Result<BufferId, Notice> {
+pub fn read_now(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result<Opened, Notice> {
     let path = canonical(state.project.root.path(), path)?;
-    match open_buffer(state, &path) {
-        Some(id) => Ok(id),
-        None => match read_file(&path, &state.languages) {
-            OpenRead::Text { doc, disk } => Ok(insert(state, path, doc, disk, out)),
-            OpenRead::NotUtf8 => Err(Notice::NotUtf8 { path }),
-            OpenRead::NotAFile => Err(Notice::NotAFile { path }),
-            OpenRead::Failed(error) => Err(Notice::OpenFailed { path, error }),
-        },
+    match open_file(state, &path) {
+        Some(opened) => Ok(opened),
+        None => {
+            let read = read_file(&path, &state.languages);
+            insert(state, path, read, out)
+        }
     }
 }
 
 /// Shows `path` in the focused pane; `to` places the cursor once the text or diff arrives.
-pub(crate) fn open(
+pub fn open(
     state: &mut State,
     path: PathBuf,
     arrive: Arrive,
@@ -198,14 +248,14 @@ pub(crate) fn open(
         to,
     };
     match load(state, &path, out) {
-        Ok(Found::Open(buffer)) => show(state, buffer, waiter),
+        Ok(Found::Open(opened)) => show(state, opened, waiter),
         Ok(Found::Reading(read)) => state.reads[read].waiting.push(waiter),
         Err(notice) => state.notice = Some(notice),
     }
 }
 
-/// Shows `buffer` as `waiter` asked; a pane closed while the file was read gives way to the focus.
-fn show(state: &mut State, buffer: BufferId, waiter: Waiter) {
+/// Shows `opened` as `waiter` asked; a pane closed while the file was read gives way to the focus.
+fn show(state: &mut State, opened: Opened, waiter: Waiter) {
     let Waiter {
         pane,
         arrive,
@@ -216,15 +266,15 @@ fn show(state: &mut State, buffer: BufferId, waiter: Waiter) {
         Some(_) => pane,
         None => state.layout.focus(),
     };
-    panes::show(state, pane, buffer, arrive, open);
-    match to {
-        Some(to) => place(state, pane, buffer, to),
-        None => {}
+    panes::show(state, pane, opened, arrive, open);
+    match (to, opened) {
+        (Some(to), Opened::Text(buffer)) => place(state, pane, buffer, to),
+        (Some(_), Opened::Paged(_) | Opened::Board(_)) | (None, _) => {}
     }
 }
 
 /// Puts the cursor of `buffer`'s tab in `pane` at `to`; a hunk waits for the buffer's diff.
-pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Target) {
+pub fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Target) {
     let State {
         layout,
         buffers,
@@ -240,7 +290,7 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Targe
         }
         Target::Saved(saved) => {
             let len = doc.text.len_chars();
-            return match layout.tab_of(pane, buffer).map(Tab::text_mut) {
+            return match layout.tab_of(pane, buffer).map(TextTabs::text_mut) {
                 Some(view) => {
                     view.selection = saved.selection(len);
                     view.scroll.anchor = saved.scroll.min(len);
@@ -260,7 +310,7 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Targe
             }
         }
     };
-    match layout.tab_of(pane, buffer).map(Tab::showing_mut) {
+    match layout.tab_of(pane, buffer).map(TextTabs::showing_mut) {
         // The render sync brings the line to the top once parsed or located.
         Some(ShowingMut::Document(text, view, BesideMut::Alone)) => {
             text.selection = Selection::point(at);
@@ -268,7 +318,7 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Targe
         }
         Some(ShowingMut::Pages(text, view, BesideMut::Alone)) => {
             text.selection = Selection::point(at);
-            view.scroll = PagesScroll::Line(line);
+            view.locating = Locating::Line(line);
         }
         // Beside the source, the rendering follows its cursor.
         Some(
@@ -285,42 +335,55 @@ pub(crate) fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Targe
 }
 
 /// Takes a finished read: its buffer is made and shown as each waiting open asked.
-pub(crate) fn opened(state: &mut State, read: ReadId, result: OpenRead, out: &mut Vec<Effect>) {
+pub fn opened(state: &mut State, read: ReadId, result: OpenRead, out: &mut Vec<Effect>) {
     let Read { path, waiting } = state.reads.remove(read).expect("each read lands once");
-    match result {
-        OpenRead::Text { doc, disk } => {
-            let buffer = insert(state, path, doc, disk, out);
+    match insert(state, path, result, out) {
+        Ok(opened) => {
             for waiter in waiting {
-                show(state, buffer, waiter);
+                show(state, opened, waiter);
             }
         }
-        OpenRead::NotUtf8 => state.notice = Some(Notice::NotUtf8 { path }),
-        OpenRead::NotAFile => state.notice = Some(Notice::NotAFile { path }),
-        OpenRead::Failed(error) => state.notice = Some(Notice::OpenFailed { path, error }),
+        Err(notice) => state.notice = Some(notice),
     }
 }
 
-pub(crate) fn written(
+pub fn written(
     state: &mut State,
-    buffer: BufferId,
+    saving: Saving,
     path: PathBuf,
-    revision: usize,
     result: io::Result<Written>,
     out: &mut Vec<Effect>,
 ) {
     match result {
         Ok(Written { bytes, mtime }) => {
-            // A buffer closed since the write began has nothing to update.
-            match state.buffers.get_mut(buffer) {
-                Some(entry) => {
-                    entry.doc.saved_revision = revision;
-                    entry.disk = Disk::Synced { mtime };
-                }
-                None => {}
+            // A file closed since the write began has nothing to update.
+            let disk = Disk::Synced { mtime };
+            match saving {
+                Saving::Text { buffer, revision } => match state.buffers.get_mut(buffer) {
+                    Some(entry) => {
+                        entry.doc.saved_revision = revision;
+                        entry.disk = disk;
+                    }
+                    None => {}
+                },
+                Saving::Paged { file, revision } => match state.pageds.get_mut(file) {
+                    Some(entry) => {
+                        entry.saved = revision;
+                        entry.disk = disk;
+                    }
+                    None => {}
+                },
+                Saving::Board { file, revision } => match state.boards.get_mut(file) {
+                    Some(entry) => {
+                        entry.saved = revision;
+                        entry.disk = disk;
+                    }
+                    None => {}
+                },
             }
             state.notice = Some(Notice::Written { path, bytes });
             request_git(state, out);
-            match state.exit.written(buffer) {
+            match state.exit.written(saving.opened()) {
                 AfterWrite::Quit => super::apply(state, Command::Quit, out),
                 AfterWrite::Stay => {}
             }
@@ -328,71 +391,184 @@ pub(crate) fn written(
         Err(error) => {
             tracing::warn!(?path, %error, "write failed");
             state.notice = Some(Notice::WriteFailed { path, error });
-            state.exit.failed(buffer);
+            state.exit.failed(saving.opened());
         }
     }
 }
 
-pub(crate) fn reloaded(state: &mut State, buffer: BufferId, read: DiskRead, policy: ReloadPolicy) {
+pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
     let State {
         buffers,
+        pageds,
+        boards,
         layout,
         languages,
         notice,
         ..
     } = state;
-    let Some(entry) = buffers.get_mut(buffer) else {
-        return;
-    };
-    let Buffer { doc, disk, .. } = entry;
     match read {
-        DiskRead::Unchanged => {}
-        DiskRead::Missing => {
-            *disk = Disk::Deleted;
-            *notice = Some(Notice::DeletedOnDisk {
-                path: entry.path.clone(),
-            });
-        }
-        DiskRead::NotUtf8 => {
-            *notice = Some(Notice::NotUtf8 {
-                path: entry.path.clone(),
-            })
-        }
-        DiskRead::Failed(error) => {
-            tracing::warn!(%error, path = ?entry.path, "reload failed");
-            *notice = Some(Notice::ReloadFailed {
-                path: entry.path.clone(),
-                error,
-            });
-        }
-        DiskRead::Changed { text, mtime } => match policy.on_change(doc) {
-            OnChange::Flag => {
-                *disk = Disk::ChangedExternally { mtime };
-                *notice = Some(Notice::ChangedOnDisk {
-                    path: entry.path.clone(),
-                });
+        Reloaded::Text(buffer, read) => {
+            let Some(entry) = buffers.get_mut(buffer) else {
+                return;
+            };
+            let Buffer {
+                doc, disk, path, ..
+            } = entry;
+            match read {
+                DiskRead::Changed { content, mtime } => {
+                    match policy.on_change(doc.is_modified()) {
+                        OnChange::Flag => {
+                            *disk = Disk::ChangedExternally { mtime };
+                            *notice = Some(Notice::ChangedOnDisk { path: path.clone() });
+                        }
+                        OnChange::Replace => {
+                            let tx = helix_core::diff::compare_ropes(&doc.text, &content);
+                            let selection = layout.selection_of(buffer);
+                            // Unsaved edits stay their own undo step below the reload.
+                            doc.commit(&selection);
+                            doc.apply(&tx, &selection, languages);
+                            map_views(layout, buffer, tx.changes(), doc.text.slice(..));
+                            doc.commit(&selection.map(tx.changes()));
+                            doc.saved_revision = doc.history.current_revision();
+                            *disk = Disk::Synced { mtime };
+                        }
+                    }
+                }
+                DiskRead::Unreadable(NotUtf8) => {
+                    *notice = Some(Notice::NotUtf8 { path: path.clone() })
+                }
+                DiskRead::Missed(missed_read) => missed(missed_read, path, disk, notice),
             }
-            OnChange::Replace => {
-                let tx = helix_core::diff::compare_ropes(&doc.text, &text);
-                let selection = layout.selection_of(buffer);
-                // Unsaved edits stay their own undo step below the reload.
-                doc.commit(&selection);
-                doc.apply(&tx, &selection, languages);
-                map_views(layout, buffer, tx.changes(), doc.text.slice(..));
-                doc.commit(&selection.map(tx.changes()));
-                doc.saved_revision = doc.history.current_revision();
-                *disk = Disk::Synced { mtime };
-            }
+        }
+        Reloaded::Paged(id, read) => match pageds.get_mut(id) {
+            Some(file) => match drawing_reloaded(file, read, policy, notice) {
+                Drawn::Replaced => {
+                    for tab in drawing_tabs(layout, Opened::Paged(id)) {
+                        tab.cancel_strokes()
+                    }
+                }
+                Drawn::Kept => {}
+            },
+            None => {}
+        },
+        Reloaded::Board(id, read) => match boards.get_mut(id) {
+            Some(file) => match drawing_reloaded(file, read, policy, notice) {
+                Drawn::Replaced => {
+                    for tab in drawing_tabs(layout, Opened::Board(id)) {
+                        tab.cancel_strokes()
+                    }
+                }
+                Drawn::Kept => {}
+            },
+            None => {}
         },
     }
 }
 
-pub(super) fn write_focused(state: &mut State, dirs: Dirs, out: &mut Vec<Effect>) {
-    match focused_buffer(&state.layout) {
-        Ok(id) => {
-            let job = write_job(&mut state.layout, id, &mut state.buffers[id], dirs);
+/// Whether a reload put the disk's drawing in place.
+enum Drawn {
+    Replaced,
+    Kept,
+}
+
+fn drawing_reloaded<D: Drawing>(
+    file: &mut InkFile<D>,
+    read: DiskRead<D, FormatError>,
+    policy: ReloadPolicy,
+    notice: &mut Option<Notice>,
+) -> Drawn {
+    match read {
+        DiskRead::Changed { content, mtime } => match policy.on_change(file.is_modified()) {
+            OnChange::Flag => {
+                file.disk = Disk::ChangedExternally { mtime };
+                *notice = Some(Notice::ChangedOnDisk {
+                    path: file.path.clone(),
+                });
+                Drawn::Kept
+            }
+            OnChange::Replace => {
+                file.saved = file.edited.replace(content);
+                file.disk = Disk::Synced { mtime };
+                Drawn::Replaced
+            }
+        },
+        DiskRead::Unreadable(error) => {
+            *notice = Some(Notice::DrawingUnreadable {
+                path: file.path.clone(),
+                reason: error.to_string(),
+            });
+            Drawn::Kept
+        }
+        DiskRead::Missed(missed_read) => {
+            missed(missed_read, &file.path, &mut file.disk, notice);
+            Drawn::Kept
+        }
+    }
+}
+
+/// A read that found nothing to load: the file unchanged, gone, or failing to read.
+fn missed(read: Missed, path: &Path, disk: &mut Disk, notice: &mut Option<Notice>) {
+    match read {
+        Missed::Unchanged => {}
+        Missed::Missing => {
+            *disk = Disk::Deleted;
+            *notice = Some(Notice::DeletedOnDisk {
+                path: path.to_owned(),
+            });
+        }
+        Missed::Failed(error) => {
+            tracing::warn!(%error, ?path, "reload failed");
+            *notice = Some(Notice::ReloadFailed {
+                path: path.to_owned(),
+                error,
+            });
+        }
+    }
+}
+
+/// Every tab showing the drawing `opened`.
+fn drawing_tabs(layout: &mut Layout, opened: Opened) -> impl Iterator<Item = &mut InkTabs> {
+    (layout.panes_mut())
+        .flat_map(|(_, pane)| pane.items_mut())
+        .filter_map(move |item| match &mut item.tab {
+            Tab::Ink(ink) if ink.opened() == opened => Some(ink),
+            Tab::Ink(_) | Tab::Text(_) => None,
+        })
+}
+
+pub fn write_focused(state: &mut State, dirs: Dirs, out: &mut Vec<Effect>) {
+    match focused_file(&state.layout) {
+        Ok(opened) => {
+            let job = write_job(state, opened, dirs);
             out.push(Effect::Job(job))
         }
         Err(refused) => state.notice = Some(refused),
     }
+}
+
+/// `opened` saved under `path` from now on; a path naming another kind of file is refused.
+pub fn renamed(state: &mut State, opened: Opened, path: PathBuf) -> Result<Opened, Notice> {
+    match (opened, FileKind::of(&path)) {
+        (Opened::Text(buffer), FileKind::Text(_)) => {
+            let entry = &mut state.buffers[buffer];
+            entry.path = path;
+            entry.disk = Disk::New;
+        }
+        (Opened::Paged(file), FileKind::Paged) => {
+            let entry = &mut state.pageds[file];
+            entry.path = path;
+            entry.disk = Disk::New;
+        }
+        (Opened::Board(file), FileKind::Board) => {
+            let entry = &mut state.boards[file];
+            entry.path = path;
+            entry.disk = Disk::New;
+        }
+        (Opened::Text(_), FileKind::Paged | FileKind::Board)
+        | (Opened::Paged(_), FileKind::Text(_) | FileKind::Board)
+        | (Opened::Board(_), FileKind::Text(_) | FileKind::Paged) => {
+            return Err(Notice::WrongExtension { path });
+        }
+    }
+    Ok(opened)
 }

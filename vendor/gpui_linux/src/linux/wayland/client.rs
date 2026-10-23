@@ -3066,7 +3066,7 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr
                     _ => {}
                 }
             }
-            zwp_tablet_tool_v2::Event::Frame { .. } => {
+            zwp_tablet_tool_v2::Event::Frame { time } => {
                 // Mutter sends proximity_in in a frame without motion, so hold the
                 // transitions until the position on the new surface is known.
                 let Some(position) = tool.position else {
@@ -3103,6 +3103,7 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr
                         distance,
                         buttons,
                         modifiers,
+                        time: Duration::from_millis(u64::from(time)),
                     }));
                 }
             }

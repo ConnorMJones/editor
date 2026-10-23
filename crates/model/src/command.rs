@@ -154,6 +154,7 @@ pub enum Command {
     Read(ReadCommand),
     Document(DocumentCommand),
     Pages(PagesCommand),
+    Drawing(DrawingCommand),
     /// Compiles the focused typst file to a PDF beside it.
     ExportPdf,
 }
@@ -563,4 +564,72 @@ pub enum Resize {
     Narrow,
     Widen,
     Even,
+}
+
+/// Keys on a focused drawing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawingCommand {
+    View(ViewCommand),
+    Page(PageCommand),
+    Ink(InkCommand),
+}
+
+/// Where a drawing's pane looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewCommand {
+    Zoom(ZoomBy),
+    Pan(Side),
+    /// Fits pages to the pane's width, or to its height.
+    ToggleFit,
+}
+
+/// The pages of a paged drawing, around the page in focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageCommand {
+    Go(PageStep),
+    /// A blank page like the one in focus, beside it.
+    Insert(PageSide),
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageStep {
+    Next,
+    Previous,
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageSide {
+    Above,
+    Below,
+}
+
+/// The tools and layers a drawing is worked with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InkCommand {
+    /// What the pen's tip does; its eraser end always erases.
+    Tool(InkTool),
+    /// The active layer moves to the next or previous one.
+    Layer(Direction),
+    /// Hides the active layer, or shows it again.
+    ToggleLayer,
+    NewLayer,
+    /// Removes the marks the select tool holds.
+    DeletePicked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InkTool {
+    Brush,
+    Eraser,
+    /// Selects with a box dragged out.
+    BoxSelect,
+    /// Selects with a loop drawn around.
+    LassoSelect,
+    Line,
+    Arrow,
+    Rectangle,
+    Ellipse,
 }

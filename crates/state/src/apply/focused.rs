@@ -14,9 +14,10 @@ use crate::State;
 use crate::git::diffview::{self, Right};
 use crate::text::buffer::{Buffer, BufferId, HistoryStep, TextDoc, Uncommitted};
 use crate::view::layout::{Layout, TextView};
+use crate::view::tab::{Opened, Tab, TextTabs};
 
 /// Sorted, deduplicated lines touched by any range.
-pub(crate) fn selected_lines(text: &Rope, selection: &Selection) -> Vec<usize> {
+pub fn selected_lines(text: &Rope, selection: &Selection) -> Vec<usize> {
     let mut lines: Vec<usize> = selection
         .iter()
         .flat_map(|range| {
@@ -29,38 +30,41 @@ pub(crate) fn selected_lines(text: &Rope, selection: &Selection) -> Vec<usize> {
     lines
 }
 
-pub(crate) fn count_of(state: &State) -> usize {
+pub fn count_of(state: &State) -> usize {
     state.input.count.map_or(1, NonZeroUsize::get)
 }
 
 /// Select mode extends selections where normal mode moves them.
-pub(crate) fn movement_of(state: &State) -> Movement {
+pub fn movement_of(state: &State) -> Movement {
     match state.input.mode {
         Mode::Select => Movement::Extend,
         Mode::Normal | Mode::Insert => Movement::Move,
     }
 }
 
-pub(crate) fn exit_select_mode(state: &mut State) {
+pub fn exit_select_mode(state: &mut State) {
     match state.input.mode {
         Mode::Select => state.input.mode = Mode::Normal,
         Mode::Normal | Mode::Insert => {}
     }
 }
 
-pub(crate) enum Focused<'a, 'b> {
+pub enum Focused<'a, 'b> {
     Text(&'a mut TextView, &'b mut TextDoc),
     Empty,
+    Drawing,
     /// A rendering, or the deleted side of a diff.
     ReadOnly,
 }
 
-pub(crate) fn focused<'a, 'b>(
+pub fn focused<'a, 'b>(
     layout: &'a mut Layout,
     buffers: &'b mut SlotMap<BufferId, Buffer>,
 ) -> Focused<'a, 'b> {
-    let Some(tab) = layout.focused_mut().active_mut() else {
-        return Focused::Empty;
+    let tab = match layout.focused_mut().active_mut() {
+        None => return Focused::Empty,
+        Some(Tab::Ink(_)) => return Focused::Drawing,
+        Some(Tab::Text(tab)) => tab,
     };
     let buffer = &mut buffers[tab.buffer()];
     let right = match tab.shown() {
@@ -75,7 +79,7 @@ pub(crate) fn focused<'a, 'b>(
 }
 
 /// The focused text, or `notice` set to why a text command cannot run.
-pub(crate) fn focused_text<'a, 'b>(
+pub fn focused_text<'a, 'b>(
     layout: &'a mut Layout,
     buffers: &'b mut SlotMap<BufferId, Buffer>,
     notice: &mut Option<Notice>,
@@ -83,6 +87,7 @@ pub(crate) fn focused_text<'a, 'b>(
     let refused = match focused(layout, buffers) {
         Focused::Text(view, doc) => return Some((view, doc)),
         Focused::Empty => Notice::NoBuffer,
+        Focused::Drawing => Notice::NotText,
         Focused::ReadOnly => Notice::ReadOnly,
     };
     *notice = Some(refused);
@@ -90,15 +95,12 @@ pub(crate) fn focused_text<'a, 'b>(
 }
 
 /// Maps every view of `buffer`, in every tab, through `changes`.
-pub(crate) fn map_views(
-    layout: &mut Layout,
-    buffer: BufferId,
-    changes: &ChangeSet,
-    text: RopeSlice,
-) {
+pub fn map_views(layout: &mut Layout, buffer: BufferId, changes: &ChangeSet, text: RopeSlice) {
     for pane in layout.panes_mut().map(|(_, pane)| pane) {
-        for item in pane.items_mut() {
-            let view = item.tab.text_mut();
+        let views = (pane.items_mut().iter_mut())
+            .filter_map(|item| item.tab.as_text_mut())
+            .map(TextTabs::text_mut);
+        for view in views {
             match view.buffer() == buffer {
                 true => {
                     view.selection = view.selection.clone().map(changes).ensure_invariants(text);
@@ -110,7 +112,7 @@ pub(crate) fn map_views(
     }
 }
 
-pub(crate) fn try_select(
+pub fn try_select(
     state: &mut State,
     f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Result<Selection, Notice>,
 ) {
@@ -131,10 +133,7 @@ pub(crate) fn try_select(
 }
 
 /// Moves the selection along the syntax tree, or says why there is none.
-pub(super) fn tree_select(
-    state: &mut State,
-    f: impl FnOnce(&Syntax, RopeSlice, Selection) -> Selection,
-) {
+pub fn tree_select(state: &mut State, f: impl FnOnce(&Syntax, RopeSlice, Selection) -> Selection) {
     try_select(state, |doc, selection, _| {
         Ok(f(
             doc.highlight.tree()?,
@@ -144,16 +143,13 @@ pub(super) fn tree_select(
     });
 }
 
-pub(crate) fn select(
-    state: &mut State,
-    f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Selection,
-) {
+pub fn select(state: &mut State, f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Selection) {
     try_select(state, |doc, selection, loader| {
         Ok(f(doc, selection, loader))
     });
 }
 
-pub(crate) fn reselect(state: &mut State, mut f: impl FnMut(RopeSlice, Range) -> Range) {
+pub fn reselect(state: &mut State, mut f: impl FnMut(RopeSlice, Range) -> Range) {
     select(state, |doc, selection, _| {
         let text = doc.text.slice(..);
         selection.clone().transform(|range| f(text, range))
@@ -161,7 +157,7 @@ pub(crate) fn reselect(state: &mut State, mut f: impl FnMut(RopeSlice, Range) ->
 }
 
 /// Also maps every view of the buffer and keeps its preview tabs.
-pub(crate) fn try_edit(
+pub fn try_edit(
     state: &mut State,
     f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Result<Transaction, Notice>,
 ) {
@@ -188,15 +184,12 @@ pub(crate) fn try_edit(
     map_views(layout, buffer, tx.changes(), text);
     match tx.changes().is_empty() {
         true => {}
-        false => layout.keep(buffer),
+        false => layout.keep(Opened::Text(buffer)),
     }
     take_selection(layout, &tx, text);
 }
 
-pub(crate) fn edit(
-    state: &mut State,
-    f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Transaction,
-) {
+pub fn edit(state: &mut State, f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Transaction) {
     try_edit(state, |doc, selection, loader| {
         Ok(f(doc, selection, loader))
     });
@@ -206,7 +199,8 @@ pub(crate) fn edit(
 fn take_selection(layout: &mut Layout, tx: &Transaction, text: RopeSlice) {
     match tx.selection() {
         Some(selection) => {
-            let view = (layout.focused_mut().active_mut()).expect("an edit keeps its view focused");
+            let view =
+                (layout.focused_mut().active_text_mut()).expect("an edit keeps its view focused");
             view.text_mut().selection = selection.clone().ensure_invariants(text);
         }
         None => {}
@@ -214,17 +208,17 @@ fn take_selection(layout: &mut Layout, tx: &Transaction, text: RopeSlice) {
 }
 
 /// Groups the focused buffer's staged edits into an undo revision.
-pub(crate) fn commit_focused(state: &mut State) {
+pub fn commit_focused(state: &mut State) {
     match focused(&mut state.layout, &mut state.buffers) {
         Focused::Text(view, doc) => match doc.uncommitted {
             Uncommitted::Pending { .. } => doc.commit(&view.selection),
             Uncommitted::Clean => {}
         },
-        Focused::Empty | Focused::ReadOnly => {}
+        Focused::Empty | Focused::Drawing | Focused::ReadOnly => {}
     }
 }
 
-pub(super) fn step_history(state: &mut State, step: HistoryStep, exhausted: Notice) {
+pub fn step_history(state: &mut State, step: HistoryStep, exhausted: Notice) {
     let count = count_of(state);
     let State {
         layout,
@@ -245,7 +239,7 @@ pub(super) fn step_history(state: &mut State, step: HistoryStep, exhausted: Noti
             return;
         }
         let text = doc.text.slice(..);
-        layout.keep(buffer);
+        layout.keep(Opened::Text(buffer));
         for tx in &txs {
             map_views(layout, buffer, tx.changes(), text);
             take_selection(layout, tx, text);

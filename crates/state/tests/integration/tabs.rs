@@ -236,6 +236,8 @@ fn one_buffer_in_two_panes_maps_every_tab_through_edits() {
     let selection = |h: &Harness, pane, index: usize| {
         h.state.layout.panes()[pane].items()[index]
             .tab
+            .as_text()
+            .unwrap()
             .text()
             .selection
             .clone()
@@ -318,7 +320,7 @@ fn split_copies_only_the_active_item() {
 
     h.keys("b");
     assert_ne!(h.view().selection, selection);
-    match h.state.layout.panes()[first].active() {
+    match h.state.layout.panes()[first].active_text() {
         Some(view) => assert_eq!(view.text().selection, selection),
         None => panic!("first pane lost its tab"),
     }
@@ -376,7 +378,7 @@ fn session_tab_lists_are_validated() {
     let mut h = Harness::new(dir.path());
     let path = dir.path().join("a.txt");
     let tab = format!(
-        "{{ path = {:?}, mode = {{ kind = \"source\" }}, ranges = [[0, 0]], primary = 0, scroll = 0 }}",
+        "{{ path = {:?}, view = {{ kind = \"text\", mode = {{ kind = \"source\" }}, ranges = [[0, 0]], primary = 0, scroll = 0 }} }}",
         path.display().to_string()
     );
     let session = |pane: &str| -> Session {
