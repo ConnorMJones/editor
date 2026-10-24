@@ -46,6 +46,7 @@ fn finish(h: &mut Harness, effects: Vec<Effect>) {
                 | Effect::Watch(_)
                 | Effect::WriteClipboard { .. }
                 | Effect::ReadClipboard { .. }
+                | Effect::ReadClipboardImage { .. }
                 | Effect::OpenUrl(_)
                 | Effect::Typeset(_) => {}
             }

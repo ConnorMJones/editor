@@ -184,7 +184,7 @@ pub fn search_next(state: &mut State, direction: Direction) {
 
 pub fn search_selection(state: &mut State, bounds: WordBounds, out: &mut Vec<Effect>) {
     let register = state.input.register.unwrap_or(Register::SEARCH);
-    let Some((view, doc)) =
+    let Some(crate::apply::FocusedText { view, doc }) =
         crate::apply::focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
     else {
         return;

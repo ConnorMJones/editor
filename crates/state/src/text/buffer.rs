@@ -226,6 +226,23 @@ impl TextDoc {
         })
     }
 
+    /// Text with no file or language, as a drawing's text mark is typed.
+    pub fn plain(text: Rope) -> TextDoc {
+        TextDoc {
+            line_ending: LineEnding::LF,
+            indent_style: IndentStyle::Spaces(4),
+            tab_width: DEFAULT_TAB_WIDTH,
+            text_width: DEFAULT_TEXT_WIDTH,
+            text,
+            version: 0,
+            history: History::default(),
+            uncommitted: Uncommitted::Clean,
+            saved_revision: 0,
+            highlight: Highlight::Plain,
+            conflicts: Conflicts::EMPTY,
+        }
+    }
+
     fn build(
         text: Rope,
         path: &std::path::Path,

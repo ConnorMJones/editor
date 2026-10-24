@@ -24,9 +24,9 @@ use state::render::typeset::Figures;
 use state::text::buffer::BufferId;
 use state::view::layout::PaneId;
 
-use super::raster::Rasters;
 use super::update;
 use crate::fonts::{Fonts, PROSE_LINE, hsla};
+use crate::pictures::Pictures;
 use crate::workspace::Workspace;
 
 /// Reading column width in ems of the prose, about 75 characters.
@@ -41,7 +41,7 @@ struct Draw<'a> {
     view: &'a DocumentState,
     markdown: &'a Markdown,
     figures: &'a Figures,
-    rasters: &'a Rc<RefCell<Rasters>>,
+    pictures: &'a Rc<RefCell<Pictures>>,
     pane: PaneId,
     buffer: BufferId,
     version: u64,
@@ -80,7 +80,7 @@ pub fn item(
         view,
         markdown,
         figures: &state.figures,
-        rasters: &this.rasters,
+        pictures: &this.pictures,
         pane,
         buffer,
         version: *version,
@@ -390,11 +390,11 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
         }
         BlockKind::Row(_) | BlockKind::Cell(_) => div().into_any_element(),
         BlockKind::Image(image) => clickable(draw, index)
-            .child(picture(theme, fonts, &image.file, &image.src))
+            .child(picture(draw, &image.file, &image.src))
             .into_any_element(),
         BlockKind::Embed(embed) => match &embed.kind {
             EmbedKind::Image(file) => clickable(draw, index)
-                .child(picture(theme, fonts, file, &embed.link.target))
+                .child(picture(draw, file, &embed.link.target))
                 .into_any_element(),
             EmbedKind::Note(resolution) => {
                 let (label, shown) = match resolution {

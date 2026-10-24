@@ -1,17 +1,16 @@
 //! Figures, images and boxes standing in for content: code, and what cannot show yet.
 
-use gpui::{
-    AnyElement, Div, IntoElement, ObjectFit, SharedString, StyledText, TextRun, div, img,
-    prelude::*, px,
-};
+use gpui::{AnyElement, Div, IntoElement, SharedString, StyledText, TextRun, div, prelude::*, px};
+use model::picture::{Picture, Source};
 use model::theme::Theme;
 use model::units::Px;
 use state::render::markdown::{Figure, FigureKind, ImageFile};
-use state::render::typeset::Render;
+use state::render::typeset::{Probe, Render};
+use state::viewer::Probed;
 
-use super::super::raster::svg_canvas;
 use super::Draw;
 use crate::fonts::{Fonts, hsla};
+use crate::pictures::picture_canvas;
 
 /// A monospace box with an optional label, highlighted when `runs` are given.
 pub fn code_box(
@@ -98,7 +97,7 @@ pub fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyElement {
                 .flex()
                 .justify_center()
                 .child(
-                    svg_canvas(draw.rasters, &draw.workspace, svg)
+                    picture_canvas(draw.pictures, &draw.workspace, svg.picture())
                         .w_full()
                         .max_w(px(width))
                         .aspect_ratio(width / height),
@@ -117,33 +116,37 @@ pub fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyElement {
     }
 }
 
-pub fn picture(theme: &Theme, fonts: &Fonts, file: &ImageFile, src: &str) -> AnyElement {
+/// An image file at its pixel size, narrowed to the column; a box until its size is read.
+pub fn picture(draw: &Draw, file: &ImageFile, src: &str) -> AnyElement {
+    let (theme, fonts) = (draw.theme, draw.fonts);
+    let boxed =
+        |label, text: &str| placeholder(theme, fonts, label, SharedString::from(text.to_owned()));
     match file {
-        ImageFile::Local(path) => {
-            let (missing, theme_muted) =
-                (SharedString::from(format!("🖼 {src}")), hsla(theme.muted));
-            img(path.clone())
-                .max_w_full()
-                .object_fit(ObjectFit::ScaleDown)
-                .with_fallback(move || {
-                    div()
-                        .text_color(theme_muted)
-                        .child(missing.clone())
-                        .into_any_element()
-                })
-                .into_any_element()
-        }
-        ImageFile::Remote(url) => placeholder(
-            theme,
-            fonts,
-            "remote image",
-            SharedString::from(url.clone()),
-        ),
-        ImageFile::Missing => placeholder(
-            theme,
-            fonts,
-            "image not found",
-            SharedString::from(src.to_owned()),
-        ),
+        ImageFile::Local(local) => match draw.figures.image(local) {
+            Some(Probe::Read(Probed { size, modified })) => {
+                let (width, height) = (size.width.get(), size.height.get());
+                let picture = Picture {
+                    source: Source::File {
+                        path: local.path.clone(),
+                        modified: *modified,
+                    },
+                    encoding: local.encoding,
+                };
+                div()
+                    .w_full()
+                    .child(
+                        picture_canvas(draw.pictures, &draw.workspace, picture)
+                            .w_full()
+                            .max_w(px(width))
+                            .aspect_ratio(width / height),
+                    )
+                    .into_any_element()
+            }
+            Some(Probe::Failed(error)) => boxed("image unreadable", &format!("{src}\n{error}")),
+            Some(Probe::Pending) | None => boxed("image", src),
+        },
+        ImageFile::Remote(url) => boxed("remote image", url),
+        ImageFile::Missing => boxed("image not found", src),
+        ImageFile::NotPicture => boxed("not an image", src),
     }
 }

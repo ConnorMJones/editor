@@ -14,7 +14,7 @@ use helix_stdx::rope::RopeSliceExt;
 use model::command::{Direction, Motion};
 use model::mode::Mode;
 
-use crate::apply::{Focused, commit_focused, count_of, edit, focused, reselect};
+use crate::apply::{Focused, FocusedText, commit_focused, count_of, edit, focused, reselect};
 use crate::text::buffer::{TextDoc, Uncommitted};
 use crate::text::motion;
 use crate::{InsertExit, State};
@@ -343,7 +343,7 @@ pub fn open_lines(state: &mut State, direction: Direction, comments: Comments) {
 
 pub fn exit_insert(state: &mut State) {
     let blank_line = match focused(&mut state.layout, &mut state.buffers) {
-        Focused::Text(view, doc) => {
+        Focused::Text(FocusedText { view, doc }) => {
             let text = doc.text.slice(..);
             let range = view.selection.primary();
             let pos = range.cursor(text);
@@ -367,7 +367,7 @@ pub fn exit_insert(state: &mut State) {
             };
             inserted_blank.then(|| (text.line_to_char(line), pos))
         }
-        Focused::Empty | Focused::Drawing | Focused::ReadOnly => None,
+        Focused::Empty | Focused::NotText | Focused::ReadOnly => None,
     };
     if let Some((start, end)) = blank_line {
         edit(state, |doc, _, _| {
@@ -414,7 +414,7 @@ pub fn append_mode(state: &mut State) {
 
 pub fn smart_tab(state: &mut State) {
     let after_text = match focused(&mut state.layout, &mut state.buffers) {
-        Focused::Text(view, doc) => view.selection.ranges().iter().any(|range| {
+        Focused::Text(FocusedText { view, doc }) => view.selection.ranges().iter().any(|range| {
             let text = doc.text.slice(..);
             let cursor = range.cursor(text);
             let line_start = text.line_to_char(text.char_to_line(cursor));
@@ -423,7 +423,7 @@ pub fn smart_tab(state: &mut State) {
                 .chars()
                 .all(char::is_whitespace)
         }),
-        Focused::Empty | Focused::Drawing | Focused::ReadOnly => false,
+        Focused::Empty | Focused::NotText | Focused::ReadOnly => false,
     };
     match after_text {
         true => motion::motion(state, Motion::ParentNodeEnd),

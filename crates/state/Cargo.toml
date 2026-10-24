@@ -17,6 +17,7 @@ integration = ["typeset"]
 git2.workspace = true
 helix-core.workspace = true
 helix-stdx.workspace = true
+image.workspace = true
 ignore.workspace = true
 imara-diff.workspace = true
 ink.workspace = true
@@ -30,6 +31,7 @@ slotmap.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
+usvg.workspace = true
 typeset = { workspace = true, optional = true }
 
 [dev-dependencies]

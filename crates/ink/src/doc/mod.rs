@@ -1,6 +1,7 @@
 //! What a drawing holds: marks on layers, on pages or on a board.
 
 mod board;
+mod image;
 mod layer;
 mod paged;
 mod shape;
@@ -14,8 +15,10 @@ use crate::brush::{Brush, EPSILON, Paint};
 use crate::geom::{Affine, Local, Rect, Surface, triangle_distance};
 use crate::input::{Modeler, Sample};
 use crate::mesh::MeshBuilder;
+use crate::text::TextInk;
 
 pub use board::{Board, BoardChange};
+pub use image::ImageInk;
 pub use layer::{InvalidLayerName, Layer, LayerIndex, LayerMarks, LayerName, Layers, Visibility};
 pub use paged::{
     Background, InvalidPageSize, InvalidSpacing, Page, PageIndex, PageLayer, PageSize, Paged,
@@ -27,7 +30,8 @@ slotmap::new_key_type! {
     pub struct MarkId;
 }
 
-/// Ink placed on a surface: a stroke or a shape, with where it sits and its colour.
+/// Ink placed on a surface: a stroke, a shape, text or an image, with where it sits and its
+/// colour (which an image ignores).
 #[derive(Clone, Debug)]
 pub struct Mark {
     pub placement: Placement,
@@ -39,6 +43,8 @@ pub struct Mark {
 pub enum Ink {
     Stroke(Arc<Geometry>),
     Shape(Arc<ShapeInk>),
+    Text(Arc<TextInk>),
+    Image(Arc<ImageInk>),
 }
 
 impl Mark {
@@ -47,6 +53,8 @@ impl Mark {
         match &self.ink {
             Ink::Stroke(geometry) => &geometry.built,
             Ink::Shape(shape) => &shape.built,
+            Ink::Text(text) => &text.built,
+            Ink::Image(image) => &image.built,
         }
     }
 
@@ -80,6 +88,14 @@ impl Placement {
         forward: Affine::identity(),
         back: Affine::identity(),
     };
+
+    /// The mark's own origin at `at`, unrotated and unscaled.
+    pub fn at(at: crate::geom::Point<Surface>) -> Placement {
+        Placement {
+            forward: Affine::translation(at.x, at.y),
+            back: Affine::translation(-at.x, -at.y),
+        }
+    }
 
     /// `None` for a transform that flattens the stroke.
     pub fn new(forward: Affine<Local, Surface>) -> Option<Placement> {
@@ -224,6 +240,12 @@ impl Marks {
         self.map.get(id)
     }
 
+    /// Puts `mark` where mark `id` was, keeping its id and place in the order.
+    pub fn replace(&mut self, id: MarkId, mark: Mark) -> Option<Arc<Mark>> {
+        let slot = self.map.get_mut(id)?;
+        Some(std::mem::replace(slot, Arc::new(mark)))
+    }
+
     /// Moves mark `id` to `placement`; an id not in the marks is left alone.
     pub fn place(&mut self, id: MarkId, placement: Placement) {
         match self.map.get_mut(id) {
@@ -262,6 +284,8 @@ impl Marks {
 pub enum MarkChange<T> {
     Add(T, Mark),
     Remove(T, SmallVec<[MarkId; 8]>),
+    /// Mark `id` becomes the mark given, as when its text is edited.
+    Replace(T, MarkId, Mark),
     /// The marks moved by the transform, as one step.
     Transform(T, SmallVec<[MarkId; 8]>, Affine<Surface, Surface>),
 }
@@ -271,6 +295,7 @@ impl<T: Copy> MarkChange<T> {
         match self {
             MarkChange::Add(target, _)
             | MarkChange::Remove(target, _)
+            | MarkChange::Replace(target, ..)
             | MarkChange::Transform(target, ..) => *target,
         }
     }
@@ -330,6 +355,11 @@ fn apply_marks<T>(marks: &mut Arc<Marks>, change: MarkChange<T>) -> Result<(), C
             for id in ids {
                 marks.remove(id);
             }
+            Ok(())
+        }
+        MarkChange::Replace(_, id, mark) => {
+            marks.get(id).ok_or(ChangeError::NoMark)?;
+            Arc::make_mut(marks).replace(id, mark);
             Ok(())
         }
         MarkChange::Transform(_, ids, by) => {

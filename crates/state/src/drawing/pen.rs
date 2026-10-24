@@ -4,14 +4,17 @@ use std::time::Duration;
 
 use ink::doc::{Board, Drawing, LayerIndex, Paged, Visibility};
 use ink::input::{Elapsed, Pressure, Sample, Tilt};
+use ink::text::Fonts;
 use ink::tool::{Outcome, PenInput, ToolKind};
 use model::geom::{Pane, Point, Surface};
+use model::mode::Mode;
 use model::notice::Notice;
 use model::sheet::Viewport;
 
 use crate::State;
 use crate::drawing::command::commit;
 use crate::drawing::frame::{self, Landed};
+use crate::drawing::typing::{self, Ended};
 use crate::drawing::{Gesture, Hand, InkFile, InkTabs, Pen};
 use crate::view::layout::PaneId;
 use crate::view::tab::Tab;
@@ -56,6 +59,8 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
         pageds,
         boards,
         notice,
+        input,
+        fonts,
         ..
     } = state;
     let (at, viewport) = (sample.at, sample.viewport);
@@ -63,18 +68,30 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
         Some(Tab::Ink(InkTabs::Paged(tab))) => {
             let view = tab.view;
             let file = &mut pageds[tab.file()];
-            on(&mut tab.hand, file, phase, sample, |paged, layer| {
-                frame::paged(paged, &view, viewport).land::<Paged>(at, layer)
-            })
+            on(
+                &mut tab.hand,
+                file,
+                phase,
+                sample,
+                fonts,
+                &mut input.mode,
+                |paged, layer| frame::paged(paged, &view, viewport).land::<Paged>(at, layer),
+            )
         }
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             let view = tab.view;
             let file = &mut boards[tab.file()];
-            on(&mut tab.hand, file, phase, sample, |board, layer| {
-                frame::board(board, &view, viewport).land::<Board>(at, layer)
-            })
+            on(
+                &mut tab.hand,
+                file,
+                phase,
+                sample,
+                fonts,
+                &mut input.mode,
+                |board, layer| frame::board(board, &view, viewport).land::<Board>(at, layer),
+            )
         }
-        Some(Tab::Text(_)) | None => Ok(()),
+        Some(Tab::Text(_) | Tab::Image(_)) | None => Ok(()),
     };
     match result {
         Ok(()) => {}
@@ -88,10 +105,17 @@ fn on<D: Drawing>(
     file: &mut InkFile<D>,
     phase: PenPhase,
     sample: PenSample,
+    fonts: &Fonts,
+    mode: &mut Mode,
     land: impl FnOnce(&D, LayerIndex) -> Option<Landed<D::Target>>,
 ) -> Result<(), Notice> {
     let (gesture, input) = match (phase, hand.pen) {
         (PenPhase::Down(stylus), _) => {
+            // Pressing anywhere ends the text being typed.
+            match typing::finish(&mut hand.typing, file, fonts)? {
+                Ended::Finished => *mode = Mode::Normal,
+                Ended::NothingOpen => {}
+            }
             let drawing = file.edited.drawing();
             match drawing
                 .layers()
@@ -144,6 +168,12 @@ fn on<D: Drawing>(
         Outcome::Failed(error) => Err(Notice::DrawingRefused {
             reason: error.to_string(),
         }),
+        Outcome::Type(at) => {
+            let paint = hand.tools.brush.paint;
+            hand.typing = Some(Box::new(typing::open(at, &hand.style, paint, fonts)));
+            *mode = Mode::Insert;
+            Ok(())
+        }
         Outcome::Ignored | Outcome::Drawn => Ok(()),
     }
 }

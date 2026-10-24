@@ -8,6 +8,7 @@ use model::command::{
 use model::config::OpenAs;
 use model::geom::{self, Point};
 use model::notice::Notice;
+
 use model::sheet::Viewport;
 use model::window::{Axis, Side};
 use nucleo::Matcher;
@@ -17,6 +18,7 @@ use crate::input::picker::{
     self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource,
     Referrers, Search,
 };
+use crate::insert::{self, ImageFrom};
 use crate::job::{FsOp, Job};
 use crate::project::Project;
 use crate::project::backlinks::{self, Build};
@@ -32,6 +34,9 @@ use crate::text::buffer::{BufferId, Position, Target};
 use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Place, Tabs, Tick};
 use crate::view::tab::{NoMode, Opened, Tab, TextTabs};
 use crate::{Effect, Files, Focus, Overlay, Sidebar, State};
+
+/// How far from an edge a drop splits, as a part of the pane along that axis.
+const EDGE: f32 = 0.25;
 
 /// The mode a shown tab arrives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +103,7 @@ pub fn show(
                 Ok(()) | Err(NoMode) => {}
             }
         }
-        (Arrive::In(_) | Arrive::AsIs, Tab::Text(_) | Tab::Ink(_)) => {}
+        (Arrive::In(_) | Arrive::AsIs, Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) => {}
     }
     tab
 }
@@ -393,6 +398,10 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                             .collect(),
                     )
                 }
+                PickerKind::Images => Items::Images(match &state.project.index {
+                    FileIndex::Ready(Indexed { files, .. }) => picker::images(files),
+                    FileIndex::Loading { .. } => Vec::new(),
+                }),
                 PickerKind::Grep => Items::Grep(Grep {
                     generation: state.grep.load(Ordering::Relaxed),
                     search: Search::Idle,
@@ -489,6 +498,14 @@ fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
             crate::apply::open(state, path, Arrive::AsIs, None, open, out);
             focus_editor(state);
         }
+        Items::Images(images) => {
+            let path = images[index].to_path(state.project.root.path());
+            focus_editor(state);
+            match (ImageFrom::file(path), insert::into_focused(state, None)) {
+                (Ok(image), Ok(into)) => insert::insert(state, into, image, out),
+                (Err(notice), _) | (_, Err(notice)) => state.notice = Some(notice),
+            }
+        }
         Items::Buffers(buffers) => {
             let focus = state.layout.focus();
             let buffer = buffers[index].0;
@@ -562,7 +579,11 @@ fn edit_query(
                 current: current.clone(),
             }));
         }
-        Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
+        Items::Files(_)
+        | Items::Images(_)
+        | Items::Buffers(_)
+        | Items::Commands
+        | Items::Backlinks(_) => {
             let narrowing = Narrowing::between(&previous, &picker.query);
             picker::filter(picker, matcher, narrowing);
         }
@@ -633,11 +654,11 @@ pub enum Click {
 }
 
 impl Click {
-    /// From the host's count of quick clicks; only a second click is a double.
+    /// From the host's count of quick clicks; a second click or later is a double.
     pub fn of(count: usize) -> Click {
         match count {
-            2 => Click::Double,
-            _ => Click::Single,
+            0 | 1 => Click::Single,
+            _ => Click::Double,
         }
     }
 }
@@ -677,8 +698,11 @@ pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<E
     };
     state.tree.cursor = index;
     state.sidebar = Sidebar::Files(Files::Tree);
+    // A folder toggles on every click, however quickly they follow each other.
     match (click, kind) {
-        (Click::Single, _) => tree(state, TreeCommand::Open, out),
+        (_, RowKind::Dir(_)) | (Click::Single, RowKind::File) => {
+            tree(state, TreeCommand::Open, out)
+        }
         (Click::Double, RowKind::File) => {
             let path = state.tree.rows[index]
                 .path
@@ -686,8 +710,6 @@ pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<E
             crate::apply::open(state, path, Arrive::AsIs, None, OpenAs::Permanent, out);
             focus_editor(state);
         }
-        // The first click already toggled the directory.
-        (Click::Double, RowKind::Dir(_)) => {}
     }
 }
 
@@ -799,30 +821,42 @@ pub fn move_entry(state: &mut State, from: RelPath, onto: TreeTarget, out: &mut 
 /// Something dragged over the panes: a file from the tree or the Changes list, or a tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Dragged {
+    /// A file in the project, from the tree or the Changes list.
     File(RelPath),
-    Tab { pane: PaneId, index: usize },
+    /// A file dropped from outside the editor, such as a file manager.
+    Outside(PathBuf),
+    Tab {
+        pane: PaneId,
+        index: usize,
+    },
 }
 
 /// Where a drag is dropped: on a pane's body, or on its tab bar before tab `at`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropOn {
     Pane { pane: PaneId, zone: Zone },
     Tabs { pane: PaneId, at: usize },
 }
 
-/// The part of a pane's body a drop lands in: the middle, or near an edge, which splits that way.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A point on a pane drawn at `viewport`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanePoint {
+    pub at: Point<geom::Pane>,
+    pub viewport: Viewport,
+}
+
+/// The part of a pane's body a drop lands in: the middle, where a drop knows its point, or near
+/// an edge, which splits that way.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Zone {
-    Centre,
+    Centre(PanePoint),
     Edge(Side),
 }
 
-/// How far from an edge a drop splits, as a part of the pane along that axis.
-const EDGE: f32 = 0.25;
-
 impl Zone {
-    /// The zone `at` falls in on a pane of `viewport`: the nearest edge within its band.
-    pub fn at(at: Point<geom::Pane>, viewport: Viewport) -> Zone {
+    /// The zone `point` falls in: the nearest edge within its band, else the centre.
+    pub fn at(point: PanePoint) -> Zone {
+        let PanePoint { at, viewport } = point;
         let (x, y) = (at.x / viewport.width.get(), at.y / viewport.height.get());
         [
             (Side::Left, x),
@@ -833,7 +867,7 @@ impl Zone {
         .into_iter()
         .filter(|(_, distance)| *distance < EDGE)
         .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map_or(Zone::Centre, |(side, _)| Zone::Edge(side))
+        .map_or(Zone::Centre(point), |(side, _)| Zone::Edge(side))
     }
 }
 
@@ -844,7 +878,7 @@ pub fn dropped(state: &mut State, dragged: Dragged, on: DropOn, out: &mut Vec<Ef
             let to = match on {
                 DropOn::Pane {
                     pane,
-                    zone: Zone::Centre,
+                    zone: Zone::Centre(_),
                 } => Place::Into { pane, at: None },
                 DropOn::Pane {
                     pane,
@@ -861,25 +895,40 @@ pub fn dropped(state: &mut State, dragged: Dragged, on: DropOn, out: &mut Vec<Ef
             }
         }
         Dragged::File(file) => {
-            let into = match on {
-                // A pane with nothing to copy beside it takes the file itself.
-                DropOn::Pane {
-                    pane,
-                    zone: Zone::Edge(side),
-                } => state.layout.split_copy(pane, side).unwrap_or(pane),
-                DropOn::Pane {
-                    pane,
-                    zone: Zone::Centre,
-                }
-                | DropOn::Tabs { pane, .. } => pane,
-            };
-            match state.layout.set_focus(into) {
-                Ok(()) => {}
-                Err(NotInLayout(_)) => return,
-            }
-            focus_editor(state);
             let path = file.to_path(state.project.root.path());
-            crate::apply::open(state, path, Arrive::AsIs, None, OpenAs::Permanent, out);
+            dropped_file(state, path, on, out)
         }
+        Dragged::Outside(path) => dropped_file(state, path, on, out),
+    }
+}
+
+/// A file dropped on a pane: an image on a drawing or a note goes into it; anything else opens.
+fn dropped_file(state: &mut State, path: PathBuf, on: DropOn, out: &mut Vec<Effect>) {
+    let (into, point) = match on {
+        // A pane with nothing to copy beside it takes the file itself.
+        DropOn::Pane {
+            pane,
+            zone: Zone::Edge(side),
+        } => (state.layout.split_copy(pane, side).unwrap_or(pane), None),
+        DropOn::Pane {
+            pane,
+            zone: Zone::Centre(point),
+        } => (pane, Some(point)),
+        DropOn::Tabs { pane, .. } => (pane, None),
+    };
+    match state.layout.set_focus(into) {
+        Ok(()) => {}
+        Err(NotInLayout(_)) => return,
+    }
+    focus_editor(state);
+    // An image dropped on a drawing or a note goes into it; anything else opens.
+    let image = (point.zip(ImageFrom::file(path.clone()).ok()))
+        .map(|(point, image)| insert::into_focused(state, Some(point)).map(|into| (into, image)));
+    match image {
+        Some(Ok((into, image))) => insert::insert(state, into, image, out),
+        Some(Err(Notice::NoImagesHere)) | None => {
+            crate::apply::open(state, path, Arrive::AsIs, None, OpenAs::Permanent, out)
+        }
+        Some(Err(notice)) => state.notice = Some(notice),
     }
 }

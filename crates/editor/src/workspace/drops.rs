@@ -2,7 +2,8 @@
 //! shows it, as VS Code shows where a dropped editor goes.
 
 use gpui::{
-    Bounds, Context, Div, DragMoveEvent, Hsla, Pixels, Stateful, Window, div, prelude::*, relative,
+    Bounds, Context, Div, DragMoveEvent, ExternalPaths, Hsla, Pixels, Stateful, Window, div,
+    prelude::*, relative,
 };
 use model::geom::Point;
 use model::sheet::Viewport;
@@ -10,7 +11,7 @@ use model::units::Px;
 use model::window::Side;
 use slotmap::Key as _;
 use state::view::layout::PaneId;
-use state::view::panes::{self, Dragged, DropOn, Zone};
+use state::view::panes::{self, Dragged, DropOn, PanePoint, Zone};
 
 use super::Workspace;
 use super::sidebar::DraggedEntry;
@@ -53,9 +54,24 @@ impl Workspace {
                     this.hover_drop(pane, event.bounds, event.event.position, cx)
                 }),
             )
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    this.hover_drop(pane, event.bounds, event.event.position, cx)
+                }),
+            )
             .on_drop(
                 cx.listener(move |this, dragged: &DraggedEntry, window, cx| {
                     this.drop_on_pane(pane, Dragged::File(dragged.path.clone()), window, cx)
+                }),
+            )
+            .on_drop(
+                cx.listener(move |this, dropped: &ExternalPaths, window, cx| {
+                    // Each file lands where the pointer let go; the zone is read again for each.
+                    let zone = this.drop_zone;
+                    for path in dropped.paths() {
+                        this.drop_zone = zone;
+                        this.drop_on_pane(pane, Dragged::Outside(path.clone()), window, cx)
+                    }
                 }),
             )
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
@@ -85,7 +101,7 @@ impl Workspace {
                 f32::from(position.x - bounds.origin.x),
                 f32::from(position.y - bounds.origin.y),
             );
-            (pane, Zone::at(at, viewport))
+            (pane, Zone::at(PanePoint { at, viewport }))
         });
         let before = self.drop_zone;
         self.drop_zone = match (over, before) {
@@ -107,11 +123,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let zone = match self.drop_zone.take() {
-            Some((over, zone)) if over == pane => zone,
-            Some(_) | None => Zone::Centre,
+        // Without a hover seen over this pane, the drop goes to the end of its tabs.
+        let on = match self.drop_zone.take() {
+            Some((over, zone)) if over == pane => DropOn::Pane { pane, zone },
+            Some(_) | None => DropOn::Tabs {
+                pane,
+                at: (self.state.layout.panes().get(pane)).map_or(0, |shown| shown.items().len()),
+            },
         };
-        let on = DropOn::Pane { pane, zone };
         panes::dropped(&mut self.state, dragged, on, &mut self.effects);
         window.focus(&self.focus, cx);
         self.changed(cx);
@@ -141,7 +160,7 @@ impl Workspace {
 fn overlay(zone: Zone, color: Hsla) -> Div {
     let tint = div().absolute().bg(color);
     match zone {
-        Zone::Centre => tint.top_0().left_0().size_full(),
+        Zone::Centre(_) => tint.top_0().left_0().size_full(),
         Zone::Edge(Side::Left) => tint.top_0().left_0().h_full().w(relative(0.5)),
         Zone::Edge(Side::Right) => tint.top_0().right_0().h_full().w(relative(0.5)),
         Zone::Edge(Side::Up) => tint.top_0().left_0().w_full().h(relative(0.5)),

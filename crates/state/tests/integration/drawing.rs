@@ -4,13 +4,15 @@ use std::time::Duration;
 use ink::doc::{Drawing, LayerIndex, PageIndex, PageLayer};
 use ink::input::Pressure;
 use model::geom::{Pane, Point};
+use model::mode::Mode;
 use model::notice::Notice;
-use model::sheet::{Fit, PageIndex as Page, Viewport, Zoom};
+use model::sheet::{Fit, Measure, PageIndex as Page, Viewport, Zoom};
 use model::units::Px;
 use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
 use state::drawing::{self as drawing, InkTabs};
 use state::input::{self, keymap::Context};
 use state::project::session;
+use state::view::sheet;
 use state::view::tab::Tab;
 
 use crate::harness::Harness;
@@ -22,6 +24,13 @@ const FIRST: PageLayer = PageLayer {
 
 fn viewport() -> Viewport {
     Viewport::new(Px(800.0), Px(600.0)).unwrap()
+}
+
+fn measure() -> Measure {
+    Measure {
+        viewport: viewport(),
+        line: Px(20.0),
+    }
 }
 
 fn sample(at: Point<Pane>, ms: u64) -> PenSample {
@@ -48,14 +57,14 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             tab.view.frame(viewport()).to_pane.apply(Point::new(x, y))
         }
-        Some(Tab::Text(_)) | None => panic!("no drawing is focused"),
+        Some(Tab::Text(_) | Tab::Image(_)) | None => panic!("no drawing is focused"),
     }
 }
 
 /// One stroke through `points` on the focused pane, in sheet coordinates.
 fn draw(h: &mut Harness, stylus: Stylus, points: &[(f32, f32)]) {
     let pane = h.state.layout.focus();
-    h.run(|state, _| drawing::measured(state, pane, viewport()));
+    h.run(|state, _| sheet::measured(state, pane, measure()));
     let points: Vec<Point<Pane>> = points.iter().map(|at| on_pane(h, *at)).collect();
     let last = points.len() - 1;
     for (index, &at) in points.iter().enumerate() {
@@ -88,7 +97,7 @@ fn marks(h: &Harness) -> usize {
             let drawing = h.state.boards[tab.file()].edited.drawing();
             drawing.marks(LayerIndex(0)).unwrap().len()
         }
-        Some(Tab::Text(_)) | None => panic!("no drawing is focused"),
+        Some(Tab::Text(_) | Tab::Image(_)) | None => panic!("no drawing is focused"),
     }
 }
 
@@ -118,7 +127,11 @@ fn a_stroke_on_a_page_is_drawn_and_saved() {
     assert!(modified(&h));
     h.keys(":w<ret>");
     assert!(!modified(&h));
-    let saved = ink::format::read_paged(&fs::read(dir.path().join("notes.pdt")).unwrap()).unwrap();
+    let saved = ink::format::read_paged(
+        &fs::read(dir.path().join("notes.pdt")).unwrap(),
+        &h.state.fonts,
+    )
+    .unwrap();
     assert_eq!(saved.marks(FIRST).unwrap().len(), 1);
 }
 
@@ -196,7 +209,11 @@ fn a_board_takes_strokes_anywhere() {
     );
     assert_eq!(marks(&h), 1);
     h.keys(":w<ret>");
-    let saved = ink::format::read_board(&fs::read(dir.path().join("plan.bdt")).unwrap()).unwrap();
+    let saved = ink::format::read_board(
+        &fs::read(dir.path().join("plan.bdt")).unwrap(),
+        &h.state.fonts,
+    )
+    .unwrap();
     assert_eq!(saved.marks(LayerIndex(0)).unwrap().len(), 1);
 }
 
@@ -319,7 +336,7 @@ fn panning_stops_at_the_last_page() {
     let mut h = Harness::new(dir.path());
     h.keys(":o notes.pdt<ret>o");
     let pane = h.state.layout.focus();
-    h.run(|state, _| drawing::measured(state, pane, viewport()));
+    h.run(|state, _| sheet::measured(state, pane, measure()));
     for _ in 0..200 {
         h.keys("j");
     }
@@ -425,7 +442,11 @@ fn a_rectangle_is_dragged_out_and_saved() {
     draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 200.0)));
     assert_eq!(marks(&h), 1);
     h.keys(":w<ret>");
-    let saved = ink::format::read_paged(&fs::read(dir.path().join("notes.pdt")).unwrap()).unwrap();
+    let saved = ink::format::read_paged(
+        &fs::read(dir.path().join("notes.pdt")).unwrap(),
+        &h.state.fonts,
+    )
+    .unwrap();
     let (_, mark) = saved.marks(FIRST).unwrap().iter().next().unwrap();
     assert!(matches!(
         &mark.ink,
@@ -501,4 +522,258 @@ fn a_box_selects_what_it_holds_and_moves_it() {
     let after = board_bounds(&h);
     assert!((after[0].min().y - before[0].min().y - 40.0).abs() < 1e-2);
     assert_eq!(after[1], before[1], "the stroke outside the box stays");
+}
+
+/// The text of every text mark on the focused paged document's first page and layer.
+fn texts(h: &Harness) -> Vec<String> {
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(InkTabs::Paged(tab))) => {
+            let drawing = h.state.pageds[tab.file()].edited.drawing();
+            (drawing.marks(FIRST).unwrap().iter())
+                .filter_map(|(_, mark)| match &mark.ink {
+                    ink::doc::Ink::Text(text) => Some(text.text.to_string()),
+                    ink::doc::Ink::Stroke(_)
+                    | ink::doc::Ink::Shape(_)
+                    | ink::doc::Ink::Image(_) => None,
+                })
+                .collect()
+        }
+        Some(_) | None => panic!("a paged drawing is focused"),
+    }
+}
+
+fn typing(h: &Harness) -> bool {
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(ink)) => ink.typed().is_some(),
+        Some(_) | None => false,
+    }
+}
+
+/// A tap with the pen's tip at sheet point `at`.
+fn tap(h: &mut Harness, at: (f32, f32)) {
+    draw(h, Stylus::Tip, &[at, at]);
+}
+
+#[test]
+fn a_tap_with_the_text_tool_types_text_that_esc_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    assert!(typing(&h));
+    assert_eq!(h.state.input.mode, Mode::Insert);
+    h.keys("Hello<ret>world");
+    assert_eq!(
+        texts(&h),
+        Vec::<String>::new(),
+        "nothing is kept while typing"
+    );
+    h.keys("<esc>bdithere<esc><esc>");
+    assert!(!typing(&h));
+    assert_eq!(h.state.input.mode, Mode::Normal);
+    assert_eq!(texts(&h), ["Hello\nthere"]);
+    assert!(modified(&h));
+}
+
+#[test]
+fn blank_text_adds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("  <esc><esc>");
+    assert_eq!(texts(&h), Vec::<String>::new());
+    assert!(!modified(&h));
+}
+
+#[test]
+fn a_text_mark_opens_again_and_its_edit_undoes_as_one_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("first<esc><esc>");
+    tap(&mut h, (104.0, 106.0));
+    assert!(typing(&h), "a press on the mark opens it");
+    h.keys("<esc>bcsecond<esc>");
+    // Undo while typing undoes the typing.
+    h.keys("u");
+    assert_eq!(typed_text(&h), "first");
+    h.keys("U<esc>");
+    assert_eq!(texts(&h), ["second"]);
+    h.keys("u");
+    assert_eq!(texts(&h), ["first"], "the edit undoes as one step");
+}
+
+#[test]
+fn emptying_a_text_mark_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("gone<esc><esc>");
+    tap(&mut h, (104.0, 106.0));
+    h.keys("<esc>%d<esc>");
+    assert_eq!(texts(&h), Vec::<String>::new());
+}
+
+#[test]
+fn a_drag_with_the_text_tool_wraps_text_at_its_width() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (160.0, 100.0)));
+    h.keys("several words that wrap<esc><esc>");
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(InkTabs::Paged(tab))) => {
+            let drawing = h.state.pageds[tab.file()].edited.drawing();
+            let (_, mark) = drawing.marks(FIRST).unwrap().iter().next().unwrap();
+            let ink::doc::Ink::Text(text) = &mark.ink else {
+                panic!("a text mark");
+            };
+            let ink::text::Wrap::At(width) = text.wrap else {
+                panic!("wrapped");
+            };
+            assert!((width.get() - 60.0).abs() < 1.0, "{}", width.get());
+            assert!(mark.bounds().max().x <= 160.0 + 1.0, "{:?}", mark.bounds());
+        }
+        Some(_) | None => panic!("a paged drawing is focused"),
+    }
+}
+
+#[test]
+fn text_marks_are_saved_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("kept<esc><esc>:w<ret>");
+    let mut again = Harness::new(dir.path());
+    again.keys(":o notes.pdt<ret>");
+    assert_eq!(texts(&again), ["kept"]);
+}
+
+fn typed_text(h: &Harness) -> String {
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(ink)) => String::from(&ink.typed().expect("typing").doc.text),
+        Some(_) | None => panic!("a drawing is focused"),
+    }
+}
+
+#[test]
+fn keys_go_to_the_text_until_esc_or_a_press_elsewhere_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    // `b` moves in the text rather than picking the brush.
+    h.keys("one two<esc>bd");
+    assert_eq!(typed_text(&h), "one ");
+    h.keys("<esc>");
+    assert_eq!(texts(&h), ["one "]);
+    h.keys("b");
+    tap(&mut h, (100.0, 300.0));
+    assert!(!typing(&h), "the brush draws rather than types");
+    h.keys("tt");
+    tap(&mut h, (100.0, 300.0));
+    h.keys("two");
+    draw(&mut h, Stylus::Tip, &line((300.0, 400.0), (400.0, 400.0)));
+    assert_eq!(texts(&h), ["one ", "two"]);
+    assert!(typing(&h), "the text tool starts new text where it pressed");
+}
+
+/// The image marks on the focused paged document's first page and layer, with their bounds.
+fn images(h: &Harness) -> Vec<(Vec<u8>, ink::geom::Rect<ink::geom::Surface>)> {
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(InkTabs::Paged(tab))) => {
+            let drawing = h.state.pageds[tab.file()].edited.drawing();
+            (drawing.marks(FIRST).unwrap().iter())
+                .filter_map(|(_, mark)| match &mark.ink {
+                    ink::doc::Ink::Image(image) => Some((image.encoded.to_vec(), mark.bounds())),
+                    ink::doc::Ink::Stroke(_) | ink::doc::Ink::Shape(_) | ink::doc::Ink::Text(_) => {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Some(_) | None => panic!("a paged drawing is focused"),
+    }
+}
+
+#[test]
+fn an_image_is_placed_in_the_middle_of_the_view_and_undoes() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(400, 200)
+        .save(dir.path().join("photo.png"))
+        .unwrap();
+    let bytes = fs::read(dir.path().join("photo.png")).unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>:image photo.png<ret>");
+    let centre = view(&h).centre.at;
+    let placed = images(&h);
+    assert_eq!(placed.len(), 1);
+    let (encoded, bounds) = &placed[0];
+    assert_eq!(*encoded, bytes, "the file's own bytes are kept");
+    // 400 pixels at three quarters of a point each.
+    assert!(
+        (bounds.max().x - bounds.min().x - 300.0).abs() < 0.01,
+        "{bounds:?}"
+    );
+    assert!(
+        (bounds.max().y - bounds.min().y - 150.0).abs() < 0.01,
+        "{bounds:?}"
+    );
+    let middle = bounds.min().lerp(bounds.max(), 0.5);
+    assert!((middle.x - centre.x).abs() < 0.01 && (middle.y - centre.y).abs() < 0.01);
+    h.keys("u");
+    assert!(images(&h).is_empty());
+}
+
+#[test]
+fn a_wide_image_is_narrowed_to_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(4000, 1000)
+        .save(dir.path().join("wide.png"))
+        .unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>:image wide.png<ret>");
+    let (_, bounds) = &images(&h)[0];
+    let width = ink::doc::PageSize::A4.width.get() * 0.8;
+    assert!(
+        (bounds.max().x - bounds.min().x - width).abs() < 0.01,
+        "{bounds:?}"
+    );
+    assert!(
+        (bounds.max().y - bounds.min().y - width / 4.0).abs() < 0.01,
+        "{bounds:?}"
+    );
+}
+
+#[test]
+fn images_are_refused_outside_drawings_and_notes_and_for_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("broken.png"), "not a png").unwrap();
+    fs::write(dir.path().join("notes.txt"), "text\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.txt<ret>:image broken.png<ret>");
+    assert!(matches!(h.state.notice, Some(Notice::NoImagesHere)));
+    h.keys(":o notes.pdt<ret>:image notes.txt<ret>");
+    assert!(matches!(h.state.notice, Some(Notice::NotAnImage { .. })));
+    h.keys(":image broken.png<ret>");
+    assert!(matches!(h.state.notice, Some(Notice::Unreadable { .. })));
+    assert!(images(&h).is_empty());
+}
+
+#[test]
+fn images_are_saved_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(40, 20)
+        .save(dir.path().join("photo.png"))
+        .unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>:image photo.png<ret>:w<ret>");
+    let kept = images(&h);
+    let mut again = Harness::new(dir.path());
+    again.keys(":o notes.pdt<ret>");
+    assert_eq!(images(&again), kept);
 }

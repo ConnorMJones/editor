@@ -13,12 +13,12 @@ use state::render::typeset::Render;
 use state::text::buffer::BufferId;
 use state::view::layout::PaneId;
 
-use super::super::raster::svg_canvas;
 use super::super::update;
 use super::Draw;
 use super::Ink;
 use super::media::figure_element;
 use crate::fonts::{Fonts, hsla};
+use crate::pictures::picture_canvas;
 use crate::workspace::Workspace;
 
 /// Follows link `link` of block `index`'s text, looked up again at click time.
@@ -133,7 +133,7 @@ pub fn inline(draw: &Draw, text: &Inline, index: usize, ink: Ink, base: Modifier
                                 .flex_none()
                                 .pb(px(deepest - depth(svg)))
                                 .child(
-                                    svg_canvas(draw.rasters, &draw.workspace, svg)
+                                    picture_canvas(draw.pictures, &draw.workspace, svg.picture())
                                         .w(px(Px::from(svg.width).0))
                                         .h(px(Px::from(svg.height).0)),
                                 )

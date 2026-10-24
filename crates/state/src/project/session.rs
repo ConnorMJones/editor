@@ -22,6 +22,7 @@ use crate::view::layout::{
     SplitError, Tabs,
 };
 use crate::view::tab::{Beside, NoMode, Opened, Showing, Tab, TextTabs};
+use crate::viewer::ImageTab;
 use crate::{Effect, Files, Focus, Sidebar, SidebarWidth, State};
 use ink::doc::LayerIndex;
 use model::command::Shown;
@@ -61,7 +62,13 @@ pub enum SessionNode {
 /// A saved tab's view, read into its kind: text's mode, ranges, primary and scroll, or a drawing's.
 enum Restoring {
     Text(SessionMode, Vec<[usize; 2]>, usize, usize),
+    Reopen(Reopen),
+}
+
+/// A saved tab rebuilt from its file once read: a drawing, or an image.
+enum Reopen {
     Drawing(drawing::Saved),
+    Image(SheetView),
 }
 
 /// `active` and `preview` index into `tabs`.
@@ -112,6 +119,8 @@ pub enum SessionView {
         y: f32,
         zoom: f32,
     },
+    /// `x` and `y` are the point on the image at the pane's centre.
+    Image { x: f32, y: f32, fit: Fit, zoom: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +228,12 @@ pub fn snapshot(state: &State) -> Session {
                                 layer: tab.hand.layer.0,
                                 x: tab.view.centre.x,
                                 y: tab.view.centre.y,
+                                zoom: tab.view.zoom.get(),
+                            },
+                            Tab::Image(tab) => SessionView::Image {
+                                x: tab.view.centre.at.x,
+                                y: tab.view.centre.at.y,
+                                fit: tab.view.fit,
                                 zoom: tab.view.zoom.get(),
                             },
                         },
@@ -344,7 +359,7 @@ pub fn restore(
                     y,
                     fit,
                     zoom,
-                } => Restoring::Drawing(drawing::Saved::Paged {
+                } => Restoring::Reopen(Reopen::Drawing(drawing::Saved::Paged {
                     layer: LayerIndex(layer),
                     view: SheetView {
                         centre: Spot {
@@ -354,26 +369,48 @@ pub fn restore(
                         fit,
                         zoom: Zoom::clamped(zoom),
                     },
-                }),
+                })),
                 SessionView::Board { layer, x, y, zoom } => {
-                    Restoring::Drawing(drawing::Saved::Board {
+                    Restoring::Reopen(Reopen::Drawing(drawing::Saved::Board {
                         layer: LayerIndex(layer),
                         view: PlaneView {
                             centre: Point::new(x, y),
                             zoom: Zoom::clamped(zoom),
                         },
-                    })
+                    }))
+                }
+                SessionView::Image { x, y, fit, zoom } => {
+                    Restoring::Reopen(Reopen::Image(SheetView {
+                        centre: Spot {
+                            page: PageIndex(0),
+                            at: Point::new(x, y),
+                        },
+                        fit,
+                        zoom: Zoom::clamped(zoom),
+                    }))
                 }
             };
             let (mode, ranges, primary, scroll) = match restoring {
                 Restoring::Text(mode, ranges, primary, scroll) => (mode, ranges, primary, scroll),
-                Restoring::Drawing(saved) => {
+                Restoring::Reopen(reopen) => {
                     match path.is_file() {
                         true => {}
                         false => continue,
                     }
                     let tab = match apply::read_now(state, &path, out) {
-                        Ok(opened) => drawing::reopen(state, opened, saved).ok_or(wrong_kind)?,
+                        Ok(opened) => match (reopen, opened) {
+                            (Reopen::Drawing(saved), opened) => {
+                                drawing::reopen(state, opened, saved)
+                            }
+                            (Reopen::Image(view), Opened::Image(id)) => {
+                                Some(Tab::Image(ImageTab::new(id, view)))
+                            }
+                            (
+                                Reopen::Image(_),
+                                Opened::Text(_) | Opened::Paged(_) | Opened::Board(_),
+                            ) => None,
+                        }
+                        .ok_or(wrong_kind)?,
                         Err(notice) => {
                             state.notice = Some(notice);
                             continue;
@@ -396,7 +433,9 @@ pub fn restore(
                 (_, true, _) | (SessionMode::Diff, false, false) => {
                     match apply::read_now(state, &path, out) {
                         Ok(Opened::Text(buffer)) => buffer,
-                        Ok(Opened::Paged(_) | Opened::Board(_)) => return Err(wrong_kind),
+                        Ok(Opened::Paged(_) | Opened::Board(_) | Opened::Image(_)) => {
+                            return Err(wrong_kind);
+                        }
                         Err(notice) => {
                             state.notice = Some(notice);
                             continue;

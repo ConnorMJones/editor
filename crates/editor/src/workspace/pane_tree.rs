@@ -16,6 +16,7 @@ use state::view::tab::{Beside, Share, Showing, Tab};
 use super::{Drag, Workspace};
 use crate::drawing::{self, DrawingElement};
 use crate::fonts::hsla;
+use crate::sheet::SheetElement;
 use crate::text::TextElement;
 use state::view::draws::Part;
 
@@ -165,6 +166,10 @@ impl Workspace {
                                 pane,
                             }),
                     ),
+                    Some(Tab::Image(_)) => div().flex_1().min_h_0().child(SheetElement {
+                        workspace: cx.entity(),
+                        pane,
+                    }),
                     Some(Tab::Text(view)) => {
                         match view.showing() {
                             Showing::Source(_) => div()

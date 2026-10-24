@@ -1,14 +1,14 @@
 //! Typst rendered as fixed pages.
 
 use helix_core::SmallVec;
-use model::command::{Direction, PagesCommand, ReadMove, Shown, ZoomBy};
+use model::command::{ReadMove, Shown};
 use model::config::OpenAs;
 use model::geom::{self, Point, Vector};
 use model::job::Busy;
 use model::notice::Notice;
-use model::sheet::{Fit, PageIndex, SheetView, Spot, Viewport, Zoom};
+use model::sheet::{Measure, PageIndex, SheetView, Spot, Viewport};
 use model::typeset::{LineColumn, Origin, PagePoint, SourceFile};
-use model::units::{Pt, Px};
+use model::units::Pt;
 use slotmap::SecondaryMap;
 
 use crate::project::Project;
@@ -37,13 +37,6 @@ pub struct PagesState {
 pub enum Locating {
     Settled,
     Line(usize),
-}
-
-/// A pane's size and its line height, as the host drew it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Measure {
-    pub viewport: Viewport,
-    pub line: Px,
 }
 
 /// The source cursor a split's pages last went to.
@@ -156,38 +149,6 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
 }
 
-/// The host drew `pane`'s pages view at `measure`.
-pub fn measured(state: &mut State, pane: PaneId, measure: Measure) {
-    match state.layout.pages_mut(pane) {
-        Some((_, view, _)) => view.last = Some(measure),
-        None => {}
-    }
-}
-
-/// The wheel moved `pane`'s pages by `by`, or zoomed them by `factor` about a point.
-pub fn wheeled(state: &mut State, pane: PaneId, wheel: Wheel, viewport: Viewport) {
-    let State {
-        layout, compiles, ..
-    } = state;
-    let Some((text, view, _)) = layout.pages_mut(pane) else {
-        return;
-    };
-    let Some(Compiled { stack, .. }) = compiles.get(text.buffer()).and_then(|t| t.pages.as_ref())
-    else {
-        return;
-    };
-    match wheel {
-        Wheel::Pan(by) => view.view.pan(stack, viewport, by),
-        Wheel::Zoom { at, factor } => view.view.zoom_about(stack, viewport, at, factor),
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Wheel {
-    Pan(Vector<geom::Pane>),
-    Zoom { at: Point<geom::Pane>, factor: f32 },
-}
-
 /// Keys move by the host's lines and viewports; before the first draw or compile they wait.
 pub fn moved(view: &mut PagesState, typst: Option<&Typst>, motion: ReadMove) {
     let Some(Compiled { stack, .. }) = typst.and_then(|typst| typst.pages.as_ref()) else {
@@ -209,45 +170,6 @@ pub fn moved(view: &mut PagesState, typst: Option<&Typst>, motion: ReadMove) {
 
 fn viewport(view: &PagesState) -> Option<Viewport> {
     view.last.map(|measure| measure.viewport)
-}
-
-pub fn command(state: &mut State, command: PagesCommand) {
-    let focus = state.layout.focus();
-    let State {
-        layout, compiles, ..
-    } = state;
-    let Some((text, view, _)) = layout.pages_mut(focus) else {
-        return;
-    };
-    match command {
-        PagesCommand::Fit => {
-            view.view.fit = match view.view.fit {
-                Fit::Width => Fit::Height,
-                Fit::Height => Fit::Width,
-            }
-        }
-        PagesCommand::Zoom(by) => {
-            view.view.zoom = match by {
-                ZoomBy::In => view.view.zoom.by(Zoom::STEP),
-                ZoomBy::Out => view.view.zoom.by(1.0 / Zoom::STEP),
-                ZoomBy::Reset => Zoom::ONE,
-            }
-        }
-        PagesCommand::Pan(direction) => {
-            let pages = compiles.get(text.buffer()).and_then(|t| t.pages.as_ref());
-            match (pages, view.last) {
-                (Some(Compiled { stack, .. }), Some(Measure { viewport, line })) => {
-                    let across = match direction {
-                        Direction::Forward => line.0,
-                        Direction::Backward => -line.0,
-                    };
-                    view.view.pan(stack, viewport, Vector::new(across, 0.0))
-                }
-                // Not compiled or drawn yet.
-                (None, _) | (_, None) => {}
-            }
-        }
-    }
 }
 
 /// A click at `at` on `pane`'s pages view drawn at `viewport`; the typesetter says where a

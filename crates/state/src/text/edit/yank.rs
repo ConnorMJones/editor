@@ -8,7 +8,7 @@ use model::mode::Mode;
 use model::notice::Notice;
 use model::register::Register;
 
-use crate::apply::{commit_focused, count_of, edit, exit_select_mode, focused_text};
+use crate::apply::{FocusedText, commit_focused, count_of, edit, exit_select_mode, focused_text};
 use crate::text::registers::{self, ClipboardUse, Values};
 use crate::{Effect, State};
 
@@ -22,7 +22,8 @@ pub enum Yank {
 }
 
 pub fn yank(state: &mut State, register: Register, yank: Yank, out: &mut Vec<Effect>) {
-    let Some((view, doc)) = focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
+    let Some(FocusedText { view, doc }) =
+        focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
     else {
         return;
     };

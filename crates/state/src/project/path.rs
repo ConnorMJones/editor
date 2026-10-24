@@ -3,6 +3,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
+use model::picture::Encoding;
+
 /// `/`-separated UTF-8 under the root with only normal components; never the root itself.
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -65,6 +67,11 @@ impl RelPath {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The last component.
+    pub fn file_name(&self) -> &str {
+        self.0.rsplit('/').next().unwrap_or(&self.0)
     }
 
     /// `name` must be a single normal component.
@@ -230,6 +237,7 @@ pub enum FileKind {
     Text(TextKind),
     Paged,
     Board,
+    Image(Encoding),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,12 +249,14 @@ pub enum TextKind {
 
 impl FileKind {
     pub fn of(path: &Path) -> FileKind {
-        match path.extension().and_then(|extension| extension.to_str()) {
-            Some("md" | "markdown") => FileKind::Text(TextKind::Markdown),
-            Some("typ") => FileKind::Text(TextKind::Typst),
-            Some("pdt") => FileKind::Paged,
-            Some("bdt") => FileKind::Board,
-            Some(_) | None => FileKind::Text(TextKind::Code),
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        match (Encoding::of_path(path), extension) {
+            (Some(encoding), _) => FileKind::Image(encoding),
+            (None, Some("md" | "markdown")) => FileKind::Text(TextKind::Markdown),
+            (None, Some("typ")) => FileKind::Text(TextKind::Typst),
+            (None, Some("pdt")) => FileKind::Paged,
+            (None, Some("bdt")) => FileKind::Board,
+            (None, Some(_) | None) => FileKind::Text(TextKind::Code),
         }
     }
 }

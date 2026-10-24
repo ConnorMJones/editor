@@ -14,5 +14,6 @@ mod session;
 mod tabs;
 mod typeset;
 mod vault;
+mod viewer;
 mod window;
 mod workspace;

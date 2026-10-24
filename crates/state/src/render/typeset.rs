@@ -19,11 +19,14 @@ use crate::project::path::TextKind;
 use crate::render::document::Documents;
 #[cfg(feature = "typeset")]
 use crate::render::markdown::FigureKind;
-use crate::render::markdown::{Block, BlockKind, Figure, SpanKind};
+use crate::render::markdown::{
+    Block, BlockKind, Embed, EmbedKind, Figure, Image, ImageFile, LocalImage, SpanKind,
+};
 use crate::render::pages::{self, Compiles, Locating};
 use crate::text::buffer::{Buffer, BufferId};
 use crate::view::layout::PaneId;
 use crate::view::tab::{BesideMut, ShowingMut, TextTabs};
+use crate::viewer::{ProbeError, Probed};
 use crate::{Effect, State};
 use model::job::Busy;
 
@@ -101,19 +104,21 @@ pub enum Done {
     },
 }
 
-/// Typeset figures by content, in one look.
+/// What documents show that is made off the UI thread: figures typeset by content in one look,
+/// and the sizes of image files.
 pub struct Figures {
     pub look: Look,
-    pub entries: HashMap<Figure, Entry>,
+    pub entries: HashMap<Figure, Entry<Render>>,
+    pub images: HashMap<LocalImage, Entry<Probe>>,
     /// Bumped when an entry fills; eviction leaves it, as no parse references an evicted entry.
     pub generation: u64,
     /// Bumped by every reference walk; entries seen by the latest walk are live.
     pub clock: u64,
 }
 
-pub struct Entry {
-    pub render: Render,
-    /// `Figures::clock` of the last walk that found the figure in a parsed document.
+pub struct Entry<R> {
+    pub render: R,
+    /// `Figures::clock` of the last walk that found the entry in a parsed document.
     pub used: u64,
     /// `Figures::generation` when the render arrived; 0 while pending.
     pub filled: u64,
@@ -126,11 +131,19 @@ pub enum Render {
     Failed(Arc<str>),
 }
 
+#[derive(Clone, Debug)]
+pub enum Probe {
+    Pending,
+    Read(Probed),
+    Failed(Arc<str>),
+}
+
 impl Figures {
     pub fn new(look: Look) -> Figures {
         Figures {
             look,
             entries: HashMap::new(),
+            images: HashMap::new(),
             generation: 0,
             clock: 0,
         }
@@ -138,6 +151,10 @@ impl Figures {
 
     pub fn get(&self, figure: Figure) -> Option<&Render> {
         self.entries.get(&figure).map(|entry| &entry.render)
+    }
+
+    pub fn image(&self, image: &LocalImage) -> Option<&Probe> {
+        self.images.get(image).map(|entry| &entry.render)
     }
 }
 
@@ -214,12 +231,30 @@ pub fn each_figure(blocks: &[Block], mut f: impl FnMut(Figure, &str)) {
     }
 }
 
-/// Requests new figures and evicts the oldest unreferenced ones beyond `SPARE`.
+/// Each image file shown on its own in `blocks`.
+pub fn each_image(blocks: &[Block], mut f: impl FnMut(&LocalImage)) {
+    for block in blocks {
+        match &block.kind {
+            BlockKind::Image(Image {
+                file: ImageFile::Local(local),
+                ..
+            })
+            | BlockKind::Embed(Embed {
+                kind: EmbedKind::Image(ImageFile::Local(local)),
+                ..
+            }) => f(local),
+            _ => {}
+        }
+    }
+}
+
+/// Requests new figures and image sizes, and evicts the oldest unreferenced beyond `SPARE`.
 pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>) {
     figures.clock += 1;
     let Figures {
         look,
         entries,
+        images,
         clock,
         ..
     } = figures;
@@ -228,14 +263,12 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
             match entries.get_mut(&figure) {
                 Some(entry) => entry.used = *clock,
                 None => {
-                    entries.insert(
-                        figure,
-                        Entry {
-                            render: Render::Pending,
-                            used: *clock,
-                            filled: 0,
-                        },
-                    );
+                    let entry = Entry {
+                        render: Render::Pending,
+                        used: *clock,
+                        filled: 0,
+                    };
+                    entries.insert(figure, entry);
                     out.push(Effect::Typeset(Request::Figure {
                         figure,
                         look: *look,
@@ -244,16 +277,31 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
                 }
             }
         });
+        each_image(&markdown.blocks, |local| match images.get_mut(local) {
+            Some(entry) => entry.used = *clock,
+            None => {
+                let entry = Entry {
+                    render: Probe::Pending,
+                    used: *clock,
+                    filled: 0,
+                };
+                images.insert(local.clone(), entry);
+                out.push(Effect::Job(Job::Probe(local.clone())));
+            }
+        });
     }
-    let unreferenced = entries
-        .values()
-        .filter(|entry| entry.used != *clock)
-        .count();
+    evict(entries, *clock);
+    evict(images, *clock);
+}
+
+/// Drops the oldest entries the walk at `clock` didn't reach, keeping `SPARE` of them.
+fn evict<K, R>(entries: &mut HashMap<K, Entry<R>>, clock: u64) {
+    let unreferenced = entries.values().filter(|entry| entry.used != clock).count();
     match unreferenced > SPARE {
         false => {}
         true => {
             let mut ages: Vec<u64> = (entries.values())
-                .filter(|entry| entry.used != *clock)
+                .filter(|entry| entry.used != clock)
                 .map(|entry| entry.used)
                 .collect();
             let cut = unreferenced - SPARE;
@@ -268,6 +316,29 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
                 (true, 0) | (false, _) => true,
             });
         }
+    }
+}
+
+/// Takes an image's size; a size for an image no longer shown is dropped.
+pub fn probed(figures: &mut Figures, image: LocalImage, result: Result<Probed, ProbeError>) {
+    match figures.images.get_mut(&image) {
+        Some(
+            entry @ Entry {
+                render: Probe::Pending,
+                ..
+            },
+        ) => {
+            entry.render = match result {
+                Ok(probed) => Probe::Read(probed),
+                Err(error) => {
+                    tracing::debug!(path = ?image.path, %error, "image size unreadable");
+                    Probe::Failed(Arc::from(error.to_string()))
+                }
+            };
+            figures.generation += 1;
+            entry.filled = figures.generation;
+        }
+        Some(_) | None => {}
     }
 }
 
@@ -571,6 +642,17 @@ pub fn invalidate(compiles: &mut Compiles, paths: &[PathBuf]) {
     let read = |typst: &&mut Typst| typst.deps.iter().any(|dep| paths.contains(dep));
     for typst in compiles.values_mut().filter(read) {
         typst.requested = None;
+    }
+}
+
+/// Reads again the size of each shown image among `paths`.
+pub fn reprobe(figures: &mut Figures, paths: &[PathBuf], out: &mut Vec<Effect>) {
+    let changed = |(image, _): &(&LocalImage, &mut Entry<Probe>)| {
+        paths.iter().any(|path| *path == *image.path)
+    };
+    for (image, entry) in figures.images.iter_mut().filter(changed) {
+        entry.render = Probe::Pending;
+        out.push(Effect::Job(Job::Probe(image.clone())));
     }
 }
 

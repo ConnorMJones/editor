@@ -6,4 +6,5 @@ pub mod layout;
 pub mod mode;
 pub mod panes;
 pub mod scroll;
+pub mod sheet;
 pub mod tab;

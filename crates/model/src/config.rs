@@ -137,6 +137,16 @@ pub enum OpenAs {
 #[serde(deny_unknown_fields, default)]
 pub struct WindowConfig {
     pub title_bar: TitleBar,
+    pub sidebar: SidebarSide,
+}
+
+/// Which side of the panes the file tree and the Changes list sit on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSide {
+    Left,
+    #[default]
+    Right,
 }
 
 /// The drawn title bar; GNOME offers no server-side one, so hiding it leaves Super+drag to move.

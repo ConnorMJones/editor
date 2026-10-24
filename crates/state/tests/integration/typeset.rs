@@ -289,11 +289,11 @@ fn pages_fit_the_pane_and_keys_move_between_them() {
     let (_dir, mut h) = open("main.typ", DOC);
     h.keys("<space>V");
     let pane = h.state.layout.focus();
-    let measure = pages::Measure {
+    let measure = model::sheet::Measure {
         viewport: model::sheet::Viewport::new(Px(600.0), Px(400.0)).unwrap(),
         line: Px(20.0),
     };
-    h.run(|state, _| pages::measured(state, pane, measure));
+    h.run(|state, _| state::view::sheet::measured(state, pane, measure));
     let view = |h: &Harness| {
         h.state
             .layout

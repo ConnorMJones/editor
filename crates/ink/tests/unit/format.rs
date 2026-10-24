@@ -9,7 +9,7 @@ use ink::geom::{Affine, Local, Point};
 use ink::input::{Elapsed, Model, Sample};
 use model::color::Rgb;
 
-use crate::{brush, sample, wave, window};
+use crate::{brush, fonts, sample, wave, window};
 
 fn stroke(samples: Vec<Sample<Local>>, brush: Brush, placement: Placement) -> Mark {
     crate::mark(Geometry::new(samples.into(), brush).unwrap(), placement)
@@ -86,7 +86,7 @@ fn bytes(paged: &Paged) -> Vec<u8> {
 #[test]
 fn a_document_reads_back_as_written() {
     let written = bytes(&document());
-    let read = read_paged(&written).unwrap();
+    let read = read_paged(&written, &fonts()).unwrap();
     assert_eq!(bytes(&read), written);
     assert_eq!(read.layers(), document().layers());
     let first = read
@@ -127,7 +127,7 @@ fn a_board_reads_back_as_written() {
     let mut written = Vec::new();
     write_board(&board, &mut written);
     let mut again = Vec::new();
-    write_board(&read_board(&written).unwrap(), &mut again);
+    write_board(&read_board(&written, &fonts()).unwrap(), &mut again);
     assert_eq!(again, written);
 }
 
@@ -135,7 +135,10 @@ fn a_board_reads_back_as_written() {
 fn every_cut_short_file_is_refused() {
     let written = bytes(&document());
     for length in 0..written.len() {
-        assert!(read_paged(&written[..length]).is_err(), "length {length}");
+        assert!(
+            read_paged(&written[..length], &fonts()).is_err(),
+            "length {length}"
+        );
     }
 }
 
@@ -144,7 +147,7 @@ fn a_board_is_not_a_paged_document() {
     let mut written = Vec::new();
     write_board(&Board::new(Background::Plain(Rgb::hex(0))), &mut written);
     assert_eq!(
-        read_paged(&written).map(|_| ()),
+        read_paged(&written, &fonts()).map(|_| ()),
         Err(FormatError::Kind("paged document"))
     );
 }
@@ -154,13 +157,13 @@ fn unknown_versions_and_extra_bytes_are_refused() {
     let mut written = bytes(&document());
     written.push(0);
     assert_eq!(
-        read_paged(&written).map(|_| ()),
+        read_paged(&written, &fonts()).map(|_| ()),
         Err(FormatError::Trailing(1))
     );
     written.pop();
     written[4] = 9;
     assert_eq!(
-        read_paged(&written).map(|_| ()),
+        read_paged(&written, &fonts()).map(|_| ()),
         Err(FormatError::Version(9))
     );
 }
@@ -184,7 +187,7 @@ fn an_out_of_range_reading_is_refused() {
         .unwrap();
     written[at..at + 4].copy_from_slice(&2.0f32.to_le_bytes());
     assert!(matches!(
-        read_paged(&written),
+        read_paged(&written, &fonts()),
         Err(FormatError::Pressure(_))
     ));
 }
@@ -238,43 +241,17 @@ fn shapes_read_back_as_written() {
         },
     ];
     let written = board_with(&shapes);
-    let read = read_board(&written).unwrap();
+    let read = read_board(&written, &fonts()).unwrap();
     let mut again = Vec::new();
     write_board(&read, &mut again);
     assert_eq!(again, written);
     let found: Vec<Shape> = (read.marks(LayerIndex(0)).unwrap().iter())
         .filter_map(|(_, mark)| match &mark.ink {
             Ink::Shape(shape) => Some(shape.shape),
-            Ink::Stroke(_) => None,
+            Ink::Stroke(_) | Ink::Text(_) | Ink::Image(_) => None,
         })
         .collect();
     assert_eq!(found, shapes);
-}
-
-#[test]
-fn version_one_reads_strokes_but_not_shapes() {
-    let mut strokes = board_with(&[]);
-    strokes[4..6].copy_from_slice(&1u16.to_le_bytes());
-    assert_eq!(
-        read_board(&strokes)
-            .unwrap()
-            .marks(LayerIndex(0))
-            .unwrap()
-            .len(),
-        1
-    );
-    let mut shapes = board_with(&[Shape::Line {
-        from: Point::new(0.0, 0.0),
-        to: Point::new(1.0, 1.0),
-    }]);
-    shapes[4..6].copy_from_slice(&1u16.to_le_bytes());
-    assert_eq!(
-        read_board(&shapes).map(|_| ()),
-        Err(FormatError::Tag {
-            what: "mark",
-            tag: 1
-        })
-    );
 }
 
 #[test]
@@ -288,7 +265,76 @@ fn a_coordinate_that_is_not_a_number_is_refused() {
         .unwrap();
     written[at..at + 4].copy_from_slice(&f32::INFINITY.to_le_bytes());
     assert_eq!(
-        read_board(&written).map(|_| ()),
+        read_board(&written, &fonts()).map(|_| ()),
         Err(FormatError::NotFinite(f32::INFINITY))
     );
+}
+
+/// A board holding one stroke and a text mark of `text`, wrapped at 120 points.
+fn board_with_text(text: &str) -> Vec<u8> {
+    let mut board = Board::new(Background::Plain(Rgb::hex(0xffffff)));
+    let first = stroke(wave(20), brush(window()), Placement::ALIGNED);
+    board
+        .apply(MarkChange::Add(LayerIndex(0), first).into())
+        .unwrap();
+    board
+        .apply(MarkChange::Add(LayerIndex(0), crate::text::mark(text)).into())
+        .unwrap();
+    let mut written = Vec::new();
+    write_board(&board, &mut written);
+    written
+}
+
+#[test]
+fn text_reads_back_as_written() {
+    let written = board_with_text("Two words\nand a line ✓");
+    let read = read_board(&written, &fonts()).unwrap();
+    let mut again = Vec::new();
+    write_board(&read, &mut again);
+    assert_eq!(again, written);
+    let texts: Vec<&str> = (read.marks(LayerIndex(0)).unwrap().iter())
+        .filter_map(|(_, mark)| match &mark.ink {
+            Ink::Text(text) => Some(&*text.text),
+            Ink::Stroke(_) | Ink::Shape(_) | Ink::Image(_) => None,
+        })
+        .collect();
+    assert_eq!(texts, ["Two words\nand a line ✓"]);
+}
+
+fn image_mark() -> Mark {
+    let ink = ink::doc::ImageInk::new(
+        std::sync::Arc::from(&b"\x89PNG not decoded by ink"[..]),
+        model::picture::Encoding::Bitmap(model::picture::Bitmap::Png),
+        PageSize::new(120.0, 80.0).unwrap(),
+    );
+    Mark {
+        placement: Placement::new(Affine::new([0.0, 1.0, -1.0, 0.0, 300.0, 40.0])).unwrap(),
+        paint: crate::paint(),
+        ink: Ink::Image(std::sync::Arc::new(ink)),
+    }
+}
+
+#[test]
+fn images_read_back_with_their_bytes_and_placement() {
+    let mut board = Board::new(Background::Plain(Rgb::hex(0xffffff)));
+    board
+        .apply(MarkChange::Add(LayerIndex(0), image_mark()).into())
+        .unwrap();
+    let mut written = Vec::new();
+    write_board(&board, &mut written);
+    let read = read_board(&written, &fonts()).unwrap();
+    let mut again = Vec::new();
+    write_board(&read, &mut again);
+    assert_eq!(again, written);
+    let (_, mark) = read.marks(LayerIndex(0)).unwrap().iter().next().unwrap();
+    let Ink::Image(image) = &mark.ink else {
+        panic!("an image mark");
+    };
+    assert_eq!(&*image.encoded, b"\x89PNG not decoded by ink");
+    assert_eq!(image.extent, PageSize::new(120.0, 80.0).unwrap());
+    // Turned a quarter: 80 wide and 120 high on the board, left of x = 300.
+    let bounds = mark.bounds();
+    assert!((bounds.min().x - 220.0).abs() < 0.01 && (bounds.max().y - 160.0).abs() < 0.01);
+    assert!(mark.touches(Point::new(260.0, 100.0), 0.5));
+    assert!(!mark.touches(Point::new(310.0, 100.0), 0.5));
 }

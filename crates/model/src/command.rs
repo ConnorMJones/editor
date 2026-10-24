@@ -105,6 +105,8 @@ pub enum Command {
     PromptCancel,
 
     Open(PathBuf),
+    Image(PathBuf),
+    PasteImage,
     /// `gf`: follows the link, URL or file path under the primary cursor.
     GotoFile,
     Write,
@@ -129,33 +131,23 @@ pub enum Command {
     Tree(TreeCommand),
     Picker(PickerCommand),
 
-    /// Select mode extends to the hunk; past the last or first hunk it opens the next changed file.
     GotoHunk(HunkTarget),
-    /// Acts on the hunks touched by any selection.
     Hunk(HunkOp),
-    /// Paths are relative to the root or absolute.
     File(FileOp),
-    /// Answers the pending confirmation, such as a discard.
     Confirm(Answer),
 
-    /// Switches the focused tab between this mode and its source.
     ToggleMode(Shown),
-    /// Moves the focused tab to the next or previous mode its kind of file has.
     CycleMode(Direction),
-    /// Resizes the source side of the focused split.
     ResizeSplit(Resize),
     Changes(ChangesCommand),
 
-    /// Select mode extends to the conflict.
     GotoConflict(Direction),
-    /// Resolves every conflict touched by a selection, as one edit.
     Resolve(Take),
 
     Read(ReadCommand),
     Document(DocumentCommand),
-    Pages(PagesCommand),
     Drawing(DrawingCommand),
-    /// Compiles the focused typst file to a PDF beside it.
+    View(ViewCommand),
     ExportPdf,
 }
 
@@ -178,16 +170,6 @@ pub enum ReadMove {
 pub enum DocumentCommand {
     /// The next or previous top-level heading.
     Heading(Direction),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PagesCommand {
-    /// Switches between fitting the page width and the whole page.
-    Fit,
-    /// Scales pages relative to their fit.
-    Zoom(ZoomBy),
-    /// Moves sideways, `Backward` being left.
-    Pan(Direction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -543,6 +525,8 @@ pub enum PickerKind {
     Buffers,
     Grep,
     Commands,
+    /// Image files, to put into the focused drawing or note.
+    Images,
     /// Notes linking to the focused note.
     Backlinks,
 }
@@ -569,21 +553,18 @@ pub enum Resize {
 /// Keys on a focused drawing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawingCommand {
-    View(ViewCommand),
     Page(PageCommand),
     Ink(InkCommand),
 }
 
-/// Where a drawing's pane looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewCommand {
     Zoom(ZoomBy),
     Pan(Side),
-    /// Fits pages to the pane's width, or to its height.
-    ToggleFit,
+    /// Steps the fit: the width, the height, the whole page.
+    Fit,
 }
 
-/// The pages of a paged drawing, around the page in focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageCommand {
     Go(PageStep),
@@ -606,17 +587,13 @@ pub enum PageSide {
     Below,
 }
 
-/// The tools and layers a drawing is worked with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InkCommand {
-    /// What the pen's tip does; its eraser end always erases.
     Tool(InkTool),
-    /// The active layer moves to the next or previous one.
     Layer(Direction),
-    /// Hides the active layer, or shows it again.
     ToggleLayer,
     NewLayer,
-    /// Removes the marks the select tool holds.
+    FinishText,
     DeletePicked,
 }
 
@@ -624,12 +601,11 @@ pub enum InkCommand {
 pub enum InkTool {
     Brush,
     Eraser,
-    /// Selects with a box dragged out.
     BoxSelect,
-    /// Selects with a loop drawn around.
     LassoSelect,
     Line,
     Arrow,
     Rectangle,
     Ellipse,
+    Text,
 }

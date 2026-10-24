@@ -45,3 +45,5 @@ open_from_picker = "permanent"
 [window]
 # "shown" draws a title bar; GNOME has none of its own, so hidden leaves Super+drag to move.
 title_bar = "hidden"
+# "right" or "left" of the panes.
+sidebar = "right"

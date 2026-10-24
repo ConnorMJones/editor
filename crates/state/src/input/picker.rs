@@ -9,6 +9,7 @@ use model::command::{
     Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, PickerKind, Shown, Take,
     TreeCommand, WindowCommand,
 };
+use model::picture::Encoding;
 use model::window::{Axis, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
@@ -30,6 +31,8 @@ pub struct Picker {
 
 pub enum Items {
     Files(Arc<Vec<RelPath>>),
+    /// The project's image files.
+    Images(Vec<RelPath>),
     /// Display label per buffer, relative to the root where possible.
     Buffers(Vec<(BufferId, String)>),
     Commands,
@@ -75,6 +78,7 @@ impl Items {
     pub fn kind(&self) -> PickerKind {
         match self {
             Items::Files(_) => PickerKind::Files,
+            Items::Images(_) => PickerKind::Images,
             Items::Buffers(_) => PickerKind::Buffers,
             Items::Commands => PickerKind::Commands,
             Items::Grep(_) => PickerKind::Grep,
@@ -85,6 +89,7 @@ impl Items {
     pub fn len(&self) -> usize {
         match self {
             Items::Files(files) => files.len(),
+            Items::Images(images) => images.len(),
             Items::Buffers(buffers) => buffers.len(),
             Items::Commands => PALETTE.len(),
             Items::Grep(grep) => grep.hits.len(),
@@ -101,6 +106,7 @@ impl Items {
         let index = index as usize;
         match self {
             Items::Files(files) => files[index].as_str(),
+            Items::Images(images) => images[index].as_str(),
             Items::Buffers(buffers) => &buffers[index].1,
             Items::Commands => PALETTE[index].0,
             Items::Grep(grep) => &grep.hits[index].text,
@@ -127,7 +133,9 @@ impl Picker {
 pub fn filter(picker: &mut Picker, matcher: &mut Matcher, narrowing: Narrowing) {
     matcher.config = nucleo::Config::DEFAULT;
     match picker.items.kind() {
-        PickerKind::Files | PickerKind::Backlinks => matcher.config.set_match_paths(),
+        PickerKind::Files | PickerKind::Images | PickerKind::Backlinks => {
+            matcher.config.set_match_paths()
+        }
         PickerKind::Buffers | PickerKind::Commands | PickerKind::Grep => {}
     }
     picker.cursor = 0;
@@ -303,6 +311,11 @@ pub static PALETTE: &[(&str, Command)] = &[
         Command::Picker(PickerCommand::Open(PickerKind::Files)),
     ),
     (
+        "image-picker",
+        Command::Picker(PickerCommand::Open(PickerKind::Images)),
+    ),
+    ("paste-image", Command::PasteImage),
+    (
         "buffer-picker",
         Command::Picker(PickerCommand::Open(PickerKind::Buffers)),
     ),
@@ -394,6 +407,8 @@ pub fn preview_source(picker: &Picker) -> Option<PreviewSource<'_>> {
             line: 0,
         }),
         Items::Buffers(buffers) => Some(PreviewSource::Buffer(buffers[index].0)),
+        // Images have no text to preview.
+        Items::Images(_) => None,
         Items::Grep(Grep { hits, .. }) | Items::Backlinks(Referrers { hits, .. }) => {
             hits.get(index).map(|hit| PreviewSource::File {
                 path: &hit.path,
@@ -440,6 +455,7 @@ pub fn grepped(
             }
             Items::Grep(_)
             | Items::Files(_)
+            | Items::Images(_)
             | Items::Buffers(_)
             | Items::Commands
             | Items::Backlinks(_) => {}
@@ -447,4 +463,12 @@ pub fn grepped(
         Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
     }
     crate::view::panes::request_preview(state, out);
+}
+
+/// The files whose names are an image encoding.
+pub fn images(files: &[RelPath]) -> Vec<RelPath> {
+    (files.iter())
+        .filter(|file| Encoding::of_path(std::path::Path::new(file.as_str())).is_some())
+        .cloned()
+        .collect()
 }

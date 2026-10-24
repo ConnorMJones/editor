@@ -193,6 +193,10 @@ pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
                 *items = files.clone();
                 picker::filter(picker, &mut state.matcher, picker::Narrowing::All);
             }
+            Items::Images(items) => {
+                *items = picker::images(&files);
+                picker::filter(picker, &mut state.matcher, picker::Narrowing::All);
+            }
             Items::Buffers(_) | Items::Commands | Items::Grep(_) | Items::Backlinks(_) => {}
         },
         Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}

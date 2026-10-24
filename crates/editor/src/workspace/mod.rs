@@ -4,17 +4,19 @@ use std::rc::Rc;
 use std::sync::mpsc;
 
 use gpui::{
-    Bounds, ClipboardItem, Context, ElementInputHandler, IntoElement, KeyDownEvent, MouseButton,
-    MouseMoveEvent, Pixels, Render, ResizeEdge, ScrollHandle, ScrollStrategy,
-    UniformListScrollHandle, Window, canvas, div, prelude::*, px,
+    Bounds, ClipboardEntry, ClipboardItem, Context, ElementInputHandler, ImageFormat, IntoElement,
+    KeyDownEvent, MouseButton, MouseMoveEvent, Pixels, Render, ResizeEdge, ScrollHandle,
+    ScrollStrategy, UniformListScrollHandle, Window, canvas, div, prelude::*, px,
 };
-use model::config::TitleBar;
+use model::config::{SidebarSide, TitleBar, WindowConfig};
+use model::picture::{Bitmap, Encoding};
 use model::register::Clipboard;
 use model::theme::Theme;
 use model::units::Px;
 use model::window::Axis;
 use slotmap::SecondaryMap;
 use state::git::stage::Discard;
+use state::insert::{self, ImageFrom, ImageInto};
 use state::job::{self, JobResult};
 use state::project::watch::{self, Watcher};
 use state::render::typeset::Request;
@@ -40,17 +42,17 @@ pub use drops::DraggedTab;
 pub use sidebar::{DragPreview, DraggedEntry, TreeMenu};
 
 use crate::fonts::{Fonts, hsla};
+use crate::pictures::{Decoded, Pictures};
 use crate::rendered::RenderedPane;
-use crate::rendered::raster::{Rasterized, Rasters};
 use chrome::{corners, round};
 use pane_tree::{DIVIDER, SPLIT_MIN_COLUMNS};
-use sidebar::fit_sidebar;
+use sidebar::SIDEBAR_HIDE;
 
 pub struct Workspace {
     pub state: State,
     pub theme: Theme,
     pub fonts: Fonts,
-    pub title_bar: TitleBar,
+    pub window: WindowConfig,
     pub effects: Vec<Effect>,
     pub focus: gpui::FocusHandle,
     pub watcher: Watcher,
@@ -75,8 +77,8 @@ pub struct Workspace {
     pub tree_menu: Option<TreeMenu>,
     pub rendered: SecondaryMap<PaneId, RenderedPane>,
     pub typeset: mpsc::Sender<Request>,
-    /// Rasters of the typeset SVGs drawn last frame.
-    pub rasters: Rc<RefCell<Rasters>>,
+    /// Pictures decoded for the last frame.
+    pub pictures: Rc<RefCell<Pictures>>,
     /// Content height as last drawn; rendered lists lay out this far past their viewport.
     pub window_height: Pixels,
 }
@@ -206,15 +208,22 @@ impl Workspace {
                 window.start_window_move();
             }
             (Drag::Sidebar, Some(MouseButton::Left)) => {
-                let left = self.areas.sidebar.get().origin.x;
-                let width = fit_sidebar(
-                    event.position.x - left,
-                    &self.fonts,
-                    window.viewport_size().width,
-                );
-                self.state.sidebar_width = SidebarWidth::Dragged(
-                    Dragged::new(Px(width / px(1.))).expect("a fitted width is positive"),
-                );
+                let area = self.areas.sidebar.get();
+                let width = match self.window.sidebar {
+                    SidebarSide::Left => event.position.x - area.origin.x,
+                    SidebarSide::Right => area.origin.x + area.size.width - event.position.x,
+                };
+                // Dragged this narrow, the sidebar hides and keeps its last width for next time.
+                let fitted = width.min(window.viewport_size().width - DIVIDER);
+                match (Dragged::new(Px(fitted / px(1.))).ok())
+                    .filter(|_| width >= self.fonts.ui_size * SIDEBAR_HIDE)
+                {
+                    Some(width) => self.state.sidebar_width = SidebarWidth::Dragged(width),
+                    None => {
+                        self.drag = Drag::Idle;
+                        self.state.sidebar = Sidebar::Hidden;
+                    }
+                }
                 cx.notify();
             }
             (
@@ -305,8 +314,29 @@ impl Workspace {
                             Clipboard::System => cx.read_from_clipboard(),
                             Clipboard::Primary => cx.read_from_primary(),
                         };
-                        let text = item.and_then(|item| item.text());
-                        registers::clipboard_contents(&mut self.state, clipboard, then, text);
+                        let text = item.as_ref().and_then(|item| item.text());
+                        // A paste into a note with only an image on the clipboard keeps the image beside it.
+                        let note = match (&text, insert::into_focused(&self.state, None)) {
+                            (None, Ok(into @ ImageInto::Note { .. })) => {
+                                clipboard_image(item).map(|image| (into, image))
+                            }
+                            (Some(_), _) | (None, Ok(ImageInto::Drawing(_)) | Err(_)) => None,
+                        };
+                        match note {
+                            Some((into, image)) => {
+                                insert::insert(&mut self.state, into, image, &mut self.effects)
+                            }
+                            None => registers::clipboard_contents(
+                                &mut self.state,
+                                clipboard,
+                                then,
+                                text,
+                            ),
+                        }
+                    }
+                    Effect::ReadClipboardImage { into } => {
+                        let image = clipboard_image(cx.read_from_clipboard());
+                        insert::pasted(&mut self.state, into, image, &mut self.effects);
                     }
                 }
             }
@@ -320,20 +350,20 @@ impl Render for Workspace {
         self.window_height = window.viewport_size().height;
         // Split bodies record their bounds again as this frame lays them out.
         self.areas.splits.borrow_mut().clear();
-        let mut rasters = self.rasters.borrow_mut();
-        let frame = rasters.frame;
-        rasters
+        let mut pictures = self.pictures.borrow_mut();
+        let frame = pictures.frame;
+        pictures
             .entries
-            .retain(|_, raster| match (raster.drawn == frame, &raster.image) {
+            .retain(|_, entry| match (entry.drawn == frame, &entry.image) {
                 (true, _) => true,
-                (false, Rasterized::Ready(image)) => {
+                (false, Decoded::Ready(image)) => {
                     cx.drop_image(image.clone(), Some(window));
                     false
                 }
-                (false, Rasterized::Pending | Rasterized::Failed) => false,
+                (false, Decoded::Pending | Decoded::Failed) => false,
             });
-        rasters.frame += 1;
-        drop(rasters);
+        pictures.frame += 1;
+        drop(pictures);
         let State {
             tree,
             project,
@@ -421,15 +451,16 @@ impl Render for Workspace {
             ) => String::new(),
         };
         let line_height = window.line_height();
-        let main = div().flex_1().flex().flex_row().min_h_0();
-        let main = match &state.sidebar {
+        let side = self.window.sidebar;
+        let width = window.viewport_size().width;
+        let sidebar = match &state.sidebar {
             Sidebar::Files(Files::Tree | Files::Edit(_)) | Sidebar::Changes(Focus::Sidebar) => {
-                main.child(self.sidebar(Focus::Sidebar, window.viewport_size().width, cx))
+                Some(self.sidebar(Focus::Sidebar, side, width, cx))
             }
             Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor) => {
-                main.child(self.sidebar(Focus::Editor, window.viewport_size().width, cx))
+                Some(self.sidebar(Focus::Editor, side, width, cx))
             }
-            Sidebar::Hidden => main,
+            Sidebar::Hidden => None,
         };
         let areas = self.areas.clone();
         let mut path = SplitPath::new();
@@ -448,7 +479,11 @@ impl Render for Workspace {
                 .size_full(),
             )
             .child(self.node(&self.state.layout.root(), &mut path, cx));
-        let main = main.child(editor);
+        let main = div().flex_1().flex().flex_row().min_h_0();
+        let main = match side {
+            SidebarSide::Left => main.children(sidebar).child(editor),
+            SidebarSide::Right => main.child(editor).children(sidebar),
+        };
         let entity = cx.entity();
         let input_focus = self.focus.clone();
         let content = round(div().id("workspace"), corners(window))
@@ -483,7 +518,7 @@ impl Render for Workspace {
                 .absolute()
                 .size_full(),
             )
-            .children(match self.title_bar {
+            .children(match self.window.title_bar {
                 TitleBar::Shown => Some(self.titlebar(window, cx)),
                 TitleBar::Hidden => None,
             })
@@ -499,4 +534,22 @@ impl Render for Workspace {
             ));
         self.decorations(content, window, cx)
     }
+}
+
+/// The image on a clipboard, in an encoding pictures are read in.
+fn clipboard_image(item: Option<ClipboardItem>) -> Option<ImageFrom> {
+    let image = item?.into_entries().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) => Some(image),
+        ClipboardEntry::String(_) | ClipboardEntry::ExternalPaths(_) => None,
+    })?;
+    let encoding = match image.format {
+        ImageFormat::Png => Encoding::Bitmap(Bitmap::Png),
+        ImageFormat::Jpeg => Encoding::Bitmap(Bitmap::Jpeg),
+        ImageFormat::Webp => Encoding::Bitmap(Bitmap::Webp),
+        ImageFormat::Gif => Encoding::Bitmap(Bitmap::Gif),
+        ImageFormat::Bmp => Encoding::Bitmap(Bitmap::Bmp),
+        ImageFormat::Svg => Encoding::Svg,
+        ImageFormat::Tiff | ImageFormat::Ico | ImageFormat::Pnm => return None,
+    };
+    Some(ImageFrom::Pasted(image.bytes.into(), encoding))
 }

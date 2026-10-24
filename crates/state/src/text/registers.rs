@@ -5,7 +5,7 @@ use model::command::Paste;
 use model::notice::Notice;
 use model::register::{Clipboard, Register};
 
-use crate::apply::{exit_select_mode, focused_text};
+use crate::apply::{FocusedText, exit_select_mode, focused_text};
 use crate::view::layout::{NotInLayout, PaneId};
 use crate::{Effect, State, text::edit};
 
@@ -104,13 +104,15 @@ pub fn read(state: &mut State, register: Register) -> Values {
         Register::BlackHole => Values::Ready(Vec::new()),
         Register::SelectionIndices => Values::Ready(
             match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
-                Some((view, _)) => (1..=view.selection.len()).map(|i| i.to_string()).collect(),
+                Some(FocusedText { view, .. }) => {
+                    (1..=view.selection.len()).map(|i| i.to_string()).collect()
+                }
                 None => Vec::new(),
             },
         ),
         Register::SelectionContents => Values::Ready(
             match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
-                Some((view, doc)) => view
+                Some(FocusedText { view, doc }) => view
                     .selection
                     .fragments(doc.text.slice(..))
                     .map(|fragment| fragment.into_owned())
@@ -179,8 +181,8 @@ pub fn clipboard_contents(
                 Err(NotInLayout(_)) => return,
             }
             match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
-                Some((view, doc)) => {
-                    view.selection = Selection::point(pos.min(doc.text.len_chars()));
+                Some(FocusedText { view, doc }) => {
+                    *view.selection = Selection::point(pos.min(doc.text.len_chars()));
                     edit::paste(state, &values, Paste::Before, 1);
                 }
                 None => {}

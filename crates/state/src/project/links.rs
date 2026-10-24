@@ -12,7 +12,7 @@ use model::command::Shown;
 use model::config::OpenAs;
 use model::notice::Notice;
 
-use crate::apply::{self, focused_text};
+use crate::apply::{self, FocusedText, focused_text};
 use crate::project::files::FileIndex;
 use crate::project::path::TextKind;
 use crate::project::path::{Folder, RelPath};
@@ -439,7 +439,11 @@ pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
     let pane = state.layout.focus();
     let (buffer, rope, range) =
         match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
-            Some((view, doc)) => (view.buffer(), doc.text.clone(), view.selection.primary()),
+            Some(FocusedText { view, doc }) => match view.edited.buffer() {
+                Some(buffer) => (buffer, doc.text.clone(), view.selection.primary()),
+                // A drawing's text has no folder to resolve links from.
+                None => return state.notice = Some(Notice::NothingToFollow),
+            },
             None => return,
         };
     let text = rope.slice(..);

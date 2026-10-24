@@ -5,23 +5,20 @@ use ink::doc::{
     ShapeKind, Visibility,
 };
 use ink::history::HistoryError;
+use ink::text::Fonts;
 use ink::tool::{Gather, ToolKind};
 use model::command::{
-    Direction, DrawingCommand, InkCommand, InkTool, PageCommand, PageSide, PageStep, ViewCommand,
-    ZoomBy,
+    Direction, DrawingCommand, InkCommand, InkTool, PageCommand, PageSide, PageStep,
 };
-use model::geom::{Pane, Vector};
+use model::mode::Mode;
 use model::notice::Notice;
-use model::sheet::{Fit, StackEdit, Viewport, Zoom};
-use model::window::Side;
+use model::sheet::StackEdit;
 
 use crate::State;
+use crate::drawing::typing;
 use crate::drawing::{BoardTab, Hand, InkFile, InkTabs, PagedId, PagedTab};
 use crate::view::layout::Layout;
 use crate::view::tab::Tab;
-
-/// One key's pan, as a part of the pane.
-const PAN_STEP: f32 = 0.125;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -34,6 +31,8 @@ enum After {
     Nothing,
     /// Tabs on the document stay on their pages across the edit.
     Follow(PagedId, StackEdit),
+    /// The text being typed was finished, so the keys leave its modes.
+    Typed,
 }
 
 pub fn command(state: &mut State, command: DrawingCommand) {
@@ -42,22 +41,25 @@ pub fn command(state: &mut State, command: DrawingCommand) {
         pageds,
         boards,
         notice,
+        input,
+        fonts,
         ..
     } = state;
     let result = match layout.focused_mut().active_mut() {
         Some(Tab::Ink(InkTabs::Paged(tab))) => {
             let file = &mut pageds[tab.file()];
-            paged(tab, file, command)
+            paged(tab, file, command, fonts)
         }
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             let file = &mut boards[tab.file()];
-            board(tab, file, command).map(|()| After::Nothing)
+            board(tab, file, command, fonts)
         }
-        Some(Tab::Text(_)) | None => Err(Notice::NotADrawing),
+        Some(Tab::Text(_) | Tab::Image(_)) | None => Err(Notice::NotADrawing),
     };
     match result {
         Ok(After::Nothing) => {}
         Ok(After::Follow(file, edit)) => follow(layout, file, edit),
+        Ok(After::Typed) => input.mode = Mode::Normal,
         Err(refused) => *notice = Some(refused),
     }
 }
@@ -66,32 +68,11 @@ fn paged(
     tab: &mut PagedTab,
     file: &mut InkFile<Paged>,
     command: DrawingCommand,
+    fonts: &Fonts,
 ) -> Result<After, Notice> {
     match command {
-        DrawingCommand::View(ViewCommand::Zoom(by)) => {
-            tab.view.zoom = zoom(tab.view.zoom, by);
-            Ok(After::Nothing)
-        }
-        DrawingCommand::View(ViewCommand::Pan(side)) => {
-            match tab.hand.last {
-                Some(viewport) => {
-                    let stack = file.edited.drawing().stack();
-                    tab.view.pan(stack, viewport, pan(side, viewport))
-                }
-                // Not drawn yet, so there is no pane to move by part of.
-                None => {}
-            }
-            Ok(After::Nothing)
-        }
-        DrawingCommand::View(ViewCommand::ToggleFit) => {
-            tab.view.fit = match tab.view.fit {
-                Fit::Width => Fit::Height,
-                Fit::Height => Fit::Width,
-            };
-            Ok(After::Nothing)
-        }
         DrawingCommand::Page(page) => pages(tab, file, page),
-        DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command).map(|()| After::Nothing),
+        DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command, fonts),
     }
 }
 
@@ -99,45 +80,11 @@ fn board(
     tab: &mut BoardTab,
     file: &mut InkFile<Board>,
     command: DrawingCommand,
-) -> Result<(), Notice> {
+    fonts: &Fonts,
+) -> Result<After, Notice> {
     match command {
-        DrawingCommand::View(ViewCommand::Zoom(by)) => {
-            tab.view.zoom = zoom(tab.view.zoom, by);
-            Ok(())
-        }
-        DrawingCommand::View(ViewCommand::Pan(side)) => {
-            match tab.hand.last {
-                Some(viewport) => tab.view.pan(pan(side, viewport)),
-                // Not drawn yet, so there is no pane to move by part of.
-                None => {}
-            }
-            Ok(())
-        }
-        DrawingCommand::View(ViewCommand::ToggleFit) | DrawingCommand::Page(_) => {
-            Err(Notice::BoardHasNoPages)
-        }
-        DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command),
-    }
-}
-
-fn zoom(zoom: Zoom, by: ZoomBy) -> Zoom {
-    match by {
-        ZoomBy::In => zoom.by(Zoom::STEP),
-        ZoomBy::Out => zoom.by(1.0 / Zoom::STEP),
-        ZoomBy::Reset => Zoom::ONE,
-    }
-}
-
-fn pan(side: Side, viewport: Viewport) -> Vector<Pane> {
-    let (x, y) = (
-        viewport.width.get() * PAN_STEP,
-        viewport.height.get() * PAN_STEP,
-    );
-    match side {
-        Side::Left => Vector::new(-x, 0.0),
-        Side::Right => Vector::new(x, 0.0),
-        Side::Up => Vector::new(0.0, -y),
-        Side::Down => Vector::new(0.0, y),
+        DrawingCommand::Page(_) => Err(Notice::BoardHasNoPages),
+        DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command, fonts),
     }
 }
 
@@ -156,7 +103,8 @@ fn pages(
                 PageStep::First => PageIndex(0),
                 PageStep::Last => stack.last(),
             };
-            tab.view.go_to(stack, page, tab.hand.last);
+            tab.view
+                .go_to(stack, page, tab.hand.last.map(|measure| measure.viewport));
             Ok(After::Nothing)
         }
         PageCommand::Insert(side) => {
@@ -192,8 +140,11 @@ fn edit(
     let page = match edit {
         StackEdit::Inserted(page) | StackEdit::Removed(page) => page,
     };
-    tab.view
-        .go_to(file.edited.drawing().stack(), page, tab.hand.last);
+    tab.view.go_to(
+        file.edited.drawing().stack(),
+        page,
+        tab.hand.last.map(|measure| measure.viewport),
+    );
     Ok(After::Follow(tab.file(), edit))
 }
 
@@ -206,7 +157,7 @@ fn follow(layout: &mut Layout, file: PagedId, edit: StackEdit) {
                 Tab::Ink(InkTabs::Paged(tab)) if tab.file() == file && pane != focus => {
                     tab.view.follow(edit)
                 }
-                Tab::Ink(_) | Tab::Text(_) => {}
+                Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => {}
             }
         }
     }
@@ -216,11 +167,13 @@ fn ink<D: Drawing>(
     hand: &mut Hand<D::Target>,
     file: &mut InkFile<D>,
     command: InkCommand,
-) -> Result<(), Notice> {
+    fonts: &Fonts,
+) -> Result<After, Notice> {
     match command {
         InkCommand::Tool(tool) => {
-            // What the old tool was doing, a selection included, ends with it.
+            // What the old tool was doing, a selection or text included, ends with it.
             hand.cancel_stroke();
+            let ended = typing::finish(&mut hand.typing, file, fonts);
             hand.tip = match tool {
                 InkTool::Brush => ToolKind::Brush,
                 InkTool::Eraser => ToolKind::Eraser,
@@ -230,12 +183,14 @@ fn ink<D: Drawing>(
                 InkTool::Arrow => ToolKind::Shape(ShapeKind::Arrow),
                 InkTool::Rectangle => ToolKind::Shape(ShapeKind::Rectangle),
                 InkTool::Ellipse => ToolKind::Shape(ShapeKind::Ellipse),
+                InkTool::Text => ToolKind::Text,
             };
-            Ok(())
+            ended.map(After::of)
         }
+        InkCommand::FinishText => typing::finish(&mut hand.typing, file, fonts).map(After::of),
         InkCommand::DeletePicked => {
             let change = hand.tools.select.delete().ok_or(Notice::NothingPicked)?;
-            commit(file, change.into())
+            commit(file, change.into()).map(|()| After::Nothing)
         }
         InkCommand::Layer(direction) => {
             let count = file.edited.drawing().layers().len();
@@ -243,7 +198,7 @@ fn ink<D: Drawing>(
                 Direction::Forward => (hand.layer.0 + 1) % count,
                 Direction::Backward => (hand.layer.0 + count - 1) % count,
             });
-            Ok(())
+            Ok(After::Nothing)
         }
         InkCommand::ToggleLayer => {
             let layers = file.edited.drawing().layers();
@@ -255,7 +210,7 @@ fn ink<D: Drawing>(
                     Visibility::Hidden => Visibility::Shown,
                 },
             };
-            commit(file, LayerChange::Set(hand.layer, toggled).into())
+            commit(file, LayerChange::Set(hand.layer, toggled).into()).map(|()| After::Nothing)
         }
         InkCommand::NewLayer => {
             let count = file.edited.drawing().layers().len();
@@ -266,7 +221,7 @@ fn ink<D: Drawing>(
             };
             commit(file, LayerChange::Add(layer).into())?;
             hand.layer = LayerIndex(count);
-            Ok(())
+            Ok(After::Nothing)
         }
     }
 }
@@ -298,7 +253,7 @@ pub fn step(state: &mut State, step: Step) {
             tab.hand.cancel_stroke();
             history(&mut boards[tab.file()], step)
         }
-        Some(Tab::Text(_)) | None => Err(Notice::NotADrawing),
+        Some(Tab::Text(_) | Tab::Image(_)) | None => Err(Notice::NotADrawing),
     };
     match result {
         Ok(()) => {}
@@ -315,5 +270,14 @@ fn history<D: Drawing>(file: &mut InkFile<D>, step: Step) -> Result<(), Notice> 
         Ok(_) => Ok(()),
         Err(HistoryError::NothingToUndo) => Err(Notice::AlreadyOldest),
         Err(HistoryError::NothingToRedo) => Err(Notice::AlreadyNewest),
+    }
+}
+
+impl After {
+    fn of(ended: typing::Ended) -> After {
+        match ended {
+            typing::Ended::NothingOpen => After::Nothing,
+            typing::Ended::Finished => After::Typed,
+        }
     }
 }

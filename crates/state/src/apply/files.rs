@@ -25,7 +25,8 @@ use crate::project::path::FileKind;
 use crate::text::buffer::{Buffer, BufferId, Disk, Position, Read, ReadId, Target, Waiter};
 use crate::view::layout::{Layout, PaneId, Tabs};
 use crate::view::panes::Arrive;
-use crate::view::tab::{BesideMut, Opened, ShowingMut, Tab, TextTabs};
+use crate::view::tab::{BesideMut, Opened, ShowingMut, Tab, TextTabs, Writable};
+use crate::viewer::ImageFile;
 use crate::{
     AfterWrite, Effect, State,
     project::links,
@@ -35,6 +36,7 @@ use crate::{
     view::panes,
     view::scroll,
 };
+use model::sheet::Stack;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Force {
@@ -58,12 +60,17 @@ pub fn focused_file(layout: &Layout) -> Result<Opened, Notice> {
     (layout.focused().active().map(Tab::opened)).ok_or(Notice::NoBuffer)
 }
 
+/// The focused tab's file when it can be written.
+pub fn focused_writable(layout: &Layout) -> Result<Writable, Notice> {
+    focused_file(layout)?.writable().ok_or(Notice::ReadOnly)
+}
+
 /// Commits pending text edits first; writing keeps the file's preview tabs.
-pub fn write_job(state: &mut State, opened: Opened, dirs: Dirs) -> Job {
-    state.layout.keep(opened);
-    let path = state.path_of(opened).to_owned();
-    let (saving, data) = match opened {
-        Opened::Text(buffer) => {
+pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
+    state.layout.keep(file.into());
+    let path = state.path_of(file.into()).to_owned();
+    let (saving, data) = match file {
+        Writable::Text(buffer) => {
             let entry = &mut state.buffers[buffer];
             entry.doc.commit(&state.layout.selection_of(buffer));
             let revision = entry.doc.history.current_revision();
@@ -72,14 +79,14 @@ pub fn write_job(state: &mut State, opened: Opened, dirs: Dirs) -> Job {
                 Data::Text(entry.doc.text.clone()),
             )
         }
-        Opened::Paged(file) => {
+        Writable::Paged(file) => {
             let edited = &state.pageds[file].edited;
             let mut bytes = Vec::new();
             ink::format::write_paged(edited.drawing(), &mut bytes);
             let revision = edited.revision();
             (Saving::Paged { file, revision }, Data::Bytes(bytes))
         }
-        Opened::Board(file) => {
+        Writable::Board(file) => {
             let edited = &state.boards[file].edited;
             let mut bytes = Vec::new();
             ink::format::write_board(edited.drawing(), &mut bytes);
@@ -97,24 +104,26 @@ pub fn write_job(state: &mut State, opened: Opened, dirs: Dirs) -> Job {
 
 /// Writes every modified file, returning what is being written.
 pub fn write_modified(state: &mut State, out: &mut Vec<Effect>) -> Vec<Opened> {
-    let modified: Vec<Opened> = (state.files())
+    // Images are never modified, so every modified file can be written.
+    let modified: Vec<Writable> = (state.files())
         .filter(|opened| state.is_modified(*opened))
+        .filter_map(Opened::writable)
         .collect();
-    for opened in &modified {
-        let job = write_job(state, *opened, Dirs::Existing);
+    for file in &modified {
+        let job = write_job(state, *file, Dirs::Existing);
         out.push(Effect::Job(job));
     }
-    modified
+    modified.into_iter().map(Opened::from).collect()
 }
 
 /// `:reload` reads the file whatever its mtime and replaces unsaved edits, which stay undoable.
 pub fn reload_job(state: &mut State, opened: Opened) -> Job {
     match opened {
         Opened::Text(id) => state.buffers[id].doc.commit(&state.layout.selection_of(id)),
-        Opened::Paged(_) | Opened::Board(_) => {}
+        Opened::Paged(_) | Opened::Board(_) | Opened::Image(_) => {}
     }
     Job::Reload {
-        file: opened,
+        file: state.reload_of(opened),
         path: state.path_of(opened).to_owned(),
         when: ReloadIf::Always,
         policy: ReloadPolicy::Discard,
@@ -135,7 +144,7 @@ pub enum Found {
 }
 
 /// The canonical form of `path` under the root; a missing file keeps its normalized path.
-fn canonical(root: &Path, path: &Path) -> Result<PathBuf, Notice> {
+pub fn canonical(root: &Path, path: &Path) -> Result<PathBuf, Notice> {
     let joined = helix_stdx::path::normalize(root.join(path));
     match joined.canonicalize() {
         Ok(path) if path.is_dir() => Err(Notice::NotAFile { path }),
@@ -160,6 +169,9 @@ fn open_file(state: &State, path: &Path) -> Option<Opened> {
         FileKind::Board => (state.boards.iter())
             .find(|(_, file)| file.path == path)
             .map(|(id, _)| Opened::Board(id)),
+        FileKind::Image(_) => (state.images.iter())
+            .find(|(_, file)| *file.path == *path)
+            .map(|(id, _)| Opened::Image(id)),
     }
 }
 
@@ -188,10 +200,21 @@ fn insert(
         OpenRead::Board { drawing, disk } => Ok(Opened::Board(
             state.boards.insert(InkFile::new(path, drawing, disk)),
         )),
+        OpenRead::Image {
+            encoding,
+            stack,
+            modified,
+        } => Ok(Opened::Image(state.images.insert(ImageFile {
+            path: path.into(),
+            encoding,
+            stack,
+            modified,
+            disk: Disk::Synced { mtime: modified },
+        }))),
         OpenRead::NotUtf8 => Err(Notice::NotUtf8 { path }),
         OpenRead::NotAFile => Err(Notice::NotAFile { path }),
         OpenRead::Failed(error) => Err(Notice::OpenFailed { path, error }),
-        OpenRead::Unreadable(error) => Err(Notice::DrawingUnreadable {
+        OpenRead::Unreadable(error) => Err(Notice::Unreadable {
             path,
             reason: error.to_string(),
         }),
@@ -214,6 +237,7 @@ pub fn load(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result<Fou
                 read,
                 path,
                 languages: state.languages.clone(),
+                fonts: state.fonts.clone(),
             }));
             Ok(Found::Reading(read))
         }
@@ -226,7 +250,7 @@ pub fn read_now(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result
     match open_file(state, &path) {
         Some(opened) => Ok(opened),
         None => {
-            let read = read_file(&path, &state.languages);
+            let read = read_file(&path, &state.languages, &state.fonts);
             insert(state, path, read, out)
         }
     }
@@ -269,7 +293,7 @@ fn show(state: &mut State, opened: Opened, waiter: Waiter) {
     panes::show(state, pane, opened, arrive, open);
     match (to, opened) {
         (Some(to), Opened::Text(buffer)) => place(state, pane, buffer, to),
-        (Some(_), Opened::Paged(_) | Opened::Board(_)) | (None, _) => {}
+        (Some(_), Opened::Paged(_) | Opened::Board(_) | Opened::Image(_)) | (None, _) => {}
     }
 }
 
@@ -401,6 +425,7 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
         buffers,
         pageds,
         boards,
+        images,
         layout,
         languages,
         notice,
@@ -462,6 +487,26 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
             },
             None => {}
         },
+        // Images are never modified, so a change on disk always replaces the picture.
+        Reloaded::Image(id, read) => match images.get_mut(id) {
+            Some(file) => match read {
+                DiskRead::Changed { content, mtime } => {
+                    file.stack = Stack::one(content);
+                    file.modified = mtime;
+                    file.disk = Disk::Synced { mtime };
+                }
+                DiskRead::Unreadable(error) => {
+                    *notice = Some(Notice::Unreadable {
+                        path: file.path.to_path_buf(),
+                        reason: error.to_string(),
+                    })
+                }
+                DiskRead::Missed(missed_read) => {
+                    missed(missed_read, &file.path, &mut file.disk, notice)
+                }
+            },
+            None => {}
+        },
     }
 }
 
@@ -493,7 +538,7 @@ fn drawing_reloaded<D: Drawing>(
             }
         },
         DiskRead::Unreadable(error) => {
-            *notice = Some(Notice::DrawingUnreadable {
+            *notice = Some(Notice::Unreadable {
                 path: file.path.clone(),
                 reason: error.to_string(),
             });
@@ -532,14 +577,14 @@ fn drawing_tabs(layout: &mut Layout, opened: Opened) -> impl Iterator<Item = &mu
         .flat_map(|(_, pane)| pane.items_mut())
         .filter_map(move |item| match &mut item.tab {
             Tab::Ink(ink) if ink.opened() == opened => Some(ink),
-            Tab::Ink(_) | Tab::Text(_) => None,
+            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => None,
         })
 }
 
 pub fn write_focused(state: &mut State, dirs: Dirs, out: &mut Vec<Effect>) {
-    match focused_file(&state.layout) {
-        Ok(opened) => {
-            let job = write_job(state, opened, dirs);
+    match focused_writable(&state.layout) {
+        Ok(file) => {
+            let job = write_job(state, file, dirs);
             out.push(Effect::Job(job))
         }
         Err(refused) => state.notice = Some(refused),
@@ -547,28 +592,28 @@ pub fn write_focused(state: &mut State, dirs: Dirs, out: &mut Vec<Effect>) {
 }
 
 /// `opened` saved under `path` from now on; a path naming another kind of file is refused.
-pub fn renamed(state: &mut State, opened: Opened, path: PathBuf) -> Result<Opened, Notice> {
-    match (opened, FileKind::of(&path)) {
-        (Opened::Text(buffer), FileKind::Text(_)) => {
+pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writable, Notice> {
+    match (file, FileKind::of(&path)) {
+        (Writable::Text(buffer), FileKind::Text(_)) => {
             let entry = &mut state.buffers[buffer];
             entry.path = path;
             entry.disk = Disk::New;
         }
-        (Opened::Paged(file), FileKind::Paged) => {
-            let entry = &mut state.pageds[file];
+        (Writable::Paged(id), FileKind::Paged) => {
+            let entry = &mut state.pageds[id];
             entry.path = path;
             entry.disk = Disk::New;
         }
-        (Opened::Board(file), FileKind::Board) => {
-            let entry = &mut state.boards[file];
+        (Writable::Board(id), FileKind::Board) => {
+            let entry = &mut state.boards[id];
             entry.path = path;
             entry.disk = Disk::New;
         }
-        (Opened::Text(_), FileKind::Paged | FileKind::Board)
-        | (Opened::Paged(_), FileKind::Text(_) | FileKind::Board)
-        | (Opened::Board(_), FileKind::Text(_) | FileKind::Paged) => {
+        (Writable::Text(_), FileKind::Paged | FileKind::Board | FileKind::Image(_))
+        | (Writable::Paged(_), FileKind::Text(_) | FileKind::Board | FileKind::Image(_))
+        | (Writable::Board(_), FileKind::Text(_) | FileKind::Paged | FileKind::Image(_)) => {
             return Err(Notice::WrongExtension { path });
         }
     }
-    Ok(opened)
+    Ok(file)
 }

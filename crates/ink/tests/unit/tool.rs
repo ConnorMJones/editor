@@ -132,7 +132,7 @@ fn lifting_the_brush_proposes_the_stroke() {
     match gesture(&mut tools, ToolKind::Brush, board, &samples) {
         Outcome::Commit(MarkChange::Add(LayerIndex(0), mark)) => match &mark.ink {
             Ink::Stroke(geometry) => assert_eq!(geometry.samples.len(), 50),
-            Ink::Shape(_) => panic!("the brush draws strokes"),
+            Ink::Shape(_) | Ink::Text(_) | Ink::Image(_) => panic!("the brush draws strokes"),
         },
         other => panic!("{other:?}"),
     }

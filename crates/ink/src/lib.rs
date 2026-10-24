@@ -7,4 +7,5 @@ pub use model::geom;
 pub mod history;
 pub mod input;
 pub mod mesh;
+pub mod text;
 pub mod tool;

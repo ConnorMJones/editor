@@ -416,13 +416,14 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     fs::write(dir.path().join("b.txt"), "a\nb\nC\nd\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys("<space>g");
-    // Nothing selected yet: the cursor shows on the first file, below its header.
+    // Nothing selected yet: the cursor shows on the first file, below the empty Staged header and
+    // its own header.
     let Repo::Found { snapshot, .. } = &h.state.project.git else {
         panic!("no repository");
     };
     assert_eq!(
         changes::cursor_row(&snapshot.changes, &h.state.changes.folds, None),
-        Some(1)
+        Some(2)
     );
 
     // `h` on an entry moves to its header; `h` there collapses, `l` expands again.
@@ -441,7 +442,8 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     };
     assert_eq!(
         changes::list_len(&snapshot.changes, &h.state.changes.folds),
-        1
+        2,
+        "both headers stay listed"
     );
     h.keys("l");
     assert_eq!(
@@ -458,7 +460,7 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), FIVE);
 
     // An entry's `+` button stages just that file; a header click toggles the group.
-    h.run(|state, out| panes::changes_action(state, 2, ChangesCommand::Stage, out));
+    h.run(|state, out| panes::changes_action(state, 3, ChangesCommand::Stage, out));
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), "a\nb\nC\nd\ne\n");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), FIVE);
     h.run(|state, out| panes::click_changes(state, 0, Click::Single, out));
@@ -479,6 +481,37 @@ fn changes_groups_collapse_and_act_as_a_whole() {
         .expect("valid session");
     assert_eq!(
         after.state.changes.folds[Group::Staged as usize],
+        Fold::Collapsed
+    );
+}
+
+#[test]
+fn a_clean_repository_still_lists_staged_and_unstaged_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &[("a.txt", FIVE)]);
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>g");
+    let headers: Vec<ListRow> =
+        changes::rows(h.state.project.git.changes(), &h.state.changes.folds).collect();
+    assert_eq!(
+        headers,
+        [
+            ListRow::Header {
+                group: Group::Staged,
+                count: 0,
+                fold: Fold::Expanded
+            },
+            ListRow::Header {
+                group: Group::Changes,
+                count: 0,
+                fold: Fold::Expanded
+            },
+        ]
+    );
+    // The cursor rests on the first header, and a click there folds it.
+    h.run(|state, out| panes::click_changes(state, 0, Click::Single, out));
+    assert_eq!(
+        h.state.changes.folds[Group::Staged as usize],
         Fold::Collapsed
     );
 }

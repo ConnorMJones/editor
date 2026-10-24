@@ -244,6 +244,10 @@ impl Harness {
                     let text = self.clipboard[slot(clipboard)].clone();
                     registers::clipboard_contents(&mut self.state, clipboard, then, text);
                 }
+                // The test clipboard holds text only.
+                Effect::ReadClipboardImage { into } => {
+                    state::insert::pasted(&mut self.state, into, None, &mut self.effects)
+                }
             }
         }
     }
@@ -301,6 +305,7 @@ impl Harness {
                         Shown::Split => "◧",
                     },
                     Tab::Ink(_) => "✎",
+                    Tab::Image(_) => "▣",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),

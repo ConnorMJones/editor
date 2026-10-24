@@ -282,7 +282,10 @@ pub fn fs_done(state: &mut State, op: FsOp, result: io::Result<()>, out: &mut Ve
     match result {
         Err(error) => {
             let path = match &op {
-                FsOp::Create { path, .. } | FsOp::Remove { path, .. } => path,
+                FsOp::Create { path, .. }
+                | FsOp::Remove { path, .. }
+                | FsOp::Copy { to: path, .. }
+                | FsOp::Write { path, .. } => path,
                 FsOp::Rename { from, .. } => from,
             };
             state.notice = Some(Notice::FileOpFailed {
@@ -326,6 +329,7 @@ pub fn fs_done(state: &mut State, op: FsOp, result: io::Result<()>, out: &mut Ve
                 .retain(|folder, _| !matches!(folder, Folder::Sub(dir) if dir.is_within(&path)));
             vec![path.to_path(&root)]
         }
+        FsOp::Copy { to: path, .. } | FsOp::Write { path, .. } => vec![path.to_path(&root)],
     };
     rebuild(&mut state.tree);
     watch::changed(state, changed, out);

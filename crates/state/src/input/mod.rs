@@ -29,7 +29,13 @@ pub fn context(state: &State) -> Context {
             Overlay::None,
             Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
         ) => match state.layout.focused().active() {
-            Some(Tab::Ink(_)) => Context::Drawing,
+            Some(Tab::Ink(ink)) => match (ink.typed(), state.input.mode) {
+                (None, _) => Context::Drawing,
+                // Text being typed takes the keys; normal mode adds a way out.
+                (Some(_), Mode::Normal) => Context::DrawingText,
+                (Some(_), Mode::Insert | Mode::Select) => mode_context(state),
+            },
+            Some(Tab::Image(_)) => Context::ImageViewer,
             Some(Tab::Text(text)) => match text.showing() {
                 Showing::Document(_, _, Beside::Alone) => Context::Document,
                 Showing::Pages(_, _, Beside::Alone) => Context::Pages,
@@ -70,7 +76,7 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             insert_key(state, key, out);
             state.input.last_insert.keys.push(key);
         }
-        (None, context @ (Context::Normal | Context::Select)) => {
+        (None, context @ (Context::Normal | Context::Select | Context::DrawingText)) => {
             let digit = match key.code {
                 KeyCode::Char(c) if key.mods.is_empty() && state.input.pending.len == 0 => {
                     c.to_digit(10).map(|digit| digit as usize)
@@ -116,7 +122,8 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::Confirm
             | Context::Document
             | Context::Pages
-            | Context::Drawing),
+            | Context::Drawing
+            | Context::ImageViewer),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -317,6 +324,8 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::Confirm
         | Context::Document
         | Context::Pages
-        | Context::Drawing => None,
+        | Context::Drawing
+        | Context::ImageViewer
+        | Context::DrawingText => None,
     }
 }

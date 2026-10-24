@@ -26,17 +26,23 @@ const DRAWINGS: &str = "\
 `.pdt` files are paged documents and `.bdt` files are boards; both open into panes like any file.
 The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
 Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
+Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
 
 | Keys | Context | Action |
 | --- | --- | --- |
 | `b` / `e` | drawing | The pen's tip draws / erases whole strokes. |
 | `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to scale, the dot above to rotate. |
 | `tl` / `ta` / `tr` / `to` | drawing | The tip drags out a line / arrow / rectangle / ellipse. |
+| `tt` | drawing | The tip places text: a tap starts it, a drag sets its wrap width, a press on text edits it. Typing uses helix keys in insert, normal and select mode. |
+| `esc` | text in normal mode | Keep the text and go back to drawing; pressing elsewhere keeps it too. Blank text is dropped. |
+| `:image <path>`, `space i` | drawing, note | Put an image in: a drawing embeds it in the middle of the view, at its pixel size in points and no wider than most of the page, and it moves, turns and scales like any mark; a note links it as `![[name]]` on the cursor's line, or a new line below. `space i` picks from the project's images. |
+| drop a file | drawing, note | An image dropped in the middle of a drawing lands where it was let go; on a note it is linked, copied beside the note first (lowercase, dashed name) when it comes from outside the project. Other files, and drops near an edge, open as before. |
+| `p`, `:paste-image` | drawing, note | Put the clipboard's image in. A note keeps it beside itself as `pasted-image-<date>.png` (UTC); `space p` in a note does the same when the clipboard holds an image and no text. |
 | `dd`, `del` | drawing | Delete the selection. |
 | `u` / `U` | drawing | Undo / redo the drawing. |
-| `+` / `-` / `=` | drawing | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
-| `zf` | drawing | Fit pages to the pane's width, or to its height. |
-| `h j k l`, arrows, wheel | drawing | Pan; pages stay on screen. |
+| `+` / `-` / `=` | pages, drawing, image | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
+| `zf` | pages, drawing, image | Fit to the pane's width, then its height, then the whole page. |
+| `h j k l`, arrows, wheel | pages, drawing, image | Pan; pages stay on screen. On typst pages `j`/`k` scroll and only `h`/`l` pan. |
 | `]p` / `[p`, `gg` / `G` | drawing | Next / previous page, first / last page. |
 | `o` / `O` | drawing | A blank page below / above the page in focus. |
 | `dp` | drawing | Remove the page in focus. |

@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::Arc;
 
 use helix_core::RopeSlice;
 use model::markdown::CalloutKind;
+use model::picture::Encoding;
 use model::typeset::Display;
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
@@ -13,7 +15,7 @@ use pulldown_cmark::{
 
 use crate::project::links::{self, Dest, Resolution};
 
-use super::targets::{is_image_path, link_target, locate, percent_decode, vault_image};
+use super::targets::{link_target, locate, percent_decode, vault_image};
 use super::{
     Base, Block, BlockKind, Callout, CalloutFold, Code, Column, Embed, EmbedKind, Emphasis, Figure,
     FigureKind, Image, Inline, Level, Link, LinkTarget, ListKind, Markdown, Math, Mermaid, RowKind,
@@ -563,9 +565,11 @@ impl Builder<'_> {
                     LinkType::WikiLink { .. } => {
                         let link = WikiLink::parse(&capture.dest, None);
                         let dest = Dest::Wiki(link.target.as_str());
-                        let kind = match is_image_path(&link.target) {
-                            true => EmbedKind::Image(vault_image(self.base, dest)),
-                            false => EmbedKind::Note(links::resolve(
+                        let kind = match Encoding::of_path(Path::new(link.target.as_str())) {
+                            Some(encoding) => {
+                                EmbedKind::Image(vault_image(self.base, dest, encoding))
+                            }
+                            None => EmbedKind::Note(links::resolve(
                                 self.base.vault,
                                 self.base.folder,
                                 dest,

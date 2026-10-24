@@ -3,6 +3,7 @@ mod format;
 mod history;
 mod input;
 mod mesh;
+mod text;
 mod tool;
 
 use std::sync::Arc;
@@ -65,4 +66,12 @@ pub fn mark(geometry: Geometry, placement: Placement) -> Mark {
         paint: paint(),
         ink: Ink::Stroke(Arc::new(geometry)),
     }
+}
+
+/// The bundled and system fonts, loaded once for every test.
+pub fn fonts() -> ink::text::Fonts {
+    static FONTS: std::sync::OnceLock<ink::text::Fonts> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| ink::text::Fonts::new(&model::fonts::BUNDLED))
+        .clone()
 }

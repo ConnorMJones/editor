@@ -60,6 +60,9 @@ typst-pdf = "0.15.1"
 typst-svg = "0.15.1"
 # Same version as typst's, shared with GPUI.
 usvg = { version = "0.47.0", default-features = false }
+# Text marks in drawings; the versions GPUI already builds.
+cosmic-text = "0.19.0"
+lyon_tessellation = "1.0.22"
 # Tests and benches.
 criterion = { version = "0.8.2", features = ["html_reports"] }
 tempfile = "3.20.0"

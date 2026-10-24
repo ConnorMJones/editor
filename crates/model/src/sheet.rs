@@ -198,10 +198,20 @@ impl Viewport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Fit {
-    /// The widest page spans the pane.
     Width,
-    /// The page in focus fills the pane's height.
     Height,
+    Page,
+}
+
+impl Fit {
+    /// The fit after this one, for a key that steps through them.
+    pub fn next(self) -> Fit {
+        match self {
+            Fit::Width => Fit::Height,
+            Fit::Height => Fit::Page,
+            Fit::Page => Fit::Width,
+        }
+    }
 }
 
 /// A factor on a view's base scale, within what a pane can usefully show.
@@ -287,12 +297,12 @@ impl SheetView {
     }
 
     pub fn scale(&self, stack: &Stack, viewport: Viewport) -> f32 {
+        let page = stack.place(self.centre.page).size;
         let fitted = match self.fit {
             Fit::Width => viewport.width.get() / (stack.width() + 2.0 * GAP),
-            Fit::Height => {
-                viewport.height.get()
-                    / (stack.place(self.centre.page).size.height.get() + 2.0 * GAP)
-            }
+            Fit::Height => viewport.height.get() / (page.height.get() + 2.0 * GAP),
+            Fit::Page => (viewport.width.get() / (page.width.get() + 2.0 * GAP))
+                .min(viewport.height.get() / (page.height.get() + 2.0 * GAP)),
         };
         fitted * self.zoom.get()
     }
@@ -487,4 +497,11 @@ impl PlaneView {
         let off = at - Point::new(0.0, 0.0) - viewport.centre();
         self.centre = under - Vector::new(off.x / scale, off.y / scale);
     }
+}
+
+/// A pane's size and its line height, as the host drew it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measure {
+    pub viewport: Viewport,
+    pub line: Px,
 }

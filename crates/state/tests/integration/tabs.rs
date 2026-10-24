@@ -272,7 +272,11 @@ fn buffer_picker_lists_most_recently_used_first() {
     let labels: Vec<String> = match &h.state.overlay {
         Overlay::Picker(picker) => match &picker.items {
             Items::Buffers(buffers) => buffers.iter().map(|(_, label)| label.clone()).collect(),
-            Items::Files(_) | Items::Grep(_) | Items::Commands | Items::Backlinks(_) => {
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Grep(_)
+            | Items::Commands
+            | Items::Backlinks(_) => {
                 panic!("wrong picker")
             }
         },

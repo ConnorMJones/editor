@@ -13,7 +13,7 @@ use slotmap::SlotMap;
 use crate::State;
 use crate::git::diffview::{self, Right};
 use crate::text::buffer::{Buffer, BufferId, HistoryStep, TextDoc, Uncommitted};
-use crate::view::layout::{Layout, TextView};
+use crate::view::layout::{Edited, Editing, Layout};
 use crate::view::tab::{Opened, Tab, TextTabs};
 
 /// Sorted, deduplicated lines touched by any range.
@@ -49,21 +49,49 @@ pub fn exit_select_mode(state: &mut State) {
     }
 }
 
-pub enum Focused<'a, 'b> {
-    Text(&'a mut TextView, &'b mut TextDoc),
+pub enum Focused<'a> {
+    Text(FocusedText<'a>),
     Empty,
-    Drawing,
+    NotText,
     /// A rendering, or the deleted side of a diff.
     ReadOnly,
 }
 
-pub fn focused<'a, 'b>(
+/// The text commands act on: a view of a buffer, or a drawing's text being typed.
+pub struct FocusedText<'a> {
+    pub view: Editing<'a>,
+    pub doc: &'a mut TextDoc,
+}
+
+impl Edited<'_> {
+    /// The buffer whose other views follow an edit; a mark has none.
+    pub fn buffer(&self) -> Option<BufferId> {
+        match self {
+            Edited::Buffer { buffer, .. } => Some(*buffer),
+            Edited::Mark => None,
+        }
+    }
+}
+
+pub fn focused<'a>(
     layout: &'a mut Layout,
-    buffers: &'b mut SlotMap<BufferId, Buffer>,
-) -> Focused<'a, 'b> {
+    buffers: &'a mut SlotMap<BufferId, Buffer>,
+) -> Focused<'a> {
     let tab = match layout.focused_mut().active_mut() {
         None => return Focused::Empty,
-        Some(Tab::Ink(_)) => return Focused::Drawing,
+        Some(Tab::Image(_)) => return Focused::NotText,
+        Some(Tab::Ink(ink)) => {
+            return match ink.text_box() {
+                Some(text) => Focused::Text(FocusedText {
+                    view: Editing {
+                        selection: &mut text.selection,
+                        edited: Edited::Mark,
+                    },
+                    doc: &mut text.doc,
+                }),
+                None => Focused::NotText,
+            };
+        }
         Some(Tab::Text(tab)) => tab,
     };
     let buffer = &mut buffers[tab.buffer()];
@@ -73,21 +101,24 @@ pub fn focused<'a, 'b>(
         Shown::Render => return Focused::ReadOnly,
     };
     match right {
-        Right::Live => Focused::Text(tab.text_mut(), &mut buffer.doc),
+        Right::Live => Focused::Text(FocusedText {
+            view: tab.text_mut().editing(),
+            doc: &mut buffer.doc,
+        }),
         Right::Deleted => Focused::ReadOnly,
     }
 }
 
 /// The focused text, or `notice` set to why a text command cannot run.
-pub fn focused_text<'a, 'b>(
+pub fn focused_text<'a>(
     layout: &'a mut Layout,
-    buffers: &'b mut SlotMap<BufferId, Buffer>,
+    buffers: &'a mut SlotMap<BufferId, Buffer>,
     notice: &mut Option<Notice>,
-) -> Option<(&'a mut TextView, &'b mut TextDoc)> {
+) -> Option<FocusedText<'a>> {
     let refused = match focused(layout, buffers) {
-        Focused::Text(view, doc) => return Some((view, doc)),
+        Focused::Text(text) => return Some(text),
         Focused::Empty => Notice::NoBuffer,
-        Focused::Drawing => Notice::NotText,
+        Focused::NotText => Notice::NotText,
         Focused::ReadOnly => Notice::ReadOnly,
     };
     *notice = Some(refused);
@@ -123,11 +154,11 @@ pub fn try_select(
         notice,
         ..
     } = state;
-    let Some((view, doc)) = focused_text(layout, buffers, notice) else {
+    let Some(FocusedText { view, doc }) = focused_text(layout, buffers, notice) else {
         return;
     };
     match f(doc, &view.selection, languages) {
-        Ok(selection) => view.selection = selection.ensure_invariants(doc.text.slice(..)),
+        Ok(selection) => *view.selection = selection.ensure_invariants(doc.text.slice(..)),
         Err(error) => *notice = Some(error),
     }
 }
@@ -168,25 +199,29 @@ pub fn try_edit(
         notice,
         ..
     } = state;
-    let Some((view, doc)) = focused_text(layout, buffers, notice) else {
+    let Some(FocusedText { view, doc }) = focused_text(layout, buffers, notice) else {
         return;
     };
-    let tx = match f(doc, &view.selection, languages) {
+    let tx = match f(doc, view.selection, languages) {
         Ok(tx) => tx,
         Err(error) => {
             *notice = Some(error);
             return;
         }
     };
-    let buffer = view.buffer();
-    doc.apply(&tx, &view.selection, languages);
-    let text = doc.text.slice(..);
-    map_views(layout, buffer, tx.changes(), text);
-    match tx.changes().is_empty() {
-        true => {}
-        false => layout.keep(Opened::Text(buffer)),
+    doc.apply(&tx, view.selection, languages);
+    let text = doc.text.clone();
+    match view.edited.buffer() {
+        Some(buffer) => {
+            map_views(layout, buffer, tx.changes(), text.slice(..));
+            match tx.changes().is_empty() {
+                true => {}
+                false => layout.keep(Opened::Text(buffer)),
+            }
+            take_selection(layout, &tx, text.slice(..));
+        }
+        None => *view.selection = moved(view.selection, &tx, text.slice(..)),
     }
-    take_selection(layout, &tx, text);
 }
 
 pub fn edit(state: &mut State, f: impl FnOnce(&TextDoc, &Selection, &Loader) -> Transaction) {
@@ -207,14 +242,23 @@ fn take_selection(layout: &mut Layout, tx: &Transaction, text: RopeSlice) {
     }
 }
 
+/// A selection no other view shares, after `tx`: where it says, else mapped through it.
+fn moved(selection: &Selection, tx: &Transaction, text: RopeSlice) -> Selection {
+    match tx.selection() {
+        Some(selection) => selection.clone(),
+        None => selection.clone().map(tx.changes()),
+    }
+    .ensure_invariants(text)
+}
+
 /// Groups the focused buffer's staged edits into an undo revision.
 pub fn commit_focused(state: &mut State) {
     match focused(&mut state.layout, &mut state.buffers) {
-        Focused::Text(view, doc) => match doc.uncommitted {
-            Uncommitted::Pending { .. } => doc.commit(&view.selection),
+        Focused::Text(FocusedText { view, doc }) => match doc.uncommitted {
+            Uncommitted::Pending { .. } => doc.commit(view.selection),
             Uncommitted::Clean => {}
         },
-        Focused::Empty | Focused::Drawing | Focused::ReadOnly => {}
+        Focused::Empty | Focused::NotText | Focused::ReadOnly => {}
     }
 }
 
@@ -228,21 +272,29 @@ pub fn step_history(state: &mut State, step: HistoryStep, exhausted: Notice) {
         ..
     } = state;
     for _ in 0..count {
-        let Some((view, doc)) = focused_text(layout, buffers, notice) else {
+        let Some(FocusedText { view, doc }) = focused_text(layout, buffers, notice) else {
             return;
         };
-        doc.commit(&view.selection);
-        let buffer = view.buffer();
+        doc.commit(view.selection);
         let txs = doc.step_history(step, languages);
         if txs.is_empty() {
             *notice = Some(exhausted);
             return;
         }
-        let text = doc.text.slice(..);
-        layout.keep(Opened::Text(buffer));
-        for tx in &txs {
-            map_views(layout, buffer, tx.changes(), text);
-            take_selection(layout, tx, text);
+        let text = doc.text.clone();
+        match view.edited.buffer() {
+            Some(buffer) => {
+                layout.keep(Opened::Text(buffer));
+                for tx in &txs {
+                    map_views(layout, buffer, tx.changes(), text.slice(..));
+                    take_selection(layout, tx, text.slice(..));
+                }
+            }
+            None => {
+                for tx in &txs {
+                    *view.selection = moved(view.selection, tx, text.slice(..));
+                }
+            }
         }
     }
 }

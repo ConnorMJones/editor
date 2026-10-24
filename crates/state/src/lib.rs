@@ -2,13 +2,16 @@ pub mod apply;
 pub mod drawing;
 pub mod git;
 pub mod input;
+pub mod insert;
 pub mod job;
 pub mod project;
 pub mod render;
 pub mod sidebar;
 pub mod text;
 pub mod view;
+pub mod viewer;
 
+use ink::text::Fonts;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -135,6 +138,8 @@ pub struct State {
     pub project: Project,
     /// Shared with jobs that parse off the UI thread.
     pub languages: Arc<Loader>,
+    /// Shared with jobs that read drawings, which lay out their text.
+    pub fonts: Fonts,
     pub keymap: Keymap,
     pub buffers: SlotMap<BufferId, Buffer>,
     /// Files being read for their first buffer.
@@ -164,6 +169,7 @@ pub struct State {
     /// Open paged documents and boards, as text has `buffers`.
     pub pageds: drawing::PagedFiles,
     pub boards: drawing::BoardFiles,
+    pub images: viewer::ImageFiles,
     /// What new ink tabs draw with.
     pub ink: drawing::InkSettings,
 }
@@ -191,6 +197,7 @@ impl State {
                 refresh: InFlight::Idle,
             },
             languages: Arc::new(languages),
+            fonts: Fonts::new(&model::fonts::BUNDLED),
             keymap: Keymap::helix()?,
             buffers: SlotMap::with_key(),
             reads: SlotMap::with_key(),
@@ -228,15 +235,17 @@ impl State {
             compiles: Compiles::new(),
             pageds: SlotMap::with_key(),
             boards: SlotMap::with_key(),
+            images: SlotMap::with_key(),
             ink: drawing::InkSettings::default(),
         })
     }
 
-    /// Every open file: text buffers, then paged documents, then boards.
+    /// Every open file: text buffers, paged documents, boards, then images.
     pub fn files(&self) -> impl Iterator<Item = Opened> + '_ {
         (self.buffers.keys().map(Opened::Text))
             .chain(self.pageds.keys().map(Opened::Paged))
             .chain(self.boards.keys().map(Opened::Board))
+            .chain(self.images.keys().map(Opened::Image))
     }
 
     /// The disk state of `opened`'s file.
@@ -245,6 +254,7 @@ impl State {
             Opened::Text(buffer) => self.buffers[buffer].disk,
             Opened::Paged(id) => self.pageds[id].disk,
             Opened::Board(id) => self.boards[id].disk,
+            Opened::Image(id) => self.images[id].disk,
         }
     }
 
@@ -254,6 +264,8 @@ impl State {
             Opened::Text(buffer) => self.buffers[buffer].doc.is_modified(),
             Opened::Paged(id) => self.pageds[id].is_modified(),
             Opened::Board(id) => self.boards[id].is_modified(),
+            // Images are only viewed.
+            Opened::Image(_) => false,
         }
     }
 
@@ -262,6 +274,7 @@ impl State {
             Opened::Text(buffer) => &self.buffers[buffer].path,
             Opened::Paged(id) => &self.pageds[id].path,
             Opened::Board(id) => &self.boards[id].path,
+            Opened::Image(id) => &self.images[id].path,
         }
     }
 
@@ -281,6 +294,19 @@ impl State {
             Opened::Board(id) => {
                 self.boards.remove(id);
             }
+            Opened::Image(id) => {
+                self.images.remove(id);
+            }
+        }
+    }
+
+    /// What reading `opened`'s file again takes.
+    pub fn reload_of(&self, opened: Opened) -> job::Reload {
+        match opened {
+            Opened::Text(buffer) => job::Reload::Text(buffer),
+            Opened::Paged(id) => job::Reload::Paged(id, self.fonts.clone()),
+            Opened::Board(id) => job::Reload::Board(id, self.fonts.clone()),
+            Opened::Image(id) => job::Reload::Image(id, self.images[id].encoding),
         }
     }
 
@@ -623,6 +649,10 @@ pub enum Effect {
         clipboard: Clipboard,
         then: ClipboardUse,
     },
+    /// The host answers with `insert::pasted`.
+    ReadClipboardImage {
+        into: insert::ImageInto,
+    },
     OpenUrl(String),
     /// The host answers with `JobResult::Typeset`.
     Typeset(typeset::Request),
@@ -636,4 +666,5 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     tracing::trace_span!("render").in_scope(|| render::sync(state, out));
     tracing::trace_span!("diffs").in_scope(|| git::track::sync(state, out));
     tracing::trace_span!("diff views").in_scope(|| git::diffview::refresh(state, out));
+    tracing::trace_span!("typing").in_scope(|| drawing::typing::sync(state));
 }

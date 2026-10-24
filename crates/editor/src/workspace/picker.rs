@@ -23,7 +23,7 @@ impl Workspace {
         let fonts = &self.fonts;
         let previewed = match picker.items {
             Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Backlinks(_) => true,
-            Items::Commands => false,
+            Items::Commands | Items::Images(_) => false,
         };
         let viewport = window.viewport_size();
         let width = match previewed {
@@ -41,7 +41,11 @@ impl Workspace {
                 search: Search::Running,
                 ..
             }) => "indexing notes…".to_owned(),
-            Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Buffers(_)
+            | Items::Commands
+            | Items::Backlinks(_) => {
                 format!("{}/{}", picker.matches.len(), picker.items.len())
             }
         };
@@ -57,7 +61,7 @@ impl Workspace {
                     .map(|row| {
                         let index = picker.matches[row];
                         let (label, detail) = match &picker.items {
-                            Items::Files(_) | Items::Buffers(_) => {
+                            Items::Files(_) | Items::Images(_) | Items::Buffers(_) => {
                                 (picker.items.label(index).to_owned(), String::new())
                             }
                             Items::Commands => {

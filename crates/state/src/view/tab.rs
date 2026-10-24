@@ -10,6 +10,7 @@ use crate::render::pages::{PagesSeen, PagesState};
 use crate::render::{Opening, Rendering};
 use crate::text::buffer::BufferId;
 use crate::view::layout::TextView;
+use crate::viewer::{ImageId, ImageTab};
 
 /// A set of modes, one enum per set; each kind of text in `TextTabs` takes one.
 pub trait Modes: Sized + Clone {
@@ -365,12 +366,43 @@ pub enum Opened {
     Text(BufferId),
     Paged(PagedId),
     Board(BoardId),
+    Image(ImageId),
 }
 
-/// A tab: text in its modes, or a drawing.
+/// A file that can be written: anything open but an image, which is only viewed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Writable {
+    Text(BufferId),
+    Paged(PagedId),
+    Board(BoardId),
+}
+
+impl Opened {
+    pub fn writable(self) -> Option<Writable> {
+        match self {
+            Opened::Text(buffer) => Some(Writable::Text(buffer)),
+            Opened::Paged(id) => Some(Writable::Paged(id)),
+            Opened::Board(id) => Some(Writable::Board(id)),
+            Opened::Image(_) => None,
+        }
+    }
+}
+
+impl From<Writable> for Opened {
+    fn from(file: Writable) -> Opened {
+        match file {
+            Writable::Text(buffer) => Opened::Text(buffer),
+            Writable::Paged(id) => Opened::Paged(id),
+            Writable::Board(id) => Opened::Board(id),
+        }
+    }
+}
+
+/// A tab: text in its modes, a drawing, or an image.
 pub enum Tab {
     Text(TextTabs),
     Ink(InkTabs),
+    Image(ImageTab),
 }
 
 impl Tab {
@@ -378,20 +410,21 @@ impl Tab {
         match self {
             Tab::Text(text) => Opened::Text(text.buffer()),
             Tab::Ink(ink) => ink.opened(),
+            Tab::Image(image) => Opened::Image(image.file()),
         }
     }
 
     pub fn as_text(&self) -> Option<&TextTabs> {
         match self {
             Tab::Text(text) => Some(text),
-            Tab::Ink(_) => None,
+            Tab::Ink(_) | Tab::Image(_) => None,
         }
     }
 
     pub fn as_text_mut(&mut self) -> Option<&mut TextTabs> {
         match self {
             Tab::Text(text) => Some(text),
-            Tab::Ink(_) => None,
+            Tab::Ink(_) | Tab::Image(_) => None,
         }
     }
 }
@@ -403,6 +436,7 @@ impl Tab {
             Opened::Text(buffer) => Tab::Text(TextTabs::open(buffer, state.buffers[buffer].kind)),
             Opened::Paged(id) => Tab::Ink(drawing::open_paged(state, id)),
             Opened::Board(id) => Tab::Ink(drawing::open_board(state, id)),
+            Opened::Image(id) => Tab::Image(ImageTab::open(id)),
         }
     }
 
@@ -411,6 +445,7 @@ impl Tab {
         match self {
             Tab::Text(text) => Tab::Text(text.clone()),
             Tab::Ink(ink) => Tab::Ink(ink.copy()),
+            Tab::Image(image) => Tab::Image(image.copy()),
         }
     }
 }

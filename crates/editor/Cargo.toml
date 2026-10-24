@@ -31,6 +31,7 @@ cli.workspace = true
 clap.workspace = true
 gpui.workspace = true
 helix-core.workspace = true
+image.workspace = true
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 ink.workspace = true
 model.workspace = true

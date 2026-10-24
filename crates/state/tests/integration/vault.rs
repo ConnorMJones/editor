@@ -3,13 +3,14 @@ use std::path::Path;
 
 use helix_core::Selection;
 use model::notice::Notice;
+use model::picture::{Bitmap, Encoding};
 use state::input::keymap::Context;
 use state::input::picker::{Hit, Items, Search};
 use state::project::backlinks::Build;
 use state::project::files::{FileIndex, Indexed, OnIndexed};
 use state::project::path::RelPath;
 use state::render::document::{self, DocumentScroll};
-use state::render::markdown::{BlockKind, EmbedKind, ImageFile};
+use state::render::markdown::{BlockKind, EmbedKind, ImageFile, LocalImage};
 
 use state::view::tab::{Showing, TextTabs};
 use state::{Confirm, Overlay, input};
@@ -88,7 +89,11 @@ fn backlinks(h: &Harness) -> Vec<(String, u32)> {
                     })
                     .collect()
             }
-            Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Commands => {
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Buffers(_)
+            | Items::Grep(_)
+            | Items::Commands => {
                 panic!("wrong picker")
             }
         },
@@ -220,9 +225,10 @@ fn embedded_images_resolve_from_other_folders() {
         [BlockKind::Embed(image), BlockKind::Embed(note)] => {
             assert_eq!(
                 image.kind,
-                EmbedKind::Image(ImageFile::Local(
-                    h.state.project.root.path().join("assets/pic.png")
-                ))
+                EmbedKind::Image(ImageFile::Local(LocalImage {
+                    path: h.state.project.root.path().join("assets/pic.png").into(),
+                    encoding: Encoding::Bitmap(Bitmap::Png),
+                }))
             );
             assert_eq!(
                 note.kind,
@@ -332,7 +338,11 @@ fn backlinks_asked_for_before_the_file_index_fill_once_it_arrives() {
     match &h.state.overlay {
         Overlay::Picker(picker) => match &picker.items {
             Items::Backlinks(referrers) => assert_eq!(referrers.search, Search::Running),
-            Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Commands => {
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Buffers(_)
+            | Items::Grep(_)
+            | Items::Commands => {
                 panic!("wrong picker")
             }
         },

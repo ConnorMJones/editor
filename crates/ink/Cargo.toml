@@ -9,10 +9,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+cosmic-text.workspace = true
+lyon_tessellation.workspace = true
 model.workspace = true
 slotmap.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

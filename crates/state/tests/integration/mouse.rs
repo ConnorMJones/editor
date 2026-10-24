@@ -163,6 +163,7 @@ fn previews_load_in_jobs_and_are_cached() {
                     | Effect::Watch(_)
                     | Effect::WriteClipboard { .. }
                     | Effect::ReadClipboard { .. }
+                    | Effect::ReadClipboardImage { .. }
                     | Effect::OpenUrl(_)
                     | Effect::Typeset(_) => {}
                 }
@@ -224,4 +225,21 @@ fn unsaved_markers_cover_ancestors_and_clear_on_save() {
     assert!(h.state.tree.unsaved.paths.is_empty());
     h.run(|state, out| state::apply::apply(state, Command::Quit, out));
     assert!(h.quit);
+}
+
+#[test]
+fn a_folder_toggles_on_every_click_however_quick() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>e");
+    let src = row(&h, "src");
+    // The host counts a quick second click as a double.
+    let expanded = RowKind::Dir(Fold::Expanded);
+    let collapsed = RowKind::Dir(Fold::Collapsed);
+    for (count, fold) in [(1, expanded), (2, collapsed), (3, expanded), (1, collapsed)] {
+        h.run(|state, out| panes::click_tree(state, src, Click::of(count), out));
+        assert_eq!(h.state.tree.rows[src].kind, fold, "click count {count}");
+    }
 }

@@ -9,6 +9,7 @@ pub mod key;
 pub mod markdown;
 pub mod mode;
 pub mod notice;
+pub mod picture;
 pub mod register;
 pub mod scheme;
 pub mod sheet;

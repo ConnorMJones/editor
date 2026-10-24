@@ -759,6 +759,32 @@ impl TextView {
     pub fn buffer(&self) -> BufferId {
         self.buffer
     }
+
+    pub fn editing(&mut self) -> Editing<'_> {
+        Editing {
+            selection: &mut self.selection,
+            edited: Edited::Buffer {
+                buffer: self.buffer,
+                scroll: &mut self.scroll,
+            },
+        }
+    }
+}
+
+/// The selection a text command works on, and what it belongs to.
+pub struct Editing<'a> {
+    pub selection: &'a mut Selection,
+    pub edited: Edited<'a>,
+}
+
+pub enum Edited<'a> {
+    /// A view of a buffer; edits map the buffer's other views too.
+    Buffer {
+        buffer: BufferId,
+        scroll: &'a mut Scroll,
+    },
+    /// A drawing's text mark being typed, which no other view shows.
+    Mark,
 }
 
 /// Activation order across all panes; larger is more recent.

@@ -4945,6 +4945,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation: TransformationMatrix::unit(),
             });
         }
         Ok(())
@@ -5117,6 +5118,91 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity,
+            transformation: TransformationMatrix::unit(),
+        });
+        Ok(())
+    }
+
+    /// Paints `data` over a `size` rectangle mapped by `transform` into the window, so an image
+    /// can be rotated, scaled or skewed like any other mark.
+    pub fn paint_image_transformed(
+        &mut self,
+        size: Size<Pixels>,
+        transform: TransformationMatrix,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let [[a, c], [b, d]] = transform
+            .rotation_scale
+            .map(|row| row.map(|cell| cell * scale_factor));
+        let [e, f] = transform.translation.map(|cell| cell * scale_factor);
+        let (width, height) = (f32::from(size.width), f32::from(size.height));
+        let corners = [(0.0, 0.0), (width, 0.0), (0.0, height), (width, height)]
+            .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
+        let (min_x, max_x) = corners
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), (x, _)| {
+                (min.min(*x), max.max(*x))
+            });
+        let (min_y, max_y) = corners
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), (_, y)| {
+                (min.min(*y), max.max(*y))
+            });
+        let extent = (max_x - min_x, max_y - min_y);
+        match extent.0 > 0.0 && extent.1 > 0.0 && width > 0.0 && height > 0.0 {
+            true => {}
+            false => return Ok(()),
+        }
+        let bounds = Bounds {
+            origin: point(ScaledPixels(min_x), ScaledPixels(min_y)),
+            size: crate::size(ScaledPixels(extent.0), ScaledPixels(extent.1)),
+        };
+        let content_mask = self.content_mask().scale(scale_factor);
+        match bounds.intersect(&content_mask.bounds).is_empty() {
+            true => return Ok(()),
+            false => {}
+        }
+
+        let params = RenderImageParams {
+            image_id: data.id,
+            frame_index,
+        };
+        let tile = self
+            .sprite_atlas
+            .get_or_insert_with(params.into(), &mut || {
+                Ok(Some((
+                    data.size(frame_index),
+                    Cow::Borrowed(
+                        data.as_bytes(frame_index)
+                            .expect("It's the caller's job to pass a valid frame index"),
+                    ),
+                )))
+            })?
+            .expect("Callback above only returns Some");
+
+        // The shader maps the box `bounds` through `transformation`: scale the box onto the
+        // image's own rectangle, then apply the image's transform.
+        let (sx, sy) = (width / extent.0, height / extent.1);
+        let (ra, rb, rc, rd) = (a * sx, b * sx, c * sy, d * sy);
+        let transformation = TransformationMatrix {
+            rotation_scale: [[ra, rc], [rb, rd]],
+            translation: [e - (ra * min_x + rc * min_y), f - (rb * min_x + rd * min_y)],
+        };
+        let opacity = self.element_opacity();
+        self.next_frame.scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            bounds,
+            content_mask,
+            corner_radii: Default::default(),
+            tile,
+            opacity,
+            transformation,
         });
         Ok(())
     }

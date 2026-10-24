@@ -1,38 +1,41 @@
 //! A drawing's pane body: paper, patterns and strokes, drawn through meshes the GPU keeps.
 
 use std::borrow::Cow;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, MeshData, MeshKey, MeshVersion, PathBuilder, Pixels,
-    ScrollWheelEvent, Style, TransformationMatrix, Window, fill, point, px, relative, size,
+    RenderImage, ScrollWheelEvent, Size, Style, TransformationMatrix, Window, fill, point, px,
+    relative, size,
 };
-use ink::doc::{Background, Board, Drawing, MarkId, Paged, Pattern, Visibility};
+use helix_core::SmallVec;
+use ink::doc::{Background, Board, Drawing, GeometryId, Ink, MarkId, Paged, Pattern, Visibility};
 use ink::input::{Pressure, Tilt};
 use ink::mesh::Mesh;
-use ink::tool::{Brushing, Corner, Erasing, Handle, Selecting, Shaping};
+use ink::text::{Caret, Inked};
+use ink::tool::{Brushing, Corner, Erasing, Handle, Placing, Selecting, Shaping};
 use model::color::Rgb;
-use model::geom::{Affine, Local, Pane, Point, Rect, Surface, Vector};
-use model::sheet::Viewport;
+use model::geom::{Affine, Local, Pane, Point, Rect, Surface};
+use model::picture::{Picture, Source};
+use model::sheet::{Measure, Viewport};
 use model::theme::Color;
 use model::units::Px;
 use slotmap::Key as _;
 use state::drawing::frame::{self, InkFrame, Paper, REACH};
 use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
-use state::drawing::{self, Hand, InkTabs};
+use state::drawing::typing::{TextBox, Writing};
+use state::drawing::{Hand, InkTabs};
 use state::view::layout::PaneId;
 use state::view::tab::Tab;
 
 use crate::fonts::hsla;
+use crate::pictures::decoded;
 use crate::workspace::Workspace;
 
 /// The window's pixels.
-enum Screen {}
-
-/// Wheel pixels per doubling of the zoom.
-pub const WHEEL_PER_DOUBLING: f32 = 400.0;
+pub enum Screen {}
 
 pub struct DrawingElement {
     pub workspace: Entity<Workspace>,
@@ -49,7 +52,7 @@ impl IntoElement for DrawingElement {
 
 impl Element for DrawingElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Pictured;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::NamedInteger(
@@ -83,36 +86,58 @@ impl Element for DrawingElement {
         _request_layout: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Pictured {
         let pane = self.pane;
         let workspace = self.workspace.read(cx);
         (workspace.areas.drawings.borrow_mut()).insert(pane, bounds);
         let Some(viewport) = viewport(bounds) else {
-            return;
+            return Pictured::new();
         };
-        let active = workspace
-            .state
-            .layout
-            .panes()
-            .get(pane)
-            .and_then(|p| p.active());
-        let last = match active {
-            Some(Tab::Ink(InkTabs::Paged(tab))) => tab.hand.last,
-            Some(Tab::Ink(InkTabs::Board(tab))) => tab.hand.last,
-            Some(Tab::Text(_)) | None => return,
+        let state = &workspace.state;
+        let Placed { to_screen, view } = placed(bounds, viewport);
+        let (last, wanted) = match state.layout.panes().get(pane).and_then(|p| p.active()) {
+            Some(Tab::Ink(InkTabs::Paged(tab))) => {
+                let paged = state.pageds[tab.file()].edited.drawing();
+                let frame = frame::paged(paged, &tab.view, viewport);
+                (
+                    tab.hand.last,
+                    wanted::<Paged>(&frame, paged, &to_screen, &view),
+                )
+            }
+            Some(Tab::Ink(InkTabs::Board(tab))) => {
+                let board = state.boards[tab.file()].edited.drawing();
+                let frame = frame::board(board, &tab.view, viewport);
+                (
+                    tab.hand.last,
+                    wanted::<Board>(&frame, board, &to_screen, &view),
+                )
+            }
+            Some(Tab::Text(_) | Tab::Image(_)) | None => return Pictured::new(),
         };
+        let measure = Measure {
+            viewport,
+            line: Px(f32::from(workspace.fonts.cell.height)),
+        };
+        let (pictures, weak) = (workspace.pictures.clone(), self.workspace.downgrade());
         // Keys that move by part of the pane hear of a new size after this frame.
         match last {
-            Some(seen) if seen == viewport => {}
+            Some(seen) if seen == measure => {}
             Some(_) | None => {
                 let workspace = self.workspace.clone();
                 window.defer(cx, move |_, cx| {
                     workspace.update(cx, |workspace, _| {
-                        drawing::measured(&mut workspace.state, pane, viewport);
+                        state::view::sheet::measured(&mut workspace.state, pane, measure);
                     })
                 });
             }
         }
+        (wanted.into_iter())
+            .filter_map(|Wanted { id, picture, size }| {
+                let area = Bounds::new(point(px(0.0), px(0.0)), size);
+                let image = decoded(&pictures, &weak, &picture, area, window, cx)?;
+                Some(ImageShown { id, image })
+            })
+            .collect()
     }
 
     fn paint(
@@ -121,7 +146,7 @@ impl Element for DrawingElement {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut (),
-        _prepaint: &mut (),
+        pictured: &mut Pictured,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -133,12 +158,7 @@ impl Element for DrawingElement {
         let Some(viewport) = viewport(bounds) else {
             return;
         };
-        let to_screen: Affine<Pane, Screen> =
-            Affine::translation(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let view: Rect<Screen> = Rect::spanning(
-            to_screen.apply(Point::new(0.0, 0.0)),
-            to_screen.apply(Point::new(viewport.width.get(), viewport.height.get())),
-        );
+        let Placed { to_screen, view } = placed(bounds, viewport);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, desk));
             let screen = Onscreen {
@@ -150,39 +170,107 @@ impl Element for DrawingElement {
                 Some(Tab::Ink(InkTabs::Paged(tab))) => {
                     let paged = state.pageds[tab.file()].edited.drawing();
                     let frame = frame::paged(paged, &tab.view, viewport);
-                    paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, window)
+                    paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, pictured, window)
                 }
                 Some(Tab::Ink(InkTabs::Board(tab))) => {
                     let board = state.boards[tab.file()].edited.drawing();
                     let frame = frame::board(board, &tab.view, viewport);
-                    paint_ink::<Board>(&frame, &tab.hand, board, &screen, window)
+                    paint_ink::<Board>(&frame, &tab.hand, board, &screen, pictured, window)
                 }
-                Some(Tab::Text(_)) | None => {}
+                Some(Tab::Text(_) | Tab::Image(_)) | None => {}
             }
         });
     }
 }
 
+/// Where a pane sits in the window, and the part of the window it shows.
+pub struct Placed {
+    pub to_screen: Affine<Pane, Screen>,
+    pub view: Rect<Screen>,
+}
+
+pub fn placed(bounds: Bounds<Pixels>, viewport: Viewport) -> Placed {
+    let to_screen: Affine<Pane, Screen> =
+        Affine::translation(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+    let view = Rect::spanning(
+        to_screen.apply(Point::new(0.0, 0.0)),
+        to_screen.apply(Point::new(viewport.width.get(), viewport.height.get())),
+    );
+    Placed { to_screen, view }
+}
+
+/// The image marks a frame shows, decoded for this paint.
+pub type Pictured = SmallVec<[ImageShown; 4]>;
+
+pub struct ImageShown {
+    pub id: GeometryId,
+    pub image: Arc<RenderImage>,
+}
+
+/// An image mark on screen, and the size its pixels are drawn at.
+pub struct Wanted {
+    pub id: GeometryId,
+    pub picture: Picture,
+    pub size: Size<Pixels>,
+}
+
+/// The image marks on shown layers that reach into `view`.
+pub fn wanted<D: Drawing>(
+    frame: &InkFrame<'_, D::Surface>,
+    drawing: &D,
+    to_screen: &Affine<Pane, Screen>,
+    view: &Rect<Screen>,
+) -> SmallVec<[Wanted; 4]> {
+    let layers = drawing.layers();
+    let mut wanted = SmallVec::new();
+    for shown in &frame.shown {
+        let to_screen = shown.to_pane.then(to_screen);
+        let visible = (layers.iter().zip(shown.marks.iter()))
+            .filter(|((_, layer), _)| layer.visibility == Visibility::Shown);
+        for (_, marks) in visible {
+            wanted.extend(marks.iter().filter_map(|(_, mark)| {
+                let Ink::Image(image) = &mark.ink else {
+                    return None;
+                };
+                let transform = mark.placement.forward().then(&to_screen);
+                let [a, b, c, d, _, _] = transform.coefficients;
+                (image.built.bounds.mapped(&transform).intersects(view)).then(|| Wanted {
+                    id: image.built.id,
+                    picture: Picture {
+                        source: Source::Bytes(image.encoded.clone()),
+                        encoding: image.encoding,
+                    },
+                    size: size(
+                        px(image.extent.width.get() * a.hypot(b)),
+                        px(image.extent.height.get() * c.hypot(d)),
+                    ),
+                })
+            }));
+        }
+    }
+    wanted
+}
 /// Where a pane sits in the window, and the colour its overlays take.
-struct Onscreen {
-    to_screen: Affine<Pane, Screen>,
-    view: Rect<Screen>,
-    accent: Hsla,
+pub struct Onscreen {
+    pub to_screen: Affine<Pane, Screen>,
+    pub view: Rect<Screen>,
+    pub accent: Hsla,
 }
 
 /// A pane's bounds as a viewport; `None` while it has no area.
-fn viewport(bounds: Bounds<Pixels>) -> Option<Viewport> {
+pub fn viewport(bounds: Bounds<Pixels>) -> Option<Viewport> {
     Viewport::new(
         Px(f32::from(bounds.size.width)),
         Px(f32::from(bounds.size.height)),
     )
 }
 
-fn paint_ink<D: Drawing>(
+pub fn paint_ink<D: Drawing>(
     frame: &InkFrame<'_, D::Surface>,
     hand: &Hand<D::Target>,
     drawing: &D,
     screen: &Onscreen,
+    pictured: &[ImageShown],
     window: &mut Window,
 ) {
     let view = &screen.view;
@@ -223,7 +311,15 @@ fn paint_ink<D: Drawing>(
                 | Selecting::Boxing { .. }
                 | Selecting::Lassoing { .. } => (&[], Affine::identity()),
             };
-            for (id, mark) in marks.iter().filter(|(id, _)| !hidden.contains(id)) {
+            // A text mark being edited is drawn from the text instead.
+            let editing = hand.typing.as_ref().and_then(|open| match open.writing {
+                Writing::Replacing(id) if open.target == target => Some(id),
+                Writing::Replacing(_) | Writing::New => None,
+            });
+            let shown = marks
+                .iter()
+                .filter(|(id, _)| !hidden.contains(id) && editing != Some(*id));
+            for (id, mark) in shown {
                 let forward = (moved.contains(&id))
                     .then_some(&by)
                     .map_or(*mark.placement.forward(), |by| {
@@ -231,16 +327,38 @@ fn paint_ink<D: Drawing>(
                     });
                 let transform = forward.then(&to_screen);
                 let built = mark.built();
-                paint_mesh(
-                    MeshKey(built.id.get()),
-                    MeshVersion(0),
-                    &built.mesh,
-                    built.bounds.mapped(&transform),
-                    &transform,
-                    mark.paint.color,
-                    view,
-                    window,
-                );
+                match &mark.ink {
+                    // An image not decoded yet leaves its place empty for a frame or two.
+                    Ink::Image(image) => match pictured.iter().find(|shown| shown.id == built.id) {
+                        Some(shown) => {
+                            let [a, b, c, d, e, f] = transform.coefficients;
+                            let painted = window.paint_image_transformed(
+                                size(px(image.extent.width.get()), px(image.extent.height.get())),
+                                TransformationMatrix {
+                                    rotation_scale: [[a, c], [b, d]],
+                                    translation: [e, f],
+                                },
+                                shown.image.clone(),
+                                0,
+                            );
+                            match painted {
+                                Ok(()) => {}
+                                Err(error) => tracing::warn!(%error, "painting an image mark"),
+                            }
+                        }
+                        None => {}
+                    },
+                    Ink::Stroke(_) | Ink::Shape(_) | Ink::Text(_) => paint_mesh(
+                        MeshKey(built.id.get()),
+                        MeshVersion(0),
+                        &built.mesh,
+                        built.bounds.mapped(&transform),
+                        &transform,
+                        mark.paint.color,
+                        view,
+                        window,
+                    ),
+                }
             }
         }
     }
@@ -287,6 +405,13 @@ fn paint_ink<D: Drawing>(
             None => {}
         },
         Shaping::Idle | Shaping::Pressed { .. } => {}
+    }
+    match hand.typing.as_ref() {
+        Some(open) => match on_screen(open.target) {
+            Some((_, to_screen)) => paint_typed(&open.text, &to_screen, screen, window),
+            None => {}
+        },
+        None => {}
     }
     let line = |points: &mut dyn Iterator<Item = Point<Screen>>, closed: Closed| {
         let mut path = PathBuilder::stroke(px(1.0));
@@ -338,7 +463,17 @@ fn paint_ink<D: Drawing>(
                 Closed::Yes,
             )
         }),
-        Selecting::Idle | Selecting::Pressed { .. } => None,
+        Selecting::Idle | Selecting::Pressed { .. } => match &hand.tools.text {
+            Placing::Dragging { target, from, to } => on_screen(*target).map(|(_, to_screen)| {
+                let around = Rect::spanning(*from, *to);
+                line(
+                    &mut (Corner::AROUND.into_iter())
+                        .map(|corner| to_screen.apply(corner.of(&around))),
+                    Closed::Yes,
+                )
+            }),
+            Placing::Idle => None,
+        },
     };
     match path {
         Some(Ok(path)) => window.paint_path(path, screen.accent),
@@ -348,12 +483,12 @@ fn paint_ink<D: Drawing>(
 }
 
 #[derive(Clone, Copy)]
-enum Closed {
+pub enum Closed {
     Yes,
     No,
 }
 
-fn paint_mesh(
+pub fn paint_mesh(
     key: MeshKey,
     version: MeshVersion,
     shape: &Mesh,
@@ -388,7 +523,7 @@ fn paint_mesh(
 }
 
 /// Paper and its pattern over `area`, a surface's part of the pane.
-fn paint_paper(background: Background, area: Rect<Screen>, zoom: f32, window: &mut Window) {
+pub fn paint_paper(background: Background, area: Rect<Screen>, zoom: f32, window: &mut Window) {
     let rect = |left: f32, top: f32, width: f32, height: f32| {
         Bounds::new(point(px(left), px(top)), size(px(width), px(height)))
     };
@@ -443,13 +578,13 @@ fn paint_paper(background: Background, area: Rect<Screen>, zoom: f32, window: &m
 }
 
 /// Positions `step` apart after `from`, up to `to`.
-fn lines(from: f32, to: f32, step: f32) -> impl Iterator<Item = f32> + Clone {
+pub fn lines(from: f32, to: f32, step: f32) -> impl Iterator<Item = f32> + Clone {
     (1..)
         .map(move |n| from + n as f32 * step)
         .take_while(move |at| *at < to)
 }
 
-fn solid(rgb: Rgb) -> Hsla {
+pub fn solid(rgb: Rgb) -> Hsla {
     hsla(Color::opaque(rgb))
 }
 
@@ -461,7 +596,7 @@ pub fn now() -> Duration {
 
 /// Where `position` in the window falls on `pane`'s drawing, and the pane's size; `None` for a
 /// pane not drawn or with no area.
-fn on_pane(
+pub fn on_pane(
     workspace: &Workspace,
     pane: PaneId,
     position: gpui::Point<Pixels>,
@@ -515,15 +650,8 @@ pub fn wheel(
     let Some((at, viewport)) = on_pane(workspace, pane, event.position) else {
         return;
     };
-    let delta = event.delta.pixel_delta(workspace.fonts.cell.height);
-    let (x, y) = (f32::from(delta.x), f32::from(delta.y));
-    match event.modifiers.control {
-        true => {
-            let factor = (y / WHEEL_PER_DOUBLING).exp2();
-            drawing::zoomed(&mut workspace.state, pane, at, factor, viewport)
-        }
-        false => drawing::scrolled(&mut workspace.state, pane, Vector::new(-x, -y), viewport),
-    }
+    let wheel = crate::sheet::wheel_of(event, at, workspace.fonts.cell.height);
+    state::view::sheet::wheeled(&mut workspace.state, pane, wheel, viewport);
     cx.notify();
 }
 
@@ -537,5 +665,82 @@ pub fn stylus(tool: gpui::PenTool) -> Stylus {
         | gpui::PenTool::Finger
         | gpui::PenTool::Mouse
         | gpui::PenTool::Lens => Stylus::Tip,
+    }
+}
+
+/// Text being typed: its ink, a bar at each cursor and a tint over each selection.
+pub fn paint_typed(
+    text: &TextBox,
+    to_screen: &Affine<Surface, Screen>,
+    screen: &Onscreen,
+    window: &mut Window,
+) {
+    let transform = text.placement.forward().then(to_screen);
+    match &text.laid.inked {
+        Inked::Ink(ink) => paint_mesh(
+            MeshKey(ink.built.id.get()),
+            MeshVersion(0),
+            &ink.built.mesh,
+            ink.built.bounds.mapped(&transform),
+            &transform,
+            text.paint.color,
+            &screen.view,
+            window,
+        ),
+        Inked::Blank => {}
+    }
+    let carets = &text.laid.carets;
+    let rope = text.doc.text.slice(..);
+    let quad = |corners: [Point<Local>; 4], color: Hsla, window: &mut Window| {
+        let mut path = PathBuilder::fill();
+        for (index, corner) in corners.into_iter().enumerate() {
+            let at = transform.apply(corner);
+            match index {
+                0 => path.move_to(point(px(at.x), px(at.y))),
+                _ => path.line_to(point(px(at.x), px(at.y))),
+            }
+        }
+        path.close();
+        match path.build() {
+            Ok(path) => window.paint_path(path, color),
+            Err(error) => tracing::warn!(%error, "text cursor"),
+        }
+    };
+    // A bar a tenth of the line high is wide enough to see at any zoom.
+    let bar = |caret: Caret| caret.height * 0.1;
+    let tint = screen.accent.opacity(0.3);
+    for range in text.selection.iter() {
+        for index in range.from()..range.to().min(carets.len() - 1) {
+            let (here, next) = (carets[index], carets[index + 1]);
+            // A character ending its line, such as a newline, is shown as wide as the bar.
+            let right = match next.at.y == here.at.y {
+                true => next.at.x,
+                false => here.at.x + bar(here),
+            };
+            let (top, bottom) = (here.at.y, here.at.y + here.height);
+            quad(
+                [
+                    Point::new(here.at.x, top),
+                    Point::new(right, top),
+                    Point::new(right, bottom),
+                    Point::new(here.at.x, bottom),
+                ],
+                tint,
+                window,
+            );
+        }
+        let caret = carets[range.cursor(rope).min(carets.len() - 1)];
+        let (left, right) = (caret.at.x, caret.at.x + bar(caret));
+        let (top, bottom) = (caret.at.y, caret.at.y + caret.height);
+        quad(
+            [
+                Point::new(left, top),
+                Point::new(right, top),
+                Point::new(right, bottom),
+                Point::new(left, bottom),
+            ],
+            screen.accent,
+            window,
+        );
     }
 }

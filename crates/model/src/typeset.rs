@@ -21,6 +21,15 @@ pub struct Svg {
     pub baseline: Pt,
 }
 
+impl Svg {
+    pub fn picture(&self) -> crate::picture::Picture {
+        crate::picture::Picture {
+            source: crate::picture::Source::Bytes(self.bytes.clone()),
+            encoding: crate::picture::Encoding::Svg,
+        }
+    }
+}
+
 impl std::fmt::Debug for Svg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Svg")

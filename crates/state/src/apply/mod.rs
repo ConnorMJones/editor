@@ -7,11 +7,11 @@ use model::register::Register;
 
 use crate::drawing;
 use crate::git::navigate::{self};
+use crate::insert::{self, ImageFrom};
 use crate::job::{FsOp, Job};
 use crate::sidebar::tree::EntryKind;
 use crate::text::buffer::HistoryStep;
 use crate::view::panes::Arrive;
-use crate::view::tab::Tab;
 use crate::{
     Confirm, Effect, Exit, LastMotion, Overlay, PromptKind, State, Sticky, Waiting,
     git::conflict,
@@ -21,27 +21,27 @@ use crate::{
     project::links,
     render,
     render::document::{self},
-    render::pages::{self},
     text::edit,
     text::motion,
     text::select,
-    view::mode,
     view::panes,
+    view::{self, mode},
 };
 
-mod files;
+pub mod files;
 mod focused;
 
 use files::{
-    close_active, focused_file, reload_job, renamed, write_focused, write_job, write_modified,
+    close_active, focused_file, focused_writable, reload_job, renamed, write_focused, write_job,
+    write_modified,
 };
 use focused::{step_history, tree_select};
 
 pub use files::Force;
 pub use files::{open, opened, place, read_now, reloaded, written};
 pub use focused::{
-    Focused, commit_focused, count_of, edit, exit_select_mode, focused, focused_text, map_views,
-    movement_of, reselect, select, selected_lines, try_edit, try_select,
+    Focused, FocusedText, commit_focused, count_of, edit, exit_select_mode, focused, focused_text,
+    map_views, movement_of, reselect, select, selected_lines, try_edit, try_select,
 };
 
 pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
@@ -212,15 +212,16 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         }
         Command::ReplaceFrom(register) => edit::replace_from(state, register, out),
 
-        Command::Undo => match state.layout.focused().active() {
-            Some(Tab::Ink(_)) => drawing::command::step(state, drawing::command::Step::Undo),
-            Some(Tab::Text(_)) | None => {
+        // Text being typed in a drawing undoes its own edits; otherwise the drawing steps.
+        Command::Undo => match focused(&mut state.layout, &mut state.buffers) {
+            Focused::NotText => drawing::command::step(state, drawing::command::Step::Undo),
+            Focused::Text(_) | Focused::Empty | Focused::ReadOnly => {
                 step_history(state, HistoryStep::Undo, Notice::AlreadyOldest)
             }
         },
-        Command::Redo => match state.layout.focused().active() {
-            Some(Tab::Ink(_)) => drawing::command::step(state, drawing::command::Step::Redo),
-            Some(Tab::Text(_)) | None => {
+        Command::Redo => match focused(&mut state.layout, &mut state.buffers) {
+            Focused::NotText => drawing::command::step(state, drawing::command::Step::Redo),
+            Focused::Text(_) | Focused::Empty | Focused::ReadOnly => {
                 step_history(state, HistoryStep::Redo, Notice::AlreadyNewest)
             }
         },
@@ -250,14 +251,25 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::PromptSubmit => prompt::submit(state, out),
 
         Command::Open(path) => open(state, path, Arrive::AsIs, None, OpenAs::Permanent, out),
+        Command::PasteImage => match insert::into_focused(state, None) {
+            Ok(into) => out.push(Effect::ReadClipboardImage { into }),
+            Err(notice) => state.notice = Some(notice),
+        },
+        Command::Image(path) => match (
+            files::canonical(state.project.root.path(), &path).and_then(ImageFrom::file),
+            insert::into_focused(state, None),
+        ) {
+            (Ok(image), Ok(into)) => insert::insert(state, into, image, out),
+            (Err(notice), _) | (_, Err(notice)) => state.notice = Some(notice),
+        },
         Command::GotoFile => links::goto_file(state, out),
         Command::Write => write_focused(state, Dirs::Existing, out),
         Command::ForceWrite => write_focused(state, Dirs::Create, out),
         Command::WriteAs(path, dirs) => {
             let path = helix_stdx::path::normalize(state.project.root.path().join(path));
-            match focused_file(&state.layout).and_then(|opened| renamed(state, opened, path)) {
-                Ok(opened) => {
-                    let job = write_job(state, opened, dirs);
+            match focused_writable(&state.layout).and_then(|file| renamed(state, file, path)) {
+                Ok(file) => {
+                    let job = write_job(state, file, dirs);
                     out.push(Effect::Job(job));
                 }
                 Err(refused) => state.notice = Some(refused),
@@ -266,11 +278,11 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::WriteAll => {
             write_modified(state, out);
         }
-        Command::WriteQuit => match focused_file(&state.layout) {
-            Ok(opened) => {
-                let job = write_job(state, opened, Dirs::Existing);
+        Command::WriteQuit => match focused_writable(&state.layout) {
+            Ok(file) => {
+                let job = write_job(state, file, Dirs::Existing);
                 out.push(Effect::Job(job));
-                state.exit = Exit::AfterWrite(Waiting::one(opened));
+                state.exit = Exit::AfterWrite(Waiting::one(file.into()));
             }
             Err(_) => apply(state, Command::Quit, out),
         },
@@ -352,7 +364,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
 
         Command::Read(command) => render::read(state, command),
         Command::Document(command) => document::command(state, command),
-        Command::Pages(command) => pages::command(state, command),
+        Command::View(command) => view::sheet::command(state, command),
         Command::Drawing(command) => drawing::command::command(state, command),
         Command::ExportPdf => crate::render::typeset::export_pdf(state, out),
     }

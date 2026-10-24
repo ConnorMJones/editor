@@ -3,19 +3,19 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use model::picture::Encoding;
 use pulldown_cmark::LinkType;
 
 use crate::project::links::{self, Dest, Resolution};
 
-use super::{Base, ImageFile, LinkTarget, WikiLink};
-
-const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
+use super::{Base, ImageFile, LinkTarget, LocalImage, WikiLink};
 
 /// A URL, or a path tried from the note's directory and the vault root, then by vault resolution.
 pub fn locate(src: &str, base: Base) -> ImageFile {
-    match has_scheme(src) {
-        true => ImageFile::Remote(Arc::from(src)),
-        false => {
+    match (has_scheme(src), Encoding::of_path(Path::new(src))) {
+        (true, _) => ImageFile::Remote(Arc::from(src)),
+        (false, None) => ImageFile::NotPicture,
+        (false, Some(encoding)) => {
             let path = Path::new(src);
             let candidates = match path.is_absolute() {
                 true => [Some(path.to_owned()), None],
@@ -26,16 +26,22 @@ pub fn locate(src: &str, base: Base) -> ImageFile {
                 .flatten()
                 .find(|candidate| candidate.is_file());
             match found {
-                Some(found) => ImageFile::Local(found),
-                None => vault_image(base, Dest::Path(src)),
+                Some(found) => ImageFile::Local(LocalImage {
+                    path: found.into(),
+                    encoding,
+                }),
+                None => vault_image(base, Dest::Path(src), encoding),
             }
         }
     }
 }
 
-pub fn vault_image(base: Base, dest: Dest<&str>) -> ImageFile {
+pub fn vault_image(base: Base, dest: Dest<&str>, encoding: Encoding) -> ImageFile {
     match links::resolve(base.vault, base.folder, dest) {
-        Resolution::File(path) => ImageFile::Local(path.to_path(base.root)),
+        Resolution::File(path) => ImageFile::Local(LocalImage {
+            path: path.to_path(base.root).into(),
+            encoding,
+        }),
         Resolution::Missing(_) | Resolution::Invalid => ImageFile::Missing,
     }
 }
@@ -103,11 +109,4 @@ pub fn link_target(link_type: LinkType, dest: &str, alias: Option<String>) -> Li
             }
         },
     }
-}
-
-pub fn is_image_path(target: &str) -> bool {
-    Path::new(target)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }

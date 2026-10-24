@@ -13,6 +13,7 @@ use crate::doc::{
 use crate::geom::{Affine, Local, Point, Rect, Surface, inside_polygon};
 use crate::input::{Modeled, Modeler, Sample};
 use crate::mesh::MeshBuilder;
+use crate::text::{TextInk, Wrap};
 
 /// Pen input on the surface of the target fixed at `Down`.
 #[derive(Clone, Copy, Debug)]
@@ -31,6 +32,8 @@ pub enum Outcome<T> {
     Drawn,
     Commit(MarkChange<T>),
     Failed(StrokeError),
+    /// The text tool asks for text to be typed there.
+    Type(TypeAt<T>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +42,7 @@ pub enum ToolKind {
     Eraser,
     Select(Gather),
     Shape(ShapeKind),
+    Text,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +59,7 @@ pub struct Tools<T> {
     pub eraser: EraserTool<T>,
     pub select: Selecting<T>,
     pub shape: ShapeTool<T>,
+    pub text: Placing<T>,
 }
 
 impl<T: Copy + PartialEq> Tools<T> {
@@ -68,6 +73,7 @@ impl<T: Copy + PartialEq> Tools<T> {
                 paint,
                 state: Shaping::Idle,
             },
+            text: Placing::Idle,
         }
     }
 
@@ -83,6 +89,7 @@ impl<T: Copy + PartialEq> Tools<T> {
             ToolKind::Eraser => self.eraser.input(input, drawing),
             ToolKind::Select(gather) => self.select.input(gather, input, drawing, reach),
             ToolKind::Shape(kind) => self.shape.input(kind, input),
+            ToolKind::Text => self.text.input(input, drawing, reach),
         }
     }
 
@@ -92,6 +99,7 @@ impl<T: Copy + PartialEq> Tools<T> {
         self.eraser.state = Erasing::Idle;
         self.select = Selecting::Idle;
         self.shape.state = Shaping::Idle;
+        self.text = Placing::Idle;
     }
 }
 
@@ -758,6 +766,99 @@ impl<T: Copy> ShapeTool<T> {
             (Shaping::Pressed { .. }, PenInput::Up(_) | PenInput::Cancel)
             | (Shaping::Dragging { .. }, PenInput::Cancel) => Outcome::Drawn,
             (Shaping::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+                Outcome::Ignored
+            }
+        }
+    }
+}
+
+/// Places text: a press on a text mark opens it, elsewhere a drag sets the width of new text.
+#[derive(Debug)]
+pub enum Placing<T> {
+    Idle,
+    Dragging {
+        target: T,
+        from: Point<Surface>,
+        to: Point<Surface>,
+    },
+}
+
+/// Where the text tool asks for text.
+#[derive(Clone, Debug)]
+pub enum TypeAt<T> {
+    /// New text with its top left at `at`.
+    New {
+        target: T,
+        at: Point<Surface>,
+        wrap: Wrap,
+    },
+    /// The text mark `id`, as found under the pen, to edit.
+    Mark {
+        target: T,
+        id: MarkId,
+        text: Arc<TextInk>,
+        placement: Placement,
+        paint: Paint,
+    },
+}
+
+impl<T: Copy> Placing<T> {
+    pub fn input<D: Drawing<Target = T>>(
+        &mut self,
+        input: PenInput<T>,
+        drawing: &D,
+        reach: Size,
+    ) -> Outcome<T> {
+        match (std::mem::replace(self, Placing::Idle), input) {
+            (_, PenInput::Down { target, sample }) => {
+                let under = (drawing.marks(target).into_iter())
+                    .flat_map(|marks| marks.iter())
+                    .filter_map(|(id, mark)| match &mark.ink {
+                        Ink::Text(text) => Some((id, mark, text)),
+                        Ink::Stroke(_) | Ink::Shape(_) | Ink::Image(_) => None,
+                    })
+                    .filter(|(_, mark, _)| mark.touches(sample.at, reach.get()))
+                    .last();
+                match under {
+                    Some((id, mark, text)) => Outcome::Type(TypeAt::Mark {
+                        target,
+                        id,
+                        text: text.clone(),
+                        placement: mark.placement,
+                        paint: mark.paint,
+                    }),
+                    None => {
+                        *self = Placing::Dragging {
+                            target,
+                            from: sample.at,
+                            to: sample.at,
+                        };
+                        Outcome::Drawn
+                    }
+                }
+            }
+            (Placing::Dragging { target, from, .. }, PenInput::Move(sample)) => {
+                *self = Placing::Dragging {
+                    target,
+                    from,
+                    to: sample.at,
+                };
+                Outcome::Drawn
+            }
+            (Placing::Dragging { target, from, .. }, PenInput::Up(sample)) => {
+                let area = Rect::spanning(from, sample.at);
+                // A tap starts unwrapped text.
+                let wrap = (Size::new(area.max().x - area.min().x).ok())
+                    .filter(|width| width.get() > reach.get())
+                    .map_or(Wrap::Lines, Wrap::At);
+                Outcome::Type(TypeAt::New {
+                    target,
+                    at: area.min(),
+                    wrap,
+                })
+            }
+            (Placing::Dragging { .. }, PenInput::Cancel) => Outcome::Drawn,
+            (Placing::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
                 Outcome::Ignored
             }
         }

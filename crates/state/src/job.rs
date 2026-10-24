@@ -12,8 +12,12 @@ use helix_core::syntax::Loader;
 use helix_core::{Language, Rope, Syntax};
 use ink::doc::{Board, PageSize, Paged};
 use ink::format::FormatError;
+use ink::text::Fonts;
 use model::command::Dirs;
+use model::picture::Encoding;
+use model::sheet::Stack;
 
+use crate::drawing::embed::{self, Destination};
 use crate::drawing::{BoardId, PagedId};
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
@@ -21,10 +25,12 @@ use crate::input::picker::{self, Hit, Preview, Search};
 use crate::project::files::{self, Rescan, Walked};
 use crate::project::path::{FileKind, TextKind};
 use crate::project::path::{Folder, RelPath};
+use crate::render::markdown::LocalImage;
 use crate::sidebar::tree::{self, Entry, EntryKind};
 use crate::text::buffer::{BufferId, Disk, ReadId, TextDoc};
 use crate::text::highlight;
 use crate::view::tab::Opened;
+use crate::viewer::{self, ImageId, ProbeError, Probed};
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 use ink::history::Revision;
 
@@ -34,6 +40,7 @@ pub enum Job {
         read: ReadId,
         path: PathBuf,
         languages: Arc<Loader>,
+        fonts: Fonts,
     },
     Write {
         path: PathBuf,
@@ -61,7 +68,7 @@ pub enum Job {
         root: PathBuf,
     },
     Reload {
-        file: Opened,
+        file: Reload,
         path: PathBuf,
         when: ReloadIf,
         policy: ReloadPolicy,
@@ -77,6 +84,14 @@ pub enum Job {
         generation: u64,
         current: Arc<AtomicU64>,
     },
+    /// Reads an image whole to place in a drawing.
+    Embed {
+        path: PathBuf,
+        encoding: Encoding,
+        into: Destination,
+    },
+    /// Reads the size of an image a document shows.
+    Probe(LocalImage),
     Preview {
         root: PathBuf,
         path: RelPath,
@@ -157,9 +172,28 @@ impl ReloadPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FsOp {
-    Create { path: RelPath, kind: EntryKind },
-    Rename { from: RelPath, to: RelPath },
-    Remove { path: RelPath, kind: EntryKind },
+    Create {
+        path: RelPath,
+        kind: EntryKind,
+    },
+    Rename {
+        from: RelPath,
+        to: RelPath,
+    },
+    Remove {
+        path: RelPath,
+        kind: EntryKind,
+    },
+    /// A file from anywhere copied to a new file in the project.
+    Copy {
+        from: PathBuf,
+        to: RelPath,
+    },
+    /// A new file in the project holding `bytes`.
+    Write {
+        path: RelPath,
+        bytes: Arc<[u8]>,
+    },
 }
 
 pub enum JobResult {
@@ -197,6 +231,15 @@ pub enum JobResult {
         generation: u64,
         hits: Vec<Hit>,
         search: Search,
+    },
+    Embedded {
+        path: PathBuf,
+        into: Destination,
+        read: Result<embed::Read, ProbeError>,
+    },
+    Probed {
+        image: LocalImage,
+        result: Result<Probed, ProbeError>,
     },
     Previewed {
         path: RelPath,
@@ -286,10 +329,33 @@ pub enum OpenRead {
         drawing: Board,
         disk: Disk,
     },
+    Image {
+        encoding: Encoding,
+        stack: Stack,
+        modified: SystemTime,
+    },
     NotUtf8,
     NotAFile,
     Failed(io::Error),
-    Unreadable(FormatError),
+    Unreadable(Unreadable),
+}
+
+/// Bytes that aren't the file kind their name says.
+#[derive(Debug, thiserror::Error)]
+pub enum Unreadable {
+    #[error(transparent)]
+    Drawing(#[from] FormatError),
+    #[error(transparent)]
+    Image(#[from] ProbeError),
+}
+
+/// A file to read again, with what reading it as its kind needs.
+#[derive(Clone, Debug)]
+pub enum Reload {
+    Text(BufferId),
+    Paged(PagedId, Fonts),
+    Board(BoardId, Fonts),
+    Image(ImageId, Encoding),
 }
 
 /// A file read again, as its own kind.
@@ -297,6 +363,7 @@ pub enum Reloaded {
     Text(BufferId, DiskRead<Rope, NotUtf8>),
     Paged(PagedId, DiskRead<Paged, FormatError>),
     Board(BoardId, DiskRead<Board, FormatError>),
+    Image(ImageId, DiskRead<PageSize, ProbeError>),
 }
 
 /// What reading a file again found; `E` is why its bytes weren't its kind.
@@ -360,6 +427,8 @@ pub fn run(job: Job) -> JobResult {
         Job::Reload { .. } => "reload",
         Job::Fs { .. } => "fs",
         Job::Grep { .. } => "grep",
+        Job::Embed { .. } => "embed",
+        Job::Probe { .. } => "probe",
         Job::Preview { .. } => "preview",
         Job::Links { .. } => "links",
         Job::DiffBase { .. } => "diff base",
@@ -374,9 +443,10 @@ pub fn run(job: Job) -> JobResult {
             read,
             path,
             languages,
+            fonts,
         } => JobResult::Opened {
             read,
-            result: read_file(&path, &languages),
+            result: read_file(&path, &languages, &fonts),
         },
         Job::Write {
             path,
@@ -432,19 +502,23 @@ pub fn run(job: Job) -> JobResult {
             policy,
         } => {
             let read = match file {
-                Opened::Text(buffer) => Reloaded::Text(
+                Reload::Text(buffer) => Reloaded::Text(
                     buffer,
                     read_again(&path, when, |bytes| {
                         (String::from_utf8(bytes).map(Rope::from)).map_err(|_| NotUtf8)
                     }),
                 ),
-                Opened::Paged(id) => Reloaded::Paged(
+                Reload::Paged(id, fonts) => Reloaded::Paged(
                     id,
-                    read_again(&path, when, |bytes| ink::format::read_paged(&bytes)),
+                    read_again(&path, when, |bytes| ink::format::read_paged(&bytes, &fonts)),
                 ),
-                Opened::Board(id) => Reloaded::Board(
+                Reload::Board(id, fonts) => Reloaded::Board(
                     id,
-                    read_again(&path, when, |bytes| ink::format::read_board(&bytes)),
+                    read_again(&path, when, |bytes| ink::format::read_board(&bytes, &fonts)),
+                ),
+                Reload::Image(id, encoding) => Reloaded::Image(
+                    id,
+                    read_again(&path, when, |bytes| viewer::probe(&bytes, encoding)),
                 ),
             };
             JobResult::Reloaded { read, policy }
@@ -475,6 +549,14 @@ pub fn run(job: Job) -> JobResult {
                         Err(error) => Err(error),
                     }
                 }
+                FsOp::Copy { from, to } => {
+                    let to = to.to_path(&root);
+                    File::create_new(&to)
+                        .and_then(|mut file| io::copy(&mut File::open(from)?, &mut file))
+                        .map(|_| ())
+                }
+                FsOp::Write { path, bytes } => File::create_new(path.to_path(&root))
+                    .and_then(|mut file| io::Write::write_all(&mut file, bytes)),
                 FsOp::Remove {
                     path,
                     kind: EntryKind::File,
@@ -528,6 +610,19 @@ pub fn run(job: Job) -> JobResult {
             };
             JobResult::Previewed { path, preview }
         }
+        Job::Embed {
+            path,
+            encoding,
+            into,
+        } => JobResult::Embedded {
+            read: embed::read(&path, encoding),
+            path,
+            into,
+        },
+        Job::Probe(image) => JobResult::Probed {
+            result: viewer::read(&image.path, image.encoding),
+            image,
+        },
         Job::Links { root, paths, stamp } => JobResult::Linked {
             stamp,
             reads: backlinks::read(&root, paths),
@@ -607,6 +702,8 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Reloaded { .. } => "reloaded",
         JobResult::Fs { .. } => "fs",
         JobResult::Grepped { .. } => "grepped",
+        JobResult::Embedded { .. } => "embedded",
+        JobResult::Probed { .. } => "probed",
         JobResult::Previewed { .. } => "previewed",
         JobResult::Linked { .. } => "linked",
         JobResult::Bases { .. } => "bases",
@@ -636,6 +733,8 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             hits,
             search,
         } => picker::grepped(state, generation, hits, search, out),
+        JobResult::Embedded { path, into, read } => embed::embedded(state, path, into, read),
+        JobResult::Probed { image, result } => typeset::probed(&mut state.figures, image, result),
         JobResult::Previewed { path, preview } => picker::previewed(state, path, preview),
         JobResult::Linked { stamp, reads } => backlinks::linked(state, stamp, reads, out),
         JobResult::Bases {
@@ -662,36 +761,45 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
 }
 
 /// Reads `path` into a document; a missing file opens empty, to be created on write.
-pub fn read_file(path: &Path, languages: &Loader) -> OpenRead {
+pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts) -> OpenRead {
     let _span = tracing::info_span!("read", ?path).entered();
     match FileKind::of(path) {
         FileKind::Text(kind) => read_text(path, kind, languages),
         FileKind::Paged => read_drawing(
             path,
-            ink::format::read_paged,
+            |bytes| ink::format::read_paged(bytes, fonts),
             || Paged::new(PageSize::A4, crate::drawing::PAPER),
             |drawing, disk| OpenRead::Paged { drawing, disk },
         ),
         FileKind::Board => read_drawing(
             path,
-            ink::format::read_board,
+            |bytes| ink::format::read_board(bytes, fonts),
             || Board::new(crate::drawing::PAPER),
             |drawing, disk| OpenRead::Board { drawing, disk },
         ),
+        FileKind::Image(encoding) => match viewer::read(path, encoding) {
+            Ok(Probed { size, modified }) => OpenRead::Image {
+                encoding,
+                stack: Stack::one(size),
+                modified,
+            },
+            Err(ProbeError::Read(error)) => OpenRead::Failed(error),
+            Err(error) => OpenRead::Unreadable(error.into()),
+        },
     }
 }
 
 /// A drawing's file, read with `read`; a missing file starts as `blank`.
 fn read_drawing<D>(
     path: &Path,
-    read: fn(&[u8]) -> Result<D, FormatError>,
+    read: impl FnOnce(&[u8]) -> Result<D, FormatError>,
     blank: impl FnOnce() -> D,
     open: impl FnOnce(D, Disk) -> OpenRead,
 ) -> OpenRead {
     match (std::fs::read(path), modified(path)) {
         (Ok(bytes), Ok(mtime)) => match read(&bytes) {
             Ok(drawing) => open(drawing, Disk::Synced { mtime }),
-            Err(error) => OpenRead::Unreadable(error),
+            Err(error) => OpenRead::Unreadable(error.into()),
         },
         (Ok(_), Err(error)) => OpenRead::Failed(error),
         (Err(error), _) if error.kind() == io::ErrorKind::NotFound => open(blank(), Disk::New),

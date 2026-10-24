@@ -1577,6 +1577,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "helix-core",
+ "image",
  "ink",
  "model",
  "slotmap",
@@ -3194,11 +3195,14 @@ checksum = "a588916bfdfd92e71cacef98a63d9b1f0d74d6599980d11894290e7ddefffcf7"
 name = "ink"
 version = "0.1.0"
 dependencies = [
+ "cosmic-text",
  "criterion",
+ "lyon_tessellation",
  "model",
  "slotmap",
  "smallvec",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -6077,6 +6081,7 @@ dependencies = [
  "helix-core",
  "helix-stdx",
  "ignore",
+ "image",
  "imara-diff",
  "ink",
  "model",
@@ -6091,6 +6096,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "typeset",
+ "usvg",
 ]
 
 [[package]]

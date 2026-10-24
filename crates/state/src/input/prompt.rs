@@ -10,7 +10,7 @@ use model::notice::Notice;
 use model::register::Register;
 use model::window::Axis;
 
-use crate::apply::{apply, focused_text};
+use crate::apply::{FocusedText, apply, focused_text};
 use crate::project::Project;
 use crate::project::files::{FileIndex, Indexed};
 use crate::{Effect, Overlay, Prompt, PromptKind, State, text::registers, text::select};
@@ -66,7 +66,7 @@ pub enum Completes {
 }
 
 /// Typed command names, canonical first, as `parse` accepts them.
-pub const COMMANDS: [(&[&str], Completes); 26] = [
+pub const COMMANDS: [(&[&str], Completes); 28] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
     (&["write-all", "wa"], Completes::Nothing),
@@ -85,6 +85,8 @@ pub const COMMANDS: [(&[&str], Completes); 26] = [
     (&["vsplit", "vs"], Completes::Nothing),
     (&["hsplit", "hs", "sp"], Completes::Nothing),
     (&["open", "o", "e", "edit"], Completes::Paths),
+    (&["image"], Completes::Paths),
+    (&["paste-image"], Completes::Nothing),
     (&["goto", "g"], Completes::Nothing),
     (&["reflow"], Completes::Nothing),
     (&["sort"], Completes::Nothing),
@@ -398,6 +400,9 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
         ),
         ("o" | "open" | "e" | "edit", Some(path)) => Ok(Command::Open(PathBuf::from(path))),
         ("o" | "open" | "e" | "edit", None) => Err(Notice::MissingArgument { command: "open" }),
+        ("image", Some(path)) => Ok(Command::Image(PathBuf::from(path))),
+        ("image", None) => Err(Notice::MissingArgument { command: "image" }),
+        ("paste-image", None) => Ok(Command::PasteImage),
         ("g" | "goto", Some(line)) => number("goto", line).map(Command::GotoLine),
         ("g" | "goto", None) => Err(Notice::MissingArgument { command: "goto" }),
         ("reflow", None) => Ok(Command::Reflow(None)),
@@ -435,7 +440,7 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
 
 pub fn open_regex(state: &mut State, op: RegexOp) {
     match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
-        Some((view, _)) => {
+        Some(FocusedText { view, .. }) => {
             let kind = PromptKind::Regex {
                 op,
                 register: state.input.register.unwrap_or(Register::SEARCH),

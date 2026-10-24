@@ -4,6 +4,9 @@ use model::theme::{Color, Modifiers};
 
 /// Line height of rendered prose, relative to its size.
 pub const PROSE_LINE: f32 = 1.5;
+/// Interface line and tab bar heights, in ems of the interface font.
+pub const UI_LINE: f32 = 1.6;
+pub const BAR: f32 = 2.0;
 
 pub struct Fonts {
     /// Per `Modifiers` bold/italic combination.
@@ -13,6 +16,10 @@ pub struct Fonts {
     pub cell: Size<Pixels>,
     pub ui: Font,
     pub ui_size: Pixels,
+    /// One line of interface text: status lines and sidebar rows.
+    pub ui_line: Pixels,
+    /// Tab bars, and the sidebar header that lines up with them.
+    pub bar: Pixels,
     /// Rendered prose per `Modifiers` bold/italic combination.
     pub prose: [Font; 4],
     pub prose_size: Pixels,
@@ -40,6 +47,8 @@ impl Fonts {
             cell,
             ui: font(config.ui.family.clone()),
             ui_size: px(config.ui.size_px),
+            ui_line: px(config.ui.size_px * UI_LINE),
+            bar: px(config.ui.size_px * BAR),
             prose: styled(&config.prose().family),
             prose_size: px(prose_size),
             // GPUI centres the glyph box in the line.

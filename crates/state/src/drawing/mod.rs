@@ -1,8 +1,10 @@
 //! Drawings as tabs: the stores of open drawings, and each tab's view, layer, tools and pen.
 
 pub mod command;
+pub mod embed;
 pub mod frame;
 pub mod pen;
+pub mod typing;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -11,14 +13,16 @@ use ink::brush::{Brush, Curve, Fraction, Paint, Size, WidthFrom};
 use ink::doc::{Background, Board, Drawing, GeometryId, LayerIndex, Layers, PageLayer, Paged};
 use ink::history::{Edited, Revision};
 use ink::input::{Model, WindowParams};
+use ink::text::{FontFamily, TextStyle};
 use ink::tool::{ToolKind, Tools};
-use model::geom::{Affine, Pane, Point, Surface, Vector};
-use model::sheet::{PlaneView, SheetView, Viewport};
+
+use crate::drawing::typing::Open;
+use model::geom::{Affine, Pane, Surface};
+use model::sheet::{Measure, PlaneView, SheetView};
 use slotmap::{SlotMap, new_key_type};
 
 use crate::State;
 use crate::text::buffer::Disk;
-use crate::view::layout::PaneId;
 use crate::view::tab::{Opened, Tab};
 
 new_key_type! {
@@ -79,11 +83,15 @@ pub struct Hand<T> {
     pub layer: LayerIndex,
     pub tip: ToolKind,
     pub tools: Tools<T>,
+    /// The text being typed, which takes the keys.
+    pub typing: Option<Box<Open<T>>>,
+    /// How new text looks.
+    pub style: TextStyle,
     pub pen: Pen,
     /// Names the stroke in progress for the host, which keeps its mesh.
     pub live: GeometryId,
     /// The pane's size when last drawn, for keys that move by part of it.
-    pub last: Option<Viewport>,
+    pub last: Option<Measure>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +116,8 @@ impl<T: Copy + PartialEq> Hand<T> {
             layer,
             tip: ToolKind::Brush,
             tools: Tools::new(settings.brush, settings.paint, settings.eraser),
+            typing: None,
+            style: settings.text.clone(),
             pen: Pen::Up,
             live: GeometryId::next(),
             last: None,
@@ -124,6 +134,7 @@ impl<T: Copy + PartialEq> Hand<T> {
     pub fn copy(&self) -> Hand<T> {
         Hand {
             tip: self.tip,
+            style: self.style.clone(),
             last: self.last,
             tools: Tools::new(
                 self.tools.brush.brush,
@@ -184,11 +195,12 @@ impl InkTabs {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct InkSettings {
     pub brush: Brush,
     pub paint: Paint,
     pub eraser: Size,
+    pub text: TextStyle,
 }
 
 impl Default for InkSettings {
@@ -206,6 +218,10 @@ impl Default for InkSettings {
                 color: model::theme::Color::opaque(model::color::Rgb::hex(0x1f2328)),
             },
             eraser: Size::new(12.0).expect("a positive size"),
+            text: TextStyle {
+                family: FontFamily::new(model::fonts::SANS).expect("a family name"),
+                size: Size::new(12.0).expect("a positive size"),
+            },
         }
     }
 }
@@ -253,47 +269,8 @@ pub fn reopen(state: &State, opened: Opened, saved: Saved) -> Option<Tab> {
             let hand = Hand::new(&state.ink, layer);
             Some(Tab::Ink(InkTabs::Board(BoardTab::new(id, view, hand))))
         }
-        (Opened::Text(_), _)
+        (Opened::Text(_) | Opened::Image(_), _)
         | (Opened::Paged(_), Saved::Board { .. })
         | (Opened::Board(_), Saved::Paged { .. }) => None,
-    }
-}
-
-/// The host drew `pane`'s drawing at `viewport`.
-pub fn measured(state: &mut State, pane: PaneId, viewport: Viewport) {
-    match state
-        .layout
-        .find_pane(pane)
-        .and_then(|pane| pane.active_mut())
-    {
-        Some(Tab::Ink(InkTabs::Paged(tab))) => tab.hand.last = Some(viewport),
-        Some(Tab::Ink(InkTabs::Board(tab))) => tab.hand.last = Some(viewport),
-        Some(Tab::Text(_)) | None => {}
-    }
-}
-
-/// The wheel moved `pane`'s drawing by `by` pixels.
-pub fn scrolled(state: &mut State, pane: PaneId, by: Vector<Pane>, viewport: Viewport) {
-    let State { layout, pageds, .. } = state;
-    match layout.find_pane(pane).and_then(|pane| pane.active_mut()) {
-        Some(Tab::Ink(InkTabs::Paged(tab))) => {
-            let stack = pageds[tab.file].edited.drawing().stack();
-            tab.view.pan(stack, viewport, by)
-        }
-        Some(Tab::Ink(InkTabs::Board(tab))) => tab.view.pan(by),
-        Some(Tab::Text(_)) | None => {}
-    }
-}
-
-/// The wheel zoomed `pane`'s drawing by `factor` about `at`.
-pub fn zoomed(state: &mut State, pane: PaneId, at: Point<Pane>, factor: f32, viewport: Viewport) {
-    let State { layout, pageds, .. } = state;
-    match layout.find_pane(pane).and_then(|pane| pane.active_mut()) {
-        Some(Tab::Ink(InkTabs::Paged(tab))) => {
-            let stack = pageds[tab.file].edited.drawing().stack();
-            tab.view.zoom_about(stack, viewport, at, factor)
-        }
-        Some(Tab::Ink(InkTabs::Board(tab))) => tab.view.zoom_about(viewport, at, factor),
-        Some(Tab::Text(_)) | None => {}
     }
 }

@@ -8,7 +8,8 @@ use gpui::{
 use helix_core::SmallVec;
 use model::units::Px;
 use state::render::document::{DocumentAt, DocumentScroll};
-use state::render::typeset::each_figure;
+use state::render::markdown::LocalImage;
+use state::render::typeset::{Figures, each_figure, each_image};
 use state::text::buffer::BufferId;
 use state::view::layout::{Pane, PaneId};
 use state::view::tab::{Showing, TextTabs};
@@ -18,7 +19,6 @@ use crate::workspace::Workspace;
 
 mod document;
 mod pages;
-pub mod raster;
 
 /// A document pane's list and what its measured items describe.
 pub struct RenderedPane {
@@ -216,13 +216,18 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                 measured.generation = generation;
                 cache.list.remeasure();
             }
-            // Only the items holding a figure filled since the last measure change height.
+            // Only the items holding a figure or image filled since the last measure change height.
             (true, Some(since)) => {
-                let filled = |figure| (state.figures.entries.get(&figure)).map_or(0, |e| e.filled);
+                let Figures {
+                    entries, images, ..
+                } = &state.figures;
+                let filled = |figure| entries.get(&figure).map_or(0, |e| e.filled);
+                let sized = |image: &LocalImage| images.get(image).map_or(0, |e| e.filled);
                 for (item, &root) in markdown.roots.iter().enumerate() {
                     let mut newest = 0;
                     let blocks = &markdown.blocks[root..markdown.blocks[root].end];
                     each_figure(blocks, |figure, _| newest = newest.max(filled(figure)));
+                    each_image(blocks, |image| newest = newest.max(sized(image)));
                     match newest > since {
                         true => cache.list.remeasure_items(item..item + 1),
                         false => {}
@@ -280,7 +285,7 @@ pub fn body(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) ->
                 .flex()
                 .flex_col()
                 .children(header)
-                .child(div().flex_1().min_h_0().child(pages::PagesElement {
+                .child(div().flex_1().min_h_0().child(crate::sheet::SheetElement {
                     workspace: cx.entity(),
                     pane,
                 }))
@@ -320,7 +325,7 @@ fn item(
 }
 
 /// Runs the workspace with `f`, then redraws and keeps keys on the workspace.
-fn update(
+pub fn update(
     workspace: &WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,

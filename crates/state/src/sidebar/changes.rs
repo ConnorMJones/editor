@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use model::command::{ChangesCommand, FileOp, Shown};
 use model::config::OpenAs;
-use model::git::Group;
+use model::git::{Group, WhenEmpty};
 use model::notice::Notice;
 
 use crate::git::Changed;
@@ -61,19 +61,20 @@ impl ListCursor {
 }
 
 /// Sidebar rows a group takes: its header, plus its entries unless collapsed.
-fn group_rows(entries: &std::ops::Range<usize>, fold: Fold) -> usize {
-    match (entries.len(), fold) {
-        (0, _) => 0,
-        (count, Fold::Expanded) => 1 + count,
-        (_, Fold::Collapsed) => 1,
+fn group_rows(group: Group, entries: &std::ops::Range<usize>, fold: Fold) -> usize {
+    match (entries.len(), group.when_empty(), fold) {
+        (0, WhenEmpty::Hidden, _) => 0,
+        (0, WhenEmpty::Listed, _) => 1,
+        (count, _, Fold::Expanded) => 1 + count,
+        (_, _, Fold::Collapsed) => 1,
     }
 }
 
-/// Rows of the Changes sidebar: a header per non-empty group plus the entries of expanded ones.
+/// Rows of the Changes sidebar: a header per listed group plus the entries of expanded ones.
 pub fn list_len(changes: &[Changed], folds: &[Fold; Group::COUNT]) -> usize {
     groups(changes)
         .iter()
-        .map(|(group, entries)| group_rows(entries, folds[*group as usize]))
+        .map(|(group, entries)| group_rows(*group, entries, folds[*group as usize]))
         .sum()
 }
 
@@ -87,9 +88,9 @@ pub fn rows(
         .into_iter()
         .flat_map(move |(group, entries)| {
             let fold = folds[group as usize];
-            let header = match entries.len() {
-                0 => None,
-                count => Some(ListRow::Header { group, count, fold }),
+            let header = match (entries.len(), group.when_empty()) {
+                (0, WhenEmpty::Hidden) => None,
+                (count, _) => Some(ListRow::Header { group, count, fold }),
             };
             let shown = match fold {
                 Fold::Expanded => entries,
@@ -111,7 +112,7 @@ pub fn cursor_row(
         groups
             .iter()
             .take_while(|(other, _)| *other != group)
-            .map(|(other, entries)| group_rows(entries, folds[*other as usize]))
+            .map(|(other, entries)| group_rows(*other, entries, folds[*other as usize]))
             .sum()
     };
     let entry = |index: usize| {
@@ -121,15 +122,17 @@ pub fn cursor_row(
             Fold::Expanded => header(group) + 1 + index - groups[group as usize].1.start,
         }
     };
-    let row = match cursor {
-        Some(ListCursor::Header(group)) => header(*group),
-        Some(ListCursor::Entry { group, path }) => {
+    let row = match (cursor, changes.len()) {
+        (Some(ListCursor::Header(group)), _) => header(*group),
+        // With no entries, the cursor rests on the first header.
+        (Some(ListCursor::Entry { .. }) | None, 0) => 0,
+        (Some(ListCursor::Entry { group, path }), count) => {
             match changes.binary_search_by(|changed| changed.key().cmp(&(*group, path))) {
-                Ok(index) | Err(index) => entry(index.min(changes.len() - 1)),
+                Ok(index) | Err(index) => entry(index.min(count - 1)),
             }
         }
         // Nothing selected yet starts on the first file.
-        None => entry(0),
+        (None, _) => entry(0),
     };
     Some(row.min(last))
 }

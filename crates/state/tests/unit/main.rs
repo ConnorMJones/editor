@@ -12,6 +12,7 @@ mod launch;
 mod layout;
 mod markdown;
 mod movement;
+mod naming;
 mod path;
 mod picker;
 mod prompt;

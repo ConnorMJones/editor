@@ -265,6 +265,8 @@ pub struct Completion {
 pub struct Chrome {
     pub border: Color,
     pub selection: Color,
+    /// The cursor row of a list, whichever part of the window has the keys.
+    pub picked: Color,
     pub unsaved: Color,
     pub accent: Color,
     pub title: Color,
@@ -345,6 +347,7 @@ impl Theme {
             chrome: Chrome {
                 border: slot(Base02),
                 selection: slot(Base02),
+                picked: tint(slot(Base0D), 30),
                 unsaved: slot(Base0A),
                 accent: slot(Base0D),
                 title: slot(Base01),

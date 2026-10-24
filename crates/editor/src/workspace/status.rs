@@ -13,6 +13,7 @@ use state::git::diff::{self, Bases, Removal, Side};
 use state::text::buffer::{Disk, Highlight};
 use state::view::layout::{Pane, PaneId};
 use state::view::tab::{Opened, Tab, TextTabs};
+use state::viewer::ImageTab;
 
 use super::Workspace;
 use crate::fonts::hsla;
@@ -30,6 +31,7 @@ struct Status {
 enum Label {
     Mode,
     Ink,
+    View,
 }
 
 struct Part {
@@ -67,6 +69,7 @@ impl Workspace {
         let status = match state.layout.panes().get(pane).and_then(Pane::active) {
             Some(Tab::Ink(ink)) => ink_status(state, ink),
             Some(Tab::Text(shown)) => text_status(state, shown),
+            Some(Tab::Image(tab)) => image_status(state, tab),
             None => Status {
                 label: Label::Mode,
                 file: "[scratch]".to_owned(),
@@ -78,6 +81,7 @@ impl Workspace {
         let (label, label_bg) = match status.label {
             Label::Mode => (mode.label(), theme.mode[mode]),
             Label::Ink => ("INK", theme.mode[Mode::Normal]),
+            Label::View => ("VIEW", theme.mode[Mode::Normal]),
         };
         let (label, label_bg, label_fg) = match focused {
             true => (label, hsla(label_bg), hsla(theme.mode.fg)),
@@ -105,8 +109,11 @@ impl Workspace {
             div().px_2().text_color(tone).child(part.text)
         });
         div()
+            .flex_none()
+            .h(fonts.ui_line)
             .flex()
             .flex_row()
+            .items_center()
             .bg(hsla(theme.surface))
             .text_color(text)
             .font(fonts.ui.clone())
@@ -216,14 +223,10 @@ fn ink_status(state: &State, ink: &InkTabs) -> Status {
         InkTabs::Paged(tab) => {
             let file = &state.pageds[tab.file()];
             let pages = file.edited.drawing().stack().sizes().len();
-            let fit = match tab.view.fit {
-                Fit::Width => "width",
-                Fit::Height => "height",
-            };
             let place = format!(
-                "page {}/{pages}  {fit} {}",
+                "page {}/{pages}  {}",
                 tab.view.centre.page.0 + 1,
-                percent(tab.view.zoom)
+                scale(tab.view.fit, tab.view.zoom)
             );
             let layers = file.edited.drawing().layers();
             (tab.hand.tip, tab.hand.layer, layers, file.disk, place)
@@ -244,6 +247,7 @@ fn ink_status(state: &State, ink: &InkTabs) -> Status {
         ToolKind::Shape(ShapeKind::Arrow) => "arrow",
         ToolKind::Shape(ShapeKind::Rectangle) => "rectangle",
         ToolKind::Shape(ShapeKind::Ellipse) => "ellipse",
+        ToolKind::Text => "text",
     };
     Status {
         label: Label::Ink,
@@ -278,4 +282,34 @@ fn layer_label(layers: &Layers, layer: LayerIndex) -> String {
 
 fn percent(zoom: Zoom) -> String {
     format!("{:.0}%", zoom.get() * 100.0)
+}
+
+fn scale(fit: Fit, zoom: Zoom) -> String {
+    let fit = match fit {
+        Fit::Width => "width",
+        Fit::Height => "height",
+        Fit::Page => "page",
+    };
+    format!("{fit} {}", percent(zoom))
+}
+
+fn image_status(state: &State, tab: &ImageTab) -> Status {
+    let opened = Opened::Image(tab.file());
+    let file = &state.images[tab.file()];
+    let size = file.stack.sizes()[0];
+    Status {
+        label: Label::View,
+        file: name(state, opened),
+        flags: disk_flag(file.disk).to_owned(),
+        parts: [
+            Part::plain(format!(
+                "{}×{}",
+                size.width.get().round(),
+                size.height.get().round()
+            )),
+            Part::plain(scale(tab.view.fit, tab.view.zoom)),
+            Part::NONE,
+            Part::NONE,
+        ],
+    }
 }

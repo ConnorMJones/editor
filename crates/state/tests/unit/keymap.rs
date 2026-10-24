@@ -1,5 +1,5 @@
 use model::command::{
-    Command, Direction, DocumentCommand, PagesCommand, ReadCommand, ReadMove, ScrollBy,
+    Command, Direction, DocumentCommand, ReadCommand, ReadMove, ScrollBy, ViewCommand,
 };
 use model::key::{Key, KeyCode, KeySeq};
 use state::input::keymap::{Context, Keymap, Resolved};
@@ -101,10 +101,10 @@ fn document_and_pages_views_each_have_only_their_own_keys() {
         keymap.resolve(Context::Pages, &heading),
         Resolved::Unbound
     ));
-    let fit = [Key::char('f')];
+    let fit = [Key::char('z'), Key::char('f')];
     assert!(matches!(
         keymap.resolve(Context::Pages, &fit),
-        Resolved::Command(Command::Pages(PagesCommand::Fit))
+        Resolved::Command(Command::View(ViewCommand::Fit))
     ));
     assert!(matches!(
         keymap.resolve(Context::Document, &fit),

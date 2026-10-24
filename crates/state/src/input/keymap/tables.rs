@@ -3,10 +3,9 @@
 use model::command::{
     Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
     DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join, Motion,
-    ObjectScope, PageCommand, PageSide, PageStep, PagesCommand, Paste, Pending, PickerCommand,
-    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy,
-    Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking,
-    ZoomBy,
+    ObjectScope, PageCommand, PageSide, PageStep, Paste, Pending, PickerCommand, PickerKind,
+    PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy, Shown,
+    SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -367,7 +366,6 @@ const COMMON: Bindings = &[
         Command::RotateSelectionContents(Direction::Forward),
     ),
     (&[Key::alt(':')], Command::EnsureSelectionsForward),
-    (&[Key::code(KeyCode::Esc)], Command::NormalMode),
     (&[Key::ctrl('c')], Command::ToggleComments),
     (&[Key::char('"')], Command::Await(Pending::SelectRegister)),
     (&[Key::ctrl('a')], Command::Increment),
@@ -394,6 +392,11 @@ const COMMON: Bindings = &[
 ];
 
 const NORMAL: Bindings = &[(&[Key::char('v')], Command::SelectMode)];
+
+/// `esc` in normal and select mode; text being typed in a drawing binds it to finishing.
+const ESCAPE: Bindings = &[(&[Key::code(KeyCode::Esc)], Command::NormalMode)];
+
+const DRAWING_TEXT: Bindings = &[(&[Key::code(KeyCode::Esc)], ink(InkCommand::FinishText))];
 
 const SELECT: Bindings = &[(&[Key::char('v')], Command::NormalMode)];
 
@@ -712,6 +715,10 @@ const WORKSPACE: Bindings = &[
         Command::Picker(PickerCommand::Open(PickerKind::Files)),
     ),
     (
+        &[SPACE, Key::char('i')],
+        Command::Picker(PickerCommand::Open(PickerKind::Images)),
+    ),
+    (
         &[SPACE, Key::char('b')],
         Command::Picker(PickerCommand::Open(PickerKind::Buffers)),
     ),
@@ -1020,45 +1027,47 @@ const DOCUMENT: Bindings = &[
     ),
 ];
 
-const PAGES: Bindings = &[
-    (&[Key::char('f')], Command::Pages(PagesCommand::Fit)),
-    (
-        &[Key::char('+')],
-        Command::Pages(PagesCommand::Zoom(ZoomBy::In)),
-    ),
-    (
-        &[Key::char('-')],
-        Command::Pages(PagesCommand::Zoom(ZoomBy::Out)),
-    ),
-    (
-        &[Key::char('=')],
-        Command::Pages(PagesCommand::Zoom(ZoomBy::Reset)),
-    ),
-    (
-        &[Key::char('h')],
-        Command::Pages(PagesCommand::Pan(Direction::Backward)),
-    ),
+/// Where a tab shown as pages or a plane looks: typst pages, drawings, images.
+const SHEET: Bindings = &[
+    (&[Key::char('+')], view(ViewCommand::Zoom(ZoomBy::In))),
+    (&[Key::char('-')], view(ViewCommand::Zoom(ZoomBy::Out))),
+    (&[Key::char('=')], view(ViewCommand::Zoom(ZoomBy::Reset))),
+    (&[Key::char('z'), Key::char('f')], view(ViewCommand::Fit)),
+    (&[Key::char('h')], view(ViewCommand::Pan(Side::Left))),
     (
         &[Key::code(KeyCode::Left)],
-        Command::Pages(PagesCommand::Pan(Direction::Backward)),
+        view(ViewCommand::Pan(Side::Left)),
     ),
-    (
-        &[Key::char('l')],
-        Command::Pages(PagesCommand::Pan(Direction::Forward)),
-    ),
+    (&[Key::char('l')], view(ViewCommand::Pan(Side::Right))),
     (
         &[Key::code(KeyCode::Right)],
-        Command::Pages(PagesCommand::Pan(Direction::Forward)),
+        view(ViewCommand::Pan(Side::Right)),
     ),
+];
+
+/// Up and down pans, where those keys don't scroll lines.
+const SHEET_VERTICAL: Bindings = &[
+    (&[Key::char('k')], view(ViewCommand::Pan(Side::Up))),
+    (&[Key::code(KeyCode::Up)], view(ViewCommand::Pan(Side::Up))),
+    (&[Key::char('j')], view(ViewCommand::Pan(Side::Down))),
+    (
+        &[Key::code(KeyCode::Down)],
+        view(ViewCommand::Pan(Side::Down)),
+    ),
+];
+
+const fn view(view: ViewCommand) -> Command {
+    Command::View(view)
+}
+
+const IMAGE_VIEWER: Bindings = &[
+    (&[Key::char(':')], Command::CommandMode),
+    (&SAVE_ALL, Command::WriteAll),
 ];
 
 /// A paged document or board.
 const fn tool(tool: InkTool) -> Command {
     Command::Drawing(DrawingCommand::Ink(InkCommand::Tool(tool)))
-}
-
-const fn view(view: ViewCommand) -> Command {
-    Command::Drawing(DrawingCommand::View(view))
 }
 
 const fn page(page: PageCommand) -> Command {
@@ -1078,6 +1087,8 @@ const DRAWING: Bindings = &[
     (&[Key::char('t'), Key::char('a')], tool(InkTool::Arrow)),
     (&[Key::char('t'), Key::char('r')], tool(InkTool::Rectangle)),
     (&[Key::char('t'), Key::char('o')], tool(InkTool::Ellipse)),
+    (&[Key::char('t'), Key::char('t')], tool(InkTool::Text)),
+    (&[Key::char('p')], Command::PasteImage),
     (
         &[Key::char('d'), Key::char('d')],
         ink(InkCommand::DeletePicked),
@@ -1085,30 +1096,6 @@ const DRAWING: Bindings = &[
     (&[Key::code(KeyCode::Delete)], ink(InkCommand::DeletePicked)),
     (&[Key::char('u')], Command::Undo),
     (&[Key::char('U')], Command::Redo),
-    (&[Key::char('+')], view(ViewCommand::Zoom(ZoomBy::In))),
-    (&[Key::char('-')], view(ViewCommand::Zoom(ZoomBy::Out))),
-    (&[Key::char('=')], view(ViewCommand::Zoom(ZoomBy::Reset))),
-    (
-        &[Key::char('z'), Key::char('f')],
-        view(ViewCommand::ToggleFit),
-    ),
-    (&[Key::char('h')], view(ViewCommand::Pan(Side::Left))),
-    (
-        &[Key::code(KeyCode::Left)],
-        view(ViewCommand::Pan(Side::Left)),
-    ),
-    (&[Key::char('l')], view(ViewCommand::Pan(Side::Right))),
-    (
-        &[Key::code(KeyCode::Right)],
-        view(ViewCommand::Pan(Side::Right)),
-    ),
-    (&[Key::char('k')], view(ViewCommand::Pan(Side::Up))),
-    (&[Key::code(KeyCode::Up)], view(ViewCommand::Pan(Side::Up))),
-    (&[Key::char('j')], view(ViewCommand::Pan(Side::Down))),
-    (
-        &[Key::code(KeyCode::Down)],
-        view(ViewCommand::Pan(Side::Down)),
-    ),
     (
         &[Key::char(']'), Key::char('p')],
         page(PageCommand::Go(PageStep::Next)),
@@ -1154,6 +1141,7 @@ const DRAWING: Bindings = &[
 pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
         COMMON,
+        ESCAPE,
         NORMAL,
         VIEW,
         WORKSPACE,
@@ -1167,6 +1155,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[INSERT],
     &[
         COMMON,
+        ESCAPE,
         SELECT,
         VIEW,
         WORKSPACE,
@@ -1195,7 +1184,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     ],
     &[
         READ,
-        PAGES,
+        SHEET,
         MODES,
         MARKDOWN,
         WORKSPACE,
@@ -1203,5 +1192,32 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         SPACE_WINDOW,
         GOTO_BUFFER,
     ],
-    &[DRAWING, WORKSPACE, WINDOW, SPACE_WINDOW, GOTO_BUFFER],
+    &[
+        DRAWING,
+        SHEET,
+        SHEET_VERTICAL,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
+        IMAGE_VIEWER,
+        SHEET,
+        SHEET_VERTICAL,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
+        DRAWING_TEXT,
+        COMMON,
+        NORMAL,
+        VIEW,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
 ];

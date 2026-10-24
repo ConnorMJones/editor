@@ -347,7 +347,11 @@ fn grep_picker_jumps_to_hit() {
                 assert_eq!(grep.hits[0].line, 1);
                 assert_eq!(grep.hits[0].column, 4);
             }
-            Items::Files(_) | Items::Buffers(_) | Items::Commands | Items::Backlinks(_) => {
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Buffers(_)
+            | Items::Commands
+            | Items::Backlinks(_) => {
                 panic!("wrong picker")
             }
         },

@@ -39,6 +39,17 @@ pub enum Notice {
         path: PathBuf,
     },
     NotADrawing,
+    /// Images go into drawings and notes only.
+    NoImagesHere,
+    NoImageOnClipboard,
+    /// A drop landed off every page.
+    OffThePages,
+    NoteOutsideProject {
+        path: PathBuf,
+    },
+    NotAnImage {
+        path: PathBuf,
+    },
     BoardHasNoPages,
     NoLayer,
     LayerHidden,
@@ -46,7 +57,7 @@ pub enum Notice {
     DrawingRefused {
         reason: String,
     },
-    DrawingUnreadable {
+    Unreadable {
         path: PathBuf,
         reason: String,
     },
@@ -200,18 +211,31 @@ impl std::fmt::Display for Notice {
             Notice::UnsavedBuffers { count } => write!(f, "{count} buffer(s) have unsaved changes"),
             Notice::NoBuffer => f.write_str("no buffer open"),
             Notice::ReadOnly => f.write_str("this view cannot be edited"),
-            Notice::NotText => f.write_str("a drawing has no text"),
+            Notice::NotText => f.write_str("this tab has no text"),
             Notice::NothingToSplit => f.write_str("an empty pane has nothing to split"),
             Notice::WrongExtension { path } => {
                 write!(f, "{} names another kind of file", path.display())
             }
             Notice::NotADrawing => f.write_str("not a drawing"),
+            Notice::NoImagesHere => f.write_str("images go into drawings and notes"),
+            Notice::OffThePages => f.write_str("drop images onto a page"),
+            Notice::NoImageOnClipboard => f.write_str("the clipboard holds no image"),
+            Notice::NoteOutsideProject { path } => {
+                write!(
+                    f,
+                    "{} is outside the project, so no image is kept beside it",
+                    path.display()
+                )
+            }
+            Notice::NotAnImage { path } => {
+                write!(f, "{} is not an image this build reads", path.display())
+            }
             Notice::BoardHasNoPages => f.write_str("a board has no pages"),
             Notice::NoLayer => f.write_str("the active layer is gone"),
             Notice::LayerHidden => f.write_str("the active layer is hidden"),
             Notice::NothingPicked => f.write_str("nothing is selected"),
             Notice::DrawingRefused { reason } => write!(f, "drawing refused: {reason}"),
-            Notice::DrawingUnreadable { path, reason } => {
+            Notice::Unreadable { path, reason } => {
                 write!(f, "cannot read {}: {reason}", path.display())
             }
             Notice::UnknownCommand { input } => write!(f, "unknown command: {input}"),

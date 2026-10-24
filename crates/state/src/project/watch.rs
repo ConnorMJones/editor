@@ -47,10 +47,11 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
     let mut rescan: Vec<RelPath> = Vec::new();
     let mut relist: HashSet<Folder> = HashSet::new();
     crate::render::typeset::invalidate(&mut state.compiles, &paths);
+    crate::render::typeset::reprobe(&mut state.figures, &paths, out);
     for path in paths {
         for opened in (state.files()).filter(|opened| state.path_of(*opened) == path) {
             out.push(Effect::Job(Job::Reload {
-                file: opened,
+                file: state.reload_of(opened),
                 path: path.clone(),
                 when: match state.disk_of(opened) {
                     Disk::Synced { mtime } | Disk::ChangedExternally { mtime } => {

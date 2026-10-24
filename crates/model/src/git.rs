@@ -56,6 +56,21 @@ pub enum Group {
 impl Group {
     pub const COUNT: usize = 3;
     pub const ALL: [Group; Group::COUNT] = [Group::Conflicts, Group::Staged, Group::Changes];
+
+    /// Staged and unstaged changes are always listed; conflicts only when there are some.
+    pub fn when_empty(self) -> WhenEmpty {
+        match self {
+            Group::Conflicts => WhenEmpty::Hidden,
+            Group::Staged | Group::Changes => WhenEmpty::Listed,
+        }
+    }
+}
+
+/// Whether the Changes list shows a group's header while it has no entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhenEmpty {
+    Listed,
+    Hidden,
 }
 
 impl Change {

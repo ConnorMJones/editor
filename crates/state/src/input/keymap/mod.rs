@@ -23,10 +23,12 @@ pub enum Context {
     Document,
     Pages,
     Drawing,
+    ImageViewer,
+    DrawingText,
 }
 
 impl Context {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 14;
     pub const ALL: [Context; Context::COUNT] = [
         Context::Normal,
         Context::Insert,
@@ -40,6 +42,8 @@ impl Context {
         Context::Document,
         Context::Pages,
         Context::Drawing,
+        Context::ImageViewer,
+        Context::DrawingText,
     ];
 }
 
@@ -142,6 +146,8 @@ impl Keymap {
             document,
             pages,
             drawing,
+            image_viewer,
+            drawing_text,
         ] = Context::ALL;
         Ok(Keymap {
             tries: [
@@ -157,6 +163,8 @@ impl Keymap {
                 build_trie(document)?,
                 build_trie(pages)?,
                 build_trie(drawing)?,
+                build_trie(image_viewer)?,
+                build_trie(drawing_text)?,
             ],
         })
     }

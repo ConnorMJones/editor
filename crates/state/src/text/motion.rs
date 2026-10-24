@@ -13,9 +13,12 @@ use model::command::{
 use model::mode::Mode;
 
 use crate::State;
-use crate::apply::{count_of, focused_text, movement_of, reselect, select, try_select};
+use crate::apply::{
+    FocusedText, count_of, focused_text, movement_of, reselect, select, try_select,
+};
 use crate::git::diffview::Right;
 use crate::view::display::{Indent, text_format};
+use crate::view::layout::{Edited, Viewport};
 use crate::view::scroll::{self, Pointed, SCROLLOFF};
 
 pub fn direction(direction: Direction) -> movement::Direction {
@@ -41,7 +44,11 @@ pub fn motion(state: &mut State, motion: Motion) {
     let behaviour = movement_of(state);
     let extend = behaviour == Movement::Extend;
     let viewport = match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
-        Some((view, _)) => view.scroll.viewport,
+        Some(FocusedText { view, .. }) => match view.edited {
+            Edited::Buffer { scroll, .. } => scroll.viewport,
+            // A drawing's text is not drawn in cells, so it has no soft wrap or pages.
+            Edited::Mark => Viewport::default(),
+        },
         None => return,
     };
     // Same format as drawn, so visual lines follow soft wrap.

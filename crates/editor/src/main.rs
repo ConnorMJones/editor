@@ -1,9 +1,11 @@
 mod drawing;
 mod fonts;
 mod input;
+mod pictures;
 mod preview;
 mod prompt;
 mod rendered;
+mod sheet;
 mod tabs;
 mod text;
 mod workspace;
@@ -182,7 +184,7 @@ fn main() -> anyhow::Result<()> {
                         state,
                         theme,
                         fonts,
-                        title_bar: config.window.title_bar,
+                        window: config.window,
                         effects: Vec::new(),
                         focus,
                         preedit: String::new(),
@@ -200,7 +202,7 @@ fn main() -> anyhow::Result<()> {
                         shown_tab: None,
                         rendered: Default::default(),
                         typeset: typeset_tx,
-                        rasters: Default::default(),
+                        pictures: Default::default(),
                         window_height: window.viewport_size().height,
                     }
                 });

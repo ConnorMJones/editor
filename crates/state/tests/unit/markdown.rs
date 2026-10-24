@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use model::picture::{Bitmap, Encoding};
+
 use helix_core::Rope;
 use model::markdown::CalloutKind;
 use model::typeset::Display;
@@ -8,7 +10,7 @@ use state::project::path::RelPath;
 use state::project::path::{FileKind, TextKind};
 use state::render::markdown::{
     self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, ImageFile, Level,
-    LinkTarget, ListKind, Markdown, RowKind, SpanKind, Task, WikiLink,
+    LinkTarget, ListKind, LocalImage, Markdown, RowKind, SpanKind, Task, WikiLink,
 };
 
 fn parse(text: &str) -> Markdown {
@@ -472,8 +474,14 @@ fn images_resolve_against_the_note_then_the_root() {
     assert_eq!(
         files,
         [
-            &ImageFile::Local(dir.path().join("notes/near.png")),
-            &ImageFile::Local(dir.path().join("far.png")),
+            &ImageFile::Local(LocalImage {
+                path: dir.path().join("notes/near.png").into(),
+                encoding: Encoding::Bitmap(Bitmap::Png),
+            }),
+            &ImageFile::Local(LocalImage {
+                path: dir.path().join("far.png").into(),
+                encoding: Encoding::Bitmap(Bitmap::Png),
+            }),
             &ImageFile::Missing,
         ]
     );

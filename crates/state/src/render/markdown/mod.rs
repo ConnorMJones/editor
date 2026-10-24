@@ -13,10 +13,11 @@ pub use targets::locate;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use model::markdown::CalloutKind;
+use model::picture::Encoding;
 use model::theme::Style;
 use model::typeset::Display;
 
@@ -186,9 +187,16 @@ pub struct Image {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageFile {
-    Local(PathBuf),
+    Local(LocalImage),
     Remote(Arc<str>),
     Missing,
+    NotPicture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LocalImage {
+    pub path: Arc<Path>,
+    pub encoding: Encoding,
 }
 
 #[derive(Clone, Debug, PartialEq)]

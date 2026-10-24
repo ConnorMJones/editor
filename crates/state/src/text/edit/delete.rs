@@ -12,7 +12,7 @@ use model::mode::Mode;
 use model::register::Register;
 
 use super::insert::{Comments, auto_pairs, open_lines};
-use crate::apply::{count_of, edit, exit_select_mode, focused_text};
+use crate::apply::{FocusedText, count_of, edit, exit_select_mode, focused_text};
 use crate::{Effect, State};
 
 pub fn delete_char_backward(state: &mut State) {
@@ -117,7 +117,8 @@ pub fn delete_selection(
     out: &mut Vec<Effect>,
 ) {
     let register = state.input.register.unwrap_or(Register::DEFAULT);
-    let Some((view, doc)) = focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
+    let Some(FocusedText { view, doc }) =
+        focused_text(&mut state.layout, &mut state.buffers, &mut state.notice)
     else {
         return;
     };
