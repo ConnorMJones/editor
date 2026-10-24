@@ -48,10 +48,12 @@ pub struct ShapeInk {
     pub built: Built,
 }
 
-/// An arrow head's sides, as a part of the shaft.
-const HEAD: f32 = 0.2;
+/// An arrow head's sides, in widths of its line.
+pub const HEAD: f32 = 6.0;
+/// The most of a short arrow's shaft its head takes.
+pub const HEAD_SHARE: f32 = 0.5;
 /// The widest an arrow head opens, in radians from the shaft.
-const HEAD_ANGLE: f32 = 0.45;
+pub const HEAD_ANGLE: f32 = 0.45;
 
 impl Shape {
     pub fn dragged(kind: ShapeKind, from: Point<Local>, to: Point<Local>) -> Shape {
@@ -66,11 +68,16 @@ impl Shape {
         }
     }
 
-    pub fn outline(&self) -> SmallVec<[Vec<Point<Local>>; 3]> {
+    /// The lines a shape is swept along; an arrow's head is as long whatever the shaft's length.
+    pub fn outline(&self, width: Size) -> SmallVec<[Vec<Point<Local>>; 3]> {
         match *self {
             Shape::Line { from, to } => smallvec![vec![from, to]],
             Shape::Arrow { from, to } => {
-                let back = (from - to) * HEAD;
+                let shaft = from - to;
+                let length = shaft.length();
+                let head = (width.get() * HEAD).min(length * HEAD_SHARE);
+                // A shaft of no length has no direction, and so no head.
+                let back = shaft * (head / length.max(f32::MIN_POSITIVE));
                 smallvec![
                     vec![from, to],
                     vec![
@@ -100,7 +107,7 @@ impl ShapeInk {
     pub fn new(shape: Shape, width: Size) -> ShapeInk {
         let radius = width.get() * 0.5;
         let mut mesh = Mesh::default();
-        for line in shape.outline() {
+        for line in shape.outline(width) {
             mesh::sweep(&mut mesh, &line, radius);
         }
         let on = match shape {

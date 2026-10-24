@@ -186,3 +186,25 @@ fn a_stroke_touches_what_lies_within_reach_of_its_mesh() {
     );
     assert!(!mark.touches(Point::new(120.0, 10.0), 2.0));
 }
+
+/// How far an arrow's head reaches back from its tip, for an arrow `length` long drawn `width` wide.
+fn head_reach(length: f32, width: f32) -> f32 {
+    let arrow = ink::doc::Shape::Arrow {
+        from: Point::<Local>::new(0.0, 0.0),
+        to: Point::new(length, 0.0),
+    };
+    let outline = arrow.outline(ink::brush::Size::new(width).unwrap());
+    length - outline[1][0].x
+}
+
+#[test]
+fn an_arrow_head_keeps_its_size_however_long_the_arrow() {
+    let head = 2.0 * ink::doc::HEAD * ink::doc::HEAD_ANGLE.cos();
+    for length in [60.0, 600.0, 6000.0] {
+        assert!((head_reach(length, 2.0) - head).abs() < 1e-3, "{length}");
+    }
+    // A shaft shorter than two heads gives way.
+    let short = 10.0 * ink::doc::HEAD_SHARE * ink::doc::HEAD_ANGLE.cos();
+    assert!((head_reach(10.0, 2.0) - short).abs() < 1e-3);
+    assert_eq!(head_reach(0.0, 2.0), 0.0);
+}

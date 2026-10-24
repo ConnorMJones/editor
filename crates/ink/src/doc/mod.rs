@@ -24,7 +24,7 @@ pub use paged::{
     Background, InvalidPageSize, InvalidSpacing, Page, PageIndex, PageLayer, PageSize, Paged,
     PagedChange, Pattern, Spacing,
 };
-pub use shape::{Built, Shape, ShapeInk, ShapeKind};
+pub use shape::{Built, HEAD, HEAD_ANGLE, HEAD_SHARE, Shape, ShapeInk, ShapeKind};
 
 slotmap::new_key_type! {
     pub struct MarkId;
