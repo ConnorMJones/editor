@@ -11,10 +11,13 @@ mod text;
 mod workspace;
 
 use std::borrow::Cow;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use anyhow::{Context as _, anyhow};
 use clap::Parser as _;
+use cli::Attach;
 use gpui::{
     App, AppContext as _, TitlebarOptions, UniformListScrollHandle, WindowDecorations,
     WindowOptions, font, px, size,
@@ -29,9 +32,6 @@ use state::job::JobResult;
 use state::render::typeset::{Look, Request};
 use state::view::panes::{self as commands, Close};
 use state::{Launch, State, project::session, project::watch};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
 use typeset::{FontSource, Typesetter};
 
 use crate::fonts::Fonts;
@@ -44,14 +44,24 @@ static ALLOCATOR: tracy_client::ProfiledAllocator<std::alloc::System> =
     tracy_client::ProfiledAllocator::new(std::alloc::System, 16);
 
 fn main() -> anyhow::Result<()> {
-    let registry = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer());
-    #[cfg(feature = "tracy")]
-    let registry = registry.with(tracing_tracy::TracyLayer::default());
-    registry.init();
-
     let args = cli::Args::parse();
+    let attach = args.attach();
+    #[cfg(any(debug_assertions, feature = "tracy"))]
+    match attach {
+        Attach::Launch | Attach::Wait => {
+            use tracing_subscriber::EnvFilter;
+            use tracing_subscriber::layer::SubscriberExt as _;
+            use tracing_subscriber::util::SubscriberInitExt as _;
+            let registry = tracing_subscriber::registry()
+                .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+                .with(tracing_subscriber::fmt::layer());
+            #[cfg(feature = "tracy")]
+            let registry = registry.with(tracing_tracy::TracyLayer::default());
+            registry.init();
+        }
+        Attach::Detached => {}
+    }
+
     let (root, file) = match Launch::resolve(&args.path)? {
         Launch::Folder(root) => (root, None),
         Launch::File { root, file } => (root, Some(file)),
@@ -71,6 +81,21 @@ fn main() -> anyhow::Result<()> {
             root.path(),
         )),
     };
+    match attach {
+        Attach::Launch => {
+            std::process::Command::new(std::env::current_exe().context("finding edt's binary")?)
+                .args(std::env::args_os().skip(1))
+                .arg("--detached")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .context("starting edt in the background")?;
+            return Ok(());
+        }
+        Attach::Wait | Attach::Detached => {}
+    }
     let title = root.path().display().to_string();
     let prose = config.font.prose().family.clone();
     let (typeset_tx, typeset_rx) = std::sync::mpsc::channel::<Request>();
