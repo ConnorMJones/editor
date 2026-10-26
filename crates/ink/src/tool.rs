@@ -338,28 +338,87 @@ pub enum Selecting<T> {
     },
 }
 
-/// Never empty; `bounds` holds the picked marks as they were when the grip began.
+/// Never empty; `frame` is the box the picked marks are handled by.
 #[derive(Clone, Debug)]
 pub struct Picked {
     pub ids: SmallVec<[MarkId; 8]>,
-    pub bounds: Rect<Surface>,
+    pub frame: Frame,
 }
 
 impl Picked {
-    fn gather<'a>(found: impl Iterator<Item = (MarkId, &'a Arc<Mark>)>) -> Option<Picked> {
-        found.fold(None, |picked, (id, mark)| {
-            let bounds = mark.bounds();
-            Some(match picked {
-                None => Picked {
-                    ids: smallvec::smallvec![id],
-                    bounds,
-                },
-                Some(mut picked) => {
-                    picked.ids.push(id);
-                    picked.bounds = picked.bounds.union(&bounds);
-                    picked
+    /// One mark is handled by its own rectangle, turned with it; several by an upright box.
+    pub fn gather<'a>(found: impl Iterator<Item = (MarkId, &'a Arc<Mark>)>) -> Option<Picked> {
+        let found: SmallVec<[(MarkId, &Arc<Mark>); 8]> = found.collect();
+        match found.as_slice() {
+            [] => None,
+            [(id, mark)] => Some(Picked {
+                ids: smallvec::smallvec![*id],
+                frame: Frame::of(mark),
+            }),
+            [(_, first), rest @ ..] => {
+                let bounds = (rest.iter()).fold(first.bounds(), |bounds, (_, mark)| {
+                    bounds.union(&mark.bounds())
+                });
+                Some(Picked {
+                    ids: found.iter().map(|(id, _)| *id).collect(),
+                    frame: Frame::upright(bounds),
+                })
+            }
+        }
+    }
+}
+
+/// A rectangle in its own space, placed on the surface: the box a selection is handled by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub rect: Rect<Local>,
+    pub placement: Placement,
+}
+
+impl Frame {
+    pub fn of(mark: &Mark) -> Frame {
+        Frame {
+            rect: mark.built().bounds,
+            placement: mark.placement,
+        }
+    }
+
+    pub fn upright(bounds: Rect<Surface>) -> Frame {
+        Frame {
+            rect: bounds.mapped(Placement::ALIGNED.back()),
+            placement: Placement::ALIGNED,
+        }
+    }
+
+    pub fn centre(&self) -> Point<Surface> {
+        let rect = &self.rect;
+        (self.placement.forward()).apply(rect.min().lerp(rect.max(), 0.5))
+    }
+
+    pub fn holds(&self, at: Point<Surface>) -> bool {
+        self.rect.contains(self.placement.back().apply(at))
+    }
+
+    /// The handles to grab at `reach`, and where they sit; a side has one only once the frame is
+    /// three reaches deep across it, so it stays clear of the corners and the middle.
+    pub fn handles(&self, reach: Size) -> impl Iterator<Item = (Handle, Point<Surface>)> + '_ {
+        let forward = self.placement.forward();
+        (Handle::ALL.into_iter())
+            .filter(move |handle| match handle {
+                Handle::Edge(edge) => {
+                    let (near, far) = (edge.of(&self.rect), edge.opposite().of(&self.rect));
+                    forward.apply(near).distance(forward.apply(far)) >= 3.0 * reach.get()
                 }
+                Handle::Corner(_) | Handle::Rotate => true,
             })
+            .map(move |handle| (handle, handle.at(self, reach)))
+    }
+
+    /// The frame after `by`, or `None` when `by` flattens it.
+    pub fn moved(&self, by: &Affine<Surface, Surface>) -> Option<Frame> {
+        Placement::new(self.placement.forward().then(by)).map(|placement| Frame {
+            rect: self.rect,
+            placement,
         })
     }
 }
@@ -376,10 +435,17 @@ pub enum Grip {
         from: Point<Surface>,
         to: Point<Surface>,
     },
-    Scaling {
-        corner: Corner,
+    Resizing {
+        resize: Resize,
         to: Point<Surface>,
     },
+}
+
+/// What a resize holds: a corner, which keeps the shape, or a side, which stretches one way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resize {
+    Corner(Corner),
+    Edge(Edge),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,8 +457,17 @@ pub enum Corner {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
     Corner(Corner),
+    Edge(Edge),
     Rotate,
 }
 
@@ -405,7 +480,7 @@ impl Corner {
         Corner::BottomLeft,
     ];
 
-    pub fn of(self, rect: &Rect<Surface>) -> Point<Surface> {
+    pub fn of<S>(self, rect: &Rect<S>) -> Point<S> {
         let (min, max) = (rect.min(), rect.max());
         match self {
             Corner::TopLeft => min,
@@ -415,7 +490,7 @@ impl Corner {
         }
     }
 
-    fn opposite(self) -> Corner {
+    pub fn opposite(self) -> Corner {
         match self {
             Corner::TopLeft => Corner::BottomRight,
             Corner::TopRight => Corner::BottomLeft,
@@ -425,23 +500,54 @@ impl Corner {
     }
 }
 
+impl Edge {
+    /// The middle of the side.
+    pub fn of<S>(self, rect: &Rect<S>) -> Point<S> {
+        let (min, max) = (rect.min(), rect.max());
+        let middle = min.lerp(max, 0.5);
+        match self {
+            Edge::Top => Point::new(middle.x, min.y),
+            Edge::Right => Point::new(max.x, middle.y),
+            Edge::Bottom => Point::new(middle.x, max.y),
+            Edge::Left => Point::new(min.x, middle.y),
+        }
+    }
+
+    pub fn opposite(self) -> Edge {
+        match self {
+            Edge::Top => Edge::Bottom,
+            Edge::Right => Edge::Left,
+            Edge::Bottom => Edge::Top,
+            Edge::Left => Edge::Right,
+        }
+    }
+}
+
 impl Handle {
-    pub const ALL: [Handle; 5] = [
+    pub const ALL: [Handle; 9] = [
         Handle::Corner(Corner::TopLeft),
         Handle::Corner(Corner::TopRight),
         Handle::Corner(Corner::BottomLeft),
         Handle::Corner(Corner::BottomRight),
+        Handle::Edge(Edge::Top),
+        Handle::Edge(Edge::Right),
+        Handle::Edge(Edge::Bottom),
+        Handle::Edge(Edge::Left),
         Handle::Rotate,
     ];
 
-    /// Where the handle sits on `bounds` when handles reach `reach`.
-    pub fn at(self, bounds: &Rect<Surface>, reach: Size) -> Point<Surface> {
+    /// Where the handle sits on `frame` when handles reach `reach`; the rotate handle stands off
+    /// the top side, outward however the frame is turned.
+    pub fn at(self, frame: &Frame, reach: Size) -> Point<Surface> {
+        let forward = frame.placement.forward();
         match self {
-            Handle::Corner(corner) => corner.of(bounds),
-            Handle::Rotate => Point::new(
-                (bounds.min().x + bounds.max().x) * 0.5,
-                bounds.min().y - 4.0 * reach.get(),
-            ),
+            Handle::Corner(corner) => forward.apply(corner.of(&frame.rect)),
+            Handle::Edge(edge) => forward.apply(edge.of(&frame.rect)),
+            Handle::Rotate => {
+                let top = forward.apply(Edge::Top.of(&frame.rect));
+                let out = top - frame.centre();
+                top + out * (4.0 * reach.get() / out.length().max(f32::MIN_POSITIVE))
+            }
         }
     }
 }
@@ -452,12 +558,13 @@ impl Grip {
             Grip::Still => Grip::Still,
             Grip::Moving { from, .. } => Grip::Moving { from, to },
             Grip::Rotating { center, from, .. } => Grip::Rotating { center, from, to },
-            Grip::Scaling { corner, .. } => Grip::Scaling { corner, to },
+            Grip::Resizing { resize, .. } => Grip::Resizing { resize, to },
         }
     }
 
-    /// How the grip moves the picked marks; `bounds` is never flat, since marks have width.
-    pub fn transform(&self, bounds: &Rect<Surface>) -> Affine<Surface, Surface> {
+    /// How the grip moves the picked marks. A resize scales in the frame's own space, so a turned
+    /// frame keeps its shape; `frame.rect` is never flat, since marks have width.
+    pub fn transform(&self, frame: &Frame) -> Affine<Surface, Surface> {
         match *self {
             Grip::Still => Affine::identity(),
             Grip::Moving { from, to } => Affine::translation(to.x - from.x, to.y - from.y),
@@ -465,14 +572,35 @@ impl Grip {
                 let (a, b) = (from - center, to - center);
                 Affine::rotation_about(center, a.cross(b).atan2(a.dot(b)))
             }
-            Grip::Scaling { corner, to } => {
-                let anchor = corner.opposite().of(bounds);
-                let grabbed = corner.of(bounds);
-                Affine::scaling_about(
-                    anchor,
-                    (to.x - anchor.x) / (grabbed.x - anchor.x),
-                    (to.y - anchor.y) / (grabbed.y - anchor.y),
-                )
+            Grip::Resizing { resize, to } => {
+                let (rect, back) = (&frame.rect, frame.placement.back());
+                let to = back.apply(to);
+                let local = match resize {
+                    // Scaled by how far the pen has gone along the corner's diagonal.
+                    Resize::Corner(corner) => {
+                        let anchor = corner.opposite().of(rect);
+                        let diagonal = corner.of(rect) - anchor;
+                        let scale = (to - anchor).dot(diagonal) / diagonal.dot(diagonal);
+                        Affine::scaling_about(anchor, scale, scale)
+                    }
+                    Resize::Edge(edge) => {
+                        let anchor = edge.opposite().of(rect);
+                        let grabbed = edge.of(rect);
+                        match edge {
+                            Edge::Top | Edge::Bottom => Affine::scaling_about(
+                                anchor,
+                                1.0,
+                                (to.y - anchor.y) / (grabbed.y - anchor.y),
+                            ),
+                            Edge::Left | Edge::Right => Affine::scaling_about(
+                                anchor,
+                                (to.x - anchor.x) / (grabbed.x - anchor.x),
+                                1.0,
+                            ),
+                        }
+                    }
+                };
+                back.then(&local).then(frame.placement.forward())
             }
         }
     }
@@ -497,13 +625,20 @@ impl<T: Copy + PartialEq> Selecting<T> {
                 PenInput::Down { target, sample },
             ) if held == target => {
                 let at = sample.at;
-                let center = picked.bounds.min().lerp(picked.bounds.max(), 0.5);
-                let grip = (Handle::ALL.into_iter())
-                    .map(|handle| (handle, handle.at(&picked.bounds, reach).distance(at)))
+                let center = picked.frame.centre();
+                let grip = (picked.frame.handles(reach))
+                    .map(|(handle, sits)| (handle, sits.distance(at)))
                     .min_by(|(_, a), (_, b)| a.total_cmp(b))
                     .filter(|(_, distance)| *distance <= reach.get())
                     .map(|(handle, _)| match handle {
-                        Handle::Corner(corner) => Grip::Scaling { corner, to: at },
+                        Handle::Corner(corner) => Grip::Resizing {
+                            resize: Resize::Corner(corner),
+                            to: at,
+                        },
+                        Handle::Edge(edge) => Grip::Resizing {
+                            resize: Resize::Edge(edge),
+                            to: at,
+                        },
                         Handle::Rotate => Grip::Rotating {
                             center,
                             from: at,
@@ -511,7 +646,7 @@ impl<T: Copy + PartialEq> Selecting<T> {
                         },
                     })
                     .or_else(|| {
-                        (picked.bounds.contains(at)).then_some(Grip::Moving { from: at, to: at })
+                        (picked.frame.holds(at)).then_some(Grip::Moving { from: at, to: at })
                     });
                 *self = match grip {
                     Some(grip) => Selecting::Holding {
@@ -624,18 +759,20 @@ impl<T: Copy + PartialEq> Selecting<T> {
                 PenInput::Up(sample),
             ) => {
                 let grip = grip.to(sample.at);
-                let by = grip.transform(&picked.bounds);
+                let by = grip.transform(&picked.frame);
+                // A refused transform leaves the marks, and so the frame, as they were.
+                let frame = picked.frame.moved(&by).unwrap_or(picked.frame);
                 *self = Selecting::Holding {
                     target,
                     picked: Picked {
                         ids: picked.ids.clone(),
-                        bounds: picked.bounds.mapped(&by),
+                        frame,
                     },
                     grip: Grip::Still,
                 };
                 match grip {
                     Grip::Still => Outcome::Ignored,
-                    Grip::Moving { .. } | Grip::Rotating { .. } | Grip::Scaling { .. } => {
+                    Grip::Moving { .. } | Grip::Rotating { .. } | Grip::Resizing { .. } => {
                         Outcome::Commit(MarkChange::Transform(target, picked.ids, by))
                     }
                 }

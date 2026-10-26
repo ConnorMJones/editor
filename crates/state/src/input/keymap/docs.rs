@@ -31,7 +31,7 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | Keys | Context | Action |
 | --- | --- | --- |
 | `b` / `e` | drawing | The pen's tip draws / erases whole strokes. |
-| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to scale, the dot above to rotate. |
+| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to resize it keeping its shape, a side to stretch it, the dot above to rotate. |
 | `tl` / `ta` / `tr` / `to` | drawing | The tip drags out a line / arrow / rectangle / ellipse. |
 | `tt` | drawing | The tip places text: a tap starts it, a drag sets its wrap width, a press on text edits it. Typing uses helix keys in insert, normal and select mode. |
 | `esc` | text in normal mode | Keep the text and go back to drawing; pressing elsewhere keeps it too. Blank text is dropped. |

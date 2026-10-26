@@ -1,6 +1,6 @@
 use ink::brush::Size;
-use ink::doc::{Background, Board, Drawing, Ink, LayerIndex, MarkChange, ShapeKind};
-use ink::geom::{Point, Rect, Surface};
+use ink::doc::{Background, Board, Drawing, Ink, LayerIndex, MarkChange, Placement, ShapeKind};
+use ink::geom::{Affine, Point, Rect, Surface};
 use ink::history::Edited;
 use ink::input::Sample;
 use ink::tool::{
@@ -331,10 +331,11 @@ fn the_handles_rotate_and_scale_the_selection() {
             picked,
             grip: Grip::Still,
             ..
-        } => picked.bounds,
+        } => picked.frame,
         other => panic!("{other:?}"),
     };
     let held = box_of(&tools);
+    let surface = |frame: ink::tool::Frame| frame.rect.mapped(frame.placement.forward());
 
     let corner = Handle::Corner(ink::tool::Corner::BottomRight).at(&held, reach());
     let farther = (corner.x + 40.0, corner.y);
@@ -346,15 +347,15 @@ fn the_handles_rotate_and_scale_the_selection() {
     );
     let scaled = bounds(&edited)[0];
     let width = |rect: Rect<Surface>| rect.max().x - rect.min().x;
-    assert!((width(scaled) - width(held) - 40.0).abs() < 1e-2);
-    let (held, now) = (box_of(&tools), scaled);
+    assert!((width(scaled) - width(surface(held)) - 40.0).abs() < 0.5);
+    let (held, now) = (surface(box_of(&tools)), scaled);
     assert!(
         held.min().distance(now.min()) < 1e-3 && held.max().distance(now.max()) < 1e-3,
         "the box follows the marks"
     );
 
-    let rotate = Handle::Rotate.at(&scaled, reach());
-    let center = scaled.min().lerp(scaled.max(), 0.5);
+    let rotate = Handle::Rotate.at(&box_of(&tools), reach());
+    let center = box_of(&tools).centre();
     let beside = (center.x + (center.y - rotate.y), center.y);
     commit(
         &mut edited,
@@ -447,4 +448,94 @@ fn a_box_picks_the_marks_wholly_inside_it() {
         &path(&[(130.0, 10.0), (-10.0, -10.0)]),
     );
     assert_eq!(picked(&tools), 2, "a box drawn backwards picks the same");
+}
+
+/// A board holding a 100 by 50 image turned a quarter, its top left corner at (200, 200).
+fn turned_image() -> Edited<Board> {
+    let mut edited = board();
+    let ink = ink::doc::ImageInk::new(
+        std::sync::Arc::from(&b"pixels"[..]),
+        model::picture::Encoding::Bitmap(model::picture::Bitmap::Png),
+        ink::doc::PageSize::new(100.0, 50.0).unwrap(),
+    );
+    let mark = ink::doc::Mark {
+        placement: Placement::new(Affine::new([0.0, 1.0, -1.0, 0.0, 200.0, 200.0])).unwrap(),
+        paint: crate::paint(),
+        ink: ink::doc::Ink::Image(std::sync::Arc::new(ink)),
+    };
+    edited
+        .commit(ink::doc::MarkChange::Add(LayerIndex(0), mark).into())
+        .unwrap();
+    edited
+}
+
+fn placement(edited: &Edited<Board>) -> [f32; 6] {
+    let marks = edited.drawing().marks(LayerIndex(0)).unwrap();
+    let (_, mark) = marks.iter().next().unwrap();
+    mark.placement.forward().coefficients
+}
+
+fn close(a: [f32; 6], b: [f32; 6]) -> bool {
+    a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)
+}
+
+#[test]
+fn a_turned_mark_is_handled_on_its_own_corners_and_keeps_its_shape() {
+    let mut tools = tools();
+    let mut edited = turned_image();
+    // Its middle, (50, 25) in its own space, is at (175, 250) on the board.
+    let tap = path(&[(175.0, 250.0), (175.5, 250.0)]);
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Box),
+        edited.drawing(),
+        &tap,
+    );
+    let frame = match &tools.select {
+        Selecting::Holding { picked, .. } => picked.frame,
+        other => panic!("{other:?}"),
+    };
+    let corner = Handle::Corner(ink::tool::Corner::BottomRight).at(&frame, reach());
+    assert!(
+        corner.distance(Point::new(150.0, 300.0)) < 1e-3,
+        "{corner:?}"
+    );
+    // Dragged to twice as far from the opposite corner, it doubles, still turned.
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Select(Gather::Box),
+        &[(150.0, 300.0), (100.0, 400.0)],
+    );
+    assert!(
+        close(placement(&edited), [0.0, 2.0, -2.0, 0.0, 200.0, 200.0]),
+        "{:?}",
+        placement(&edited)
+    );
+}
+
+#[test]
+fn a_side_handle_stretches_one_way_in_the_marks_own_frame() {
+    let mut tools = tools();
+    let mut edited = turned_image();
+    let tap = path(&[(175.0, 250.0), (175.5, 250.0)]);
+    gesture(
+        &mut tools,
+        ToolKind::Select(Gather::Box),
+        edited.drawing(),
+        &tap,
+    );
+    // The right side's middle, (100, 25) in its own space, is at (175, 300); pulled to where
+    // (150, 25) would be, the image grows half again along its own width.
+    commit(
+        &mut edited,
+        &mut tools,
+        ToolKind::Select(Gather::Box),
+        &[(175.0, 300.0), (175.0, 350.0)],
+    );
+    assert!(
+        close(placement(&edited), [0.0, 1.5, -1.0, 0.0, 200.0, 200.0]),
+        "{:?}",
+        placement(&edited)
+    );
 }

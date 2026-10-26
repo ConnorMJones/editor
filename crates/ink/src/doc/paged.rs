@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use model::color::Rgb;
 pub use model::sheet::{InvalidPageSize, PageIndex, PageSize};
 use model::sheet::{Stack, StackError};
 
 use crate::doc::{
-    ChangeError, Drawing, LayerChange, LayerIndex, LayerMarks, Layers, MarkChange, Marks,
-    apply_marks,
+    ChangeError, Drawing, LayerChange, LayerIndex, LayerMarks, Layers, Mark, MarkChange, MarkId,
+    Marks, apply_marks,
 };
 
 /// Pages in reading order, each with its own size, background and marks; never empty.
@@ -184,16 +186,13 @@ impl Drawing for Paged {
         self.pages.get(target.page.0)?.marks.get(target.layer)
     }
 
+    fn add(&mut self, target: PageLayer, mark: Mark) -> Result<MarkId, ChangeError> {
+        Ok(Arc::make_mut(self.marks_mut(target)?).insert(mark))
+    }
+
     fn apply(&mut self, change: PagedChange) -> Result<(), ChangeError> {
         match change {
-            PagedChange::Marks(change) => {
-                let target = change.target();
-                let page = (self.pages.get_mut(target.page.0))
-                    .ok_or(ChangeError::NoPage(target.page.0))?;
-                let marks = (page.marks.get_mut(target.layer))
-                    .ok_or(ChangeError::NoLayer(target.layer.0))?;
-                apply_marks(marks, change)
-            }
+            PagedChange::Marks(change) => apply_marks(self.marks_mut(change.target())?, change),
             PagedChange::InsertPage {
                 at,
                 size,
@@ -227,5 +226,12 @@ impl Drawing for Paged {
                 Ok(())
             }
         }
+    }
+}
+
+impl Paged {
+    pub fn marks_mut(&mut self, target: PageLayer) -> Result<&mut Arc<Marks>, ChangeError> {
+        let page = (self.pages.get_mut(target.page.0)).ok_or(ChangeError::NoPage(target.page.0))?;
+        (page.marks.get_mut(target.layer)).ok_or(ChangeError::NoLayer(target.layer.0))
     }
 }

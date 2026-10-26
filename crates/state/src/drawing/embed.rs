@@ -4,16 +4,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ink::doc::{
-    Drawing, ImageInk, Ink, LayerIndex, Mark, MarkChange, PageLayer, PageSize, Placement,
-};
+use helix_core::smallvec;
+use ink::doc::{Drawing, ImageInk, Ink, LayerIndex, Mark, PageLayer, PageSize, Placement};
+use ink::tool::{Frame, Gather, Grip, Picked, Selecting, ToolKind};
 use model::geom::{Point, Surface, Vector};
 use model::notice::Notice;
 use model::picture::Encoding;
 
 use crate::State;
-use crate::drawing::command::commit;
-use crate::drawing::{BoardId, InkFile, PagedId};
+use crate::drawing::{BoardId, Hand, InkFile, InkTabs, PagedId};
+use crate::view::tab::Tab;
 use crate::viewer::{ProbeError, probe};
 
 /// Points per image pixel, at the usual 96 pixels to the inch.
@@ -80,7 +80,14 @@ pub fn embedded(
             Some(drawing) => {
                 let page = drawing.edited.drawing().stack().place(target.page).size;
                 let widest = page.width.get() * PAGE_SHARE;
-                place(drawing, target, centre, &read, widest)
+                place(drawing, target, centre, &read, widest).map(|picked| {
+                    match state.layout.focused_mut().active_mut() {
+                        Some(Tab::Ink(InkTabs::Paged(tab))) if tab.file() == file => {
+                            pick(&mut tab.hand, target, picked)
+                        }
+                        Some(_) | None => {}
+                    }
+                })
             }
             None => Ok(()),
         },
@@ -89,7 +96,14 @@ pub fn embedded(
             target,
             centre,
         } => match state.boards.get_mut(file) {
-            Some(drawing) => place(drawing, target, centre, &read, f32::INFINITY),
+            Some(drawing) => place(drawing, target, centre, &read, f32::INFINITY).map(|picked| {
+                match state.layout.focused_mut().active_mut() {
+                    Some(Tab::Ink(InkTabs::Board(tab))) if tab.file() == file => {
+                        pick(&mut tab.hand, target, picked)
+                    }
+                    Some(_) | None => {}
+                }
+            }),
             None => Ok(()),
         },
     };
@@ -106,7 +120,7 @@ pub fn place<D: Drawing>(
     centre: Point<Surface>,
     read: &Read,
     widest: f32,
-) -> Result<(), Notice> {
+) -> Result<Picked, Notice> {
     let natural = read.pixels.width.get() * POINTS_PER_PIXEL;
     let scale = POINTS_PER_PIXEL * (widest / natural).min(1.0);
     let extent = PageSize::new(
@@ -128,5 +142,23 @@ pub fn place<D: Drawing>(
             extent,
         ))),
     };
-    commit(file, MarkChange::Add(target, mark).into())
+    let frame = Frame::of(&mark);
+    let id = (file.edited.add(target, mark)).map_err(|error| Notice::DrawingRefused {
+        reason: error.to_string(),
+    })?;
+    Ok(Picked {
+        ids: smallvec![id],
+        frame,
+    })
+}
+
+/// The tip takes the box select tool with `picked` held.
+pub fn pick<T: Copy + PartialEq>(hand: &mut Hand<T>, target: T, picked: Picked) {
+    hand.cancel_stroke();
+    hand.tip = ToolKind::Select(Gather::Box);
+    hand.tools.select = Selecting::Holding {
+        target,
+        picked,
+        grip: Grip::Still,
+    };
 }

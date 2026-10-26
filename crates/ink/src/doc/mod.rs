@@ -339,10 +339,13 @@ pub trait Drawing: Clone {
     fn marks(&self, target: Self::Target) -> Option<&Marks>;
 
     fn apply(&mut self, change: Self::Change) -> Result<(), ChangeError>;
+
+    /// Adds `mark` on `target`, returning the id it is kept under.
+    fn add(&mut self, target: Self::Target, mark: Mark) -> Result<MarkId, ChangeError>;
 }
 
 /// Applies `change` to `marks`, which belong to the target the change names.
-fn apply_marks<T>(marks: &mut Arc<Marks>, change: MarkChange<T>) -> Result<(), ChangeError> {
+pub fn apply_marks<T>(marks: &mut Arc<Marks>, change: MarkChange<T>) -> Result<(), ChangeError> {
     match change {
         MarkChange::Add(_, mark) => {
             Arc::make_mut(marks).insert(mark);

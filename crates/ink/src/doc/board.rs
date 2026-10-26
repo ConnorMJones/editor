@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use crate::doc::{
-    Background, ChangeError, Drawing, LayerChange, LayerIndex, LayerMarks, Layers, MarkChange,
-    Marks, apply_marks,
+    Background, ChangeError, Drawing, LayerChange, LayerIndex, LayerMarks, Layers, Mark,
+    MarkChange, MarkId, Marks, apply_marks,
 };
 
 /// One unbounded surface; on a board the sheet and the surface are the same space.
@@ -77,16 +79,13 @@ impl Drawing for Board {
         self.marks.get(target)
     }
 
+    fn add(&mut self, target: LayerIndex, mark: Mark) -> Result<MarkId, ChangeError> {
+        Ok(Arc::make_mut(self.marks_mut(target)?).insert(mark))
+    }
+
     fn apply(&mut self, change: BoardChange) -> Result<(), ChangeError> {
         match change {
-            BoardChange::Marks(change) => {
-                let target = change.target();
-                let marks = self
-                    .marks
-                    .get_mut(target)
-                    .ok_or(ChangeError::NoLayer(target.0))?;
-                apply_marks(marks, change)
-            }
+            BoardChange::Marks(change) => apply_marks(self.marks_mut(change.target())?, change),
             BoardChange::Layers(LayerChange::Add(layer)) => {
                 self.layers.push(layer);
                 self.marks.push_layer();
@@ -100,5 +99,11 @@ impl Drawing for Board {
                 Ok(())
             }
         }
+    }
+}
+
+impl Board {
+    pub fn marks_mut(&mut self, target: LayerIndex) -> Result<&mut Arc<Marks>, ChangeError> {
+        (self.marks.get_mut(target)).ok_or(ChangeError::NoLayer(target.0))
     }
 }

@@ -2,14 +2,14 @@
 
 use std::collections::VecDeque;
 
-use crate::doc::{ChangeError, Drawing};
+use crate::doc::{ChangeError, Drawing, Mark, MarkId};
+
+/// The states kept to undo into.
+pub const KEPT: usize = 100;
 
 /// Names one state of a drawing; a file is unsaved while its state isn't the one written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Revision(u64); // private: named only by `Edited`
-
-/// The states kept to undo into.
-const KEPT: usize = 100;
 
 #[derive(Clone, Debug)]
 pub struct Edited<D> {
@@ -49,15 +49,31 @@ impl<D: Drawing> Edited<D> {
 
     /// Applies `change` as one undoable step; a refused change leaves everything as it was.
     pub fn commit(&mut self, change: D::Change) -> Result<Revision, ChangeError> {
+        self.step(|drawing| drawing.apply(change))?;
+        Ok(self.revision)
+    }
+
+    /// Adds `mark` on `target` as one undoable step, returning the id it is kept under.
+    pub fn add(&mut self, target: D::Target, mark: Mark) -> Result<MarkId, ChangeError> {
+        self.step(|drawing| drawing.add(target, mark))
+    }
+
+    /// Runs `change` as one undoable step; a refused change leaves everything as it was.
+    pub fn step<R>(
+        &mut self,
+        change: impl FnOnce(&mut D) -> Result<R, ChangeError>,
+    ) -> Result<R, ChangeError> {
         let before = self.drawing.clone();
-        match self.drawing.apply(change) {
-            Ok(()) => {}
+        match change(&mut self.drawing) {
+            Ok(done) => {
+                self.advance(before);
+                Ok(done)
+            }
             Err(error) => {
                 self.drawing = before;
-                return Err(error);
+                Err(error)
             }
         }
-        Ok(self.advance(before))
     }
 
     /// Puts `drawing` in place of the current one as one undoable step, as when the file is read

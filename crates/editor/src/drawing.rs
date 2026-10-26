@@ -304,7 +304,7 @@ pub fn paint_ink<D: Drawing>(
                     target: on,
                     picked,
                     grip,
-                } if *on == target => (&picked.ids, grip.transform(&picked.bounds)),
+                } if *on == target => (&picked.ids, grip.transform(&picked.frame)),
                 Selecting::Holding { .. }
                 | Selecting::Idle
                 | Selecting::Pressed { .. }
@@ -443,23 +443,26 @@ pub fn paint_ink<D: Drawing>(
             picked,
             grip,
         } => on_screen(*target).map(|(shown, to_screen)| {
-            let by = grip.transform(&picked.bounds).then(&to_screen);
+            let by = grip.transform(&picked.frame).then(&to_screen);
             let reach = frame::reach(&shown.from_pane);
-            for handle in Handle::ALL {
-                let at = by.apply(handle.at(&picked.bounds, reach));
+            for (handle, sits) in picked.frame.handles(reach) {
+                let at = by.apply(sits);
                 let side = REACH.0;
                 let square = Bounds::new(
                     point(px(at.x - side * 0.5), px(at.y - side * 0.5)),
                     size(px(side), px(side)),
                 );
                 let round = match handle {
-                    Handle::Corner(_) => px(0.0),
+                    Handle::Corner(_) | Handle::Edge(_) => px(0.0),
                     Handle::Rotate => px(side * 0.5),
                 };
                 window.paint_quad(fill(square, screen.accent).corner_radii(round));
             }
             line(
-                &mut (Corner::AROUND.into_iter()).map(|corner| by.apply(corner.of(&picked.bounds))),
+                &mut (Corner::AROUND.into_iter()).map(|corner| {
+                    let frame = &picked.frame;
+                    by.apply(frame.placement.forward().apply(corner.of(&frame.rect)))
+                }),
                 Closed::Yes,
             )
         }),

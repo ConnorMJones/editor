@@ -777,3 +777,42 @@ fn images_are_saved_and_read_back() {
     again.keys(":o notes.pdt<ret>");
     assert_eq!(images(&again), kept);
 }
+
+#[test]
+fn a_placed_image_is_picked_ready_to_move() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(400, 200)
+        .save(dir.path().join("photo.png"))
+        .unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>:image photo.png<ret>");
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(InkTabs::Paged(tab))) => {
+            assert_eq!(
+                tab.hand.tip,
+                ink::tool::ToolKind::Select(ink::tool::Gather::Box)
+            );
+            assert!(matches!(
+                &tab.hand.tools.select,
+                ink::tool::Selecting::Holding { picked, .. } if picked.ids.len() == 1
+            ));
+        }
+        Some(_) | None => panic!("a paged drawing is focused"),
+    }
+    let (_, placed) = images(&h)[0].clone();
+    // Unmeasured, the view centres on the page's top edge; grab the image below it.
+    let grab = (placed.min().x + 150.0, placed.max().y - 20.0);
+    let moved_to = (grab.0 + 30.0, grab.1 + 40.0);
+    draw(&mut h, Stylus::Tip, &line(grab, moved_to));
+    let (_, now) = images(&h)[0].clone();
+    assert!(
+        (now.min().x - placed.min().x - 30.0).abs() < 0.01,
+        "{now:?}"
+    );
+    assert!(
+        (now.min().y - placed.min().y - 40.0).abs() < 0.01,
+        "{now:?}"
+    );
+    h.keys("u");
+    assert_eq!(images(&h)[0].1, placed, "the move undoes as one step");
+}
