@@ -275,7 +275,8 @@ pub fn step(state: &mut State, step: Step) {
             tab.hand.cancel_stroke();
             history(&mut boards[tab.file()], step)
         }
-        Some(Tab::Text(_) | Tab::Image(_)) | None => Err(Notice::NotADrawing),
+        Some(Tab::Image(_)) => Err(Notice::ReadOnly),
+        Some(Tab::Text(_)) | None => Err(Notice::NotADrawing),
     };
     match result {
         Ok(()) => {}

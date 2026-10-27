@@ -75,6 +75,12 @@ fn an_image_cannot_be_written() {
     let mut h = Harness::new(dir.path());
     h.keys(":o photo.png<ret>:w<ret>");
     assert!(matches!(h.state.notice, Some(Notice::ReadOnly)));
+    h.state.notice = None;
+    h.run(|state, out| state::apply::apply(state, model::command::Command::Undo, out));
+    assert!(
+        matches!(h.state.notice, Some(Notice::ReadOnly)),
+        "nor undone"
+    );
 }
 
 #[test]

@@ -65,8 +65,14 @@ pub fn focused_writable(layout: &Layout) -> Result<Writable, Notice> {
     focused_file(layout)?.writable().ok_or(Notice::ReadOnly)
 }
 
-/// Commits pending text edits first; writing keeps the file's preview tabs.
+/// Commits pending text edits, and text being typed on a drawing, first; writing keeps the
+/// file's preview tabs.
 pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
+    let opened = Opened::from(file);
+    match crate::drawing::typing::settle_on(state, |other| other == opened) {
+        Ok(()) => {}
+        Err(refused) => state.notice = Some(refused),
+    }
     state.layout.keep(file.into());
     let path = state.path_of(file.into()).to_owned();
     let (saving, data) = match file {
@@ -104,6 +110,10 @@ pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
 
 /// Writes every modified file, returning what is being written.
 pub fn write_modified(state: &mut State, out: &mut Vec<Effect>) -> Vec<Opened> {
+    match crate::drawing::typing::settle_on(state, |_| true) {
+        Ok(()) => {}
+        Err(refused) => state.notice = Some(refused),
+    }
     // Images are never modified, so every modified file can be written.
     let modified: Vec<Writable> = (state.files())
         .filter(|opened| state.is_modified(*opened))

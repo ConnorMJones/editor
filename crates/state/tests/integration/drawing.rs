@@ -990,3 +990,22 @@ fn a_bmp_is_stored_as_png() {
     let (bytes, _) = images(&h)[0].clone();
     assert!(bytes.starts_with(b"\x89PNG"), "{:?}", &bytes[..4]);
 }
+
+#[test]
+fn a_write_while_typing_saves_the_text_and_keeps_typing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("saved<C-k><C-s>");
+    assert!(typing(&h), "the text stays open");
+    assert!(!modified(&h), "what is written is what the drawing holds");
+    let mut again = Harness::new(dir.path());
+    again.keys(":o notes.pdt<ret>");
+    assert_eq!(texts(&again), ["saved"]);
+    h.keys(" more<esc>u");
+    assert_eq!(typed_text(&h), "saved", "the text keeps its own undo");
+    h.keys("<esc>");
+    assert_eq!(texts(&h), ["saved"]);
+    assert!(!modified(&h), "nothing changed since the write");
+}

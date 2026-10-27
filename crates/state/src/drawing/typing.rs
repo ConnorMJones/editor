@@ -13,7 +13,7 @@ use crate::State;
 use crate::drawing::command::{add, commit};
 use crate::drawing::{Doing, InkFile, InkTabs};
 use crate::text::buffer::TextDoc;
-use crate::view::tab::Tab;
+use crate::view::tab::{Opened, Tab};
 
 pub struct Open<T> {
     pub target: T,
@@ -113,18 +113,36 @@ pub fn finish<D: Drawing>(
     file: &mut InkFile<D>,
     fonts: &Fonts,
 ) -> Result<Ended<D::Target>, Notice> {
-    let open = match std::mem::replace(doing, Doing::IDLE) {
+    let mut open = match std::mem::replace(doing, Doing::IDLE) {
         Doing::Typing(open) => open,
         ink @ Doing::Ink { .. } => {
             *doing = ink;
             return Ok(Ended::NothingOpen);
         }
     };
+    settle(&mut open, file, fonts)?;
+    Ok(match open.writing {
+        Writing::New => Ended::Dropped,
+        Writing::Replacing(mark) => Ended::Kept {
+            target: open.target,
+            picked: Picked::Text(mark),
+        },
+    })
+}
+
+/// Commits the text as typed so far as one step, leaving it open; `writing` then names the
+/// mark the drawing holds for it.
+pub fn settle<D: Drawing>(
+    open: &mut Open<D::Target>,
+    file: &mut InkFile<D>,
+    fonts: &Fonts,
+) -> Result<(), Notice> {
     let Open {
         target,
         writing,
         text,
-    } = *open;
+    } = open;
+    text.doc.commit(&text.selection);
     let typed = String::from(&text.doc.text);
     let typed_mark = |id, ink| TextMark {
         id,
@@ -132,35 +150,67 @@ pub fn finish<D: Drawing>(
         placement: text.placement,
         paint: text.paint,
     };
-    let kept = |mark| Ended::Kept {
-        target,
-        picked: Picked::Text(mark),
-    };
-    match (writing, fonts.lay_out(&typed, &text.style, text.wrap).inked) {
-        (Writing::New, Inked::Blank) => Ok(Ended::Dropped),
+    *writing = match (
+        writing.clone(),
+        fonts.lay_out(&typed, &text.style, text.wrap).inked,
+    ) {
+        (Writing::New, Inked::Blank) => Writing::New,
         (Writing::New, Inked::Ink(ink)) => {
             let mark = Mark {
                 placement: text.placement,
                 paint: text.paint,
                 ink: Ink::Text(ink.clone()),
             };
-            let id = add(file, target, mark)?;
-            Ok(kept(typed_mark(id, ink)))
+            Writing::Replacing(typed_mark(add(file, *target, mark)?, ink))
         }
         (Writing::Replacing(was), Inked::Blank) => {
-            commit(file, MarkChange::Remove(target, smallvec![was.id]).into())
-                .map(|()| Ended::Dropped)
+            commit(file, MarkChange::Remove(*target, smallvec![was.id]).into())?;
+            Writing::New
         }
-        (Writing::Replacing(was), Inked::Ink(ink)) if was.text.text == ink.text => Ok(kept(was)),
+        (Writing::Replacing(was), Inked::Ink(ink)) if was.text.text == ink.text => {
+            Writing::Replacing(was)
+        }
         (Writing::Replacing(was), Inked::Ink(ink)) => {
             let mark = typed_mark(was.id, ink);
             commit(
                 file,
-                MarkChange::Replace(target, mark.id, mark.mark()).into(),
+                MarkChange::Replace(*target, mark.id, mark.mark()).into(),
             )?;
-            Ok(kept(mark))
+            Writing::Replacing(mark)
+        }
+    };
+    Ok(())
+}
+
+/// Settles the text typed on every tab showing a file `which` takes, so a write holds it.
+pub fn settle_on(state: &mut State, which: impl Fn(Opened) -> bool) -> Result<(), Notice> {
+    let State {
+        layout,
+        pageds,
+        boards,
+        fonts,
+        ..
+    } = state;
+    for item in (layout.panes_mut()).flat_map(|(_, pane)| pane.items_mut().iter_mut()) {
+        match &mut item.tab {
+            Tab::Ink(InkTabs::Paged(tab)) if which(Opened::Paged(tab.file())) => {
+                let file = tab.file();
+                match &mut tab.hand.doing {
+                    Doing::Typing(open) => settle(open, &mut pageds[file], fonts)?,
+                    Doing::Ink { .. } => {}
+                }
+            }
+            Tab::Ink(InkTabs::Board(tab)) if which(Opened::Board(tab.file())) => {
+                let file = tab.file();
+                match &mut tab.hand.doing {
+                    Doing::Typing(open) => settle(open, &mut boards[file], fonts)?,
+                    Doing::Ink { .. } => {}
+                }
+            }
+            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => {}
         }
     }
+    Ok(())
 }
 
 pub fn rewrap<D: Drawing>(
