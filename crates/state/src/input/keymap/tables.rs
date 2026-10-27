@@ -1088,7 +1088,7 @@ const DRAWING: Bindings = &[
     (&[Key::char('t'), Key::char('r')], tool(InkTool::Rectangle)),
     (&[Key::char('t'), Key::char('o')], tool(InkTool::Ellipse)),
     (&[Key::char('t'), Key::char('t')], tool(InkTool::Text)),
-    (&[Key::char('p')], Command::PasteImage),
+    (&[SPACE, Key::char('p')], Command::PasteImage),
     (
         &[Key::char('d'), Key::char('d')],
         ink(InkCommand::DeletePicked),
@@ -1097,27 +1097,30 @@ const DRAWING: Bindings = &[
     (&[Key::char('u')], Command::Undo),
     (&[Key::char('U')], Command::Redo),
     (
-        &[Key::char(']'), Key::char('p')],
+        &[Key::char('p'), Key::char('n')],
         page(PageCommand::Go(PageStep::Next)),
     ),
     (
-        &[Key::char('['), Key::char('p')],
+        &[Key::char('p'), Key::char('p')],
         page(PageCommand::Go(PageStep::Previous)),
     ),
     (
         &[Key::char('g'), Key::char('g')],
         page(PageCommand::Go(PageStep::First)),
     ),
-    (&[Key::char('G')], page(PageCommand::Go(PageStep::Last))),
     (
-        &[Key::char('o')],
+        &[Key::char('g'), Key::char('e')],
+        page(PageCommand::Go(PageStep::Last)),
+    ),
+    (
+        &[Key::char('p'), Key::char('o')],
         page(PageCommand::Insert(PageSide::Below)),
     ),
     (
-        &[Key::char('O')],
+        &[Key::char('p'), Key::char('O')],
         page(PageCommand::Insert(PageSide::Above)),
     ),
-    (&[Key::char('d'), Key::char('p')], page(PageCommand::Remove)),
+    (&[Key::char('p'), Key::char('d')], page(PageCommand::Remove)),
     (
         &[Key::char(']'), Key::char('l')],
         ink(InkCommand::Layer(Direction::Forward)),

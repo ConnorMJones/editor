@@ -285,10 +285,10 @@ fn pages_are_added_removed_and_jumped_between() {
     let mut h = Harness::new(dir.path());
     h.keys(":o notes.pdt<ret>");
     draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 100.0)));
-    h.keys("o");
+    h.keys("po");
     assert_eq!(pages(&h), 2);
     assert_eq!(view(&h).centre.page, Page(1), "the new page is shown");
-    h.keys("O");
+    h.keys("pO");
     assert_eq!(pages(&h), 3);
     assert_eq!(
         view(&h).centre.page,
@@ -298,13 +298,13 @@ fn pages_are_added_removed_and_jumped_between() {
     h.keys("gg");
     assert_eq!(view(&h).centre.page, Page(0));
     assert_eq!(marks(&h), 1, "the first page keeps its stroke");
-    h.keys("G");
+    h.keys("ge");
     assert_eq!(view(&h).centre.page, Page(2));
-    h.keys("[p");
+    h.keys("pp");
     assert_eq!(view(&h).centre.page, Page(1));
-    h.keys("dp");
+    h.keys("pd");
     assert_eq!(pages(&h), 2);
-    h.keys("ggdpdp");
+    h.keys("ggpdpd");
     assert_eq!(pages(&h), 1);
     assert!(matches!(
         h.state.notice,
@@ -318,7 +318,7 @@ fn pages_are_added_removed_and_jumped_between() {
 fn a_split_stays_on_its_page_when_pages_are_added_before_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o notes.pdt<ret>oo<C-w>v");
+    h.keys(":o notes.pdt<ret>popo<C-w>v");
     h.keys("gg");
     let first = h.state.layout.leaves()[0];
     let shown = |h: &Harness, pane| match h.state.layout.panes()[pane].active() {
@@ -326,7 +326,7 @@ fn a_split_stays_on_its_page_when_pages_are_added_before_it() {
         Some(_) | None => panic!("both panes show the drawing"),
     };
     let before = shown(&h, first);
-    h.keys("O");
+    h.keys("pO");
     assert_eq!(shown(&h, first), Page(before.0 + 1));
 }
 
@@ -334,7 +334,7 @@ fn a_split_stays_on_its_page_when_pages_are_added_before_it() {
 fn panning_stops_at_the_last_page() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o notes.pdt<ret>o");
+    h.keys(":o notes.pdt<ret>po");
     let pane = h.state.layout.focus();
     h.run(|state, _| sheet::measured(state, pane, measure()));
     for _ in 0..200 {
@@ -350,7 +350,7 @@ fn panning_stops_at_the_last_page() {
 fn a_session_restores_a_drawing_on_its_layer_and_page() {
     let dir = tempfile::tempdir().unwrap();
     let mut before = Harness::new(dir.path());
-    before.keys(":o notes.pdt<ret><space>lnoo+zf:w<ret>");
+    before.keys(":o notes.pdt<ret><space>lnpopo+zf:w<ret>");
     let kept = view(&before);
     let text = toml::to_string(&session::snapshot(&before.state)).unwrap();
 
@@ -679,7 +679,8 @@ fn keys_go_to_the_text_until_esc_or_a_press_elsewhere_keeps_it() {
     h.keys("two");
     draw(&mut h, Stylus::Tip, &line((300.0, 400.0), (400.0, 400.0)));
     assert_eq!(texts(&h), ["one ", "two"]);
-    assert!(typing(&h), "the text tool starts new text where it pressed");
+    assert!(!typing(&h), "the press only ends the typing");
+    assert_eq!(marks(&h), 3, "the stroke and two texts, and nothing new");
 }
 
 /// The image marks on the focused paged document's first page and layer, with their bounds.
@@ -815,4 +816,106 @@ fn a_placed_image_is_picked_ready_to_move() {
     );
     h.keys("u");
     assert_eq!(images(&h)[0].1, placed, "the move undoes as one step");
+}
+
+/// The frame of what the focused paged document's tab holds picked.
+fn picked(h: &Harness) -> Option<ink::tool::Frame> {
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(InkTabs::Paged(tab))) => match &tab.hand.tools.select {
+            ink::tool::Selecting::Holding { picked, .. } => Some(picked.frame),
+            _ => None,
+        },
+        Some(_) | None => panic!("a paged drawing is focused"),
+    }
+}
+
+/// Where `frame`'s side `edge` sits on the sheet, for the first page.
+fn side(frame: &ink::tool::Frame, edge: ink::tool::Edge) -> (f32, f32) {
+    let at = frame.placement.forward().apply(edge.of(&frame.rect));
+    (at.x, at.y)
+}
+
+#[test]
+fn finished_text_is_picked_and_a_tap_on_it_types_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("hello<esc>");
+    tap(&mut h, (100.0, 300.0));
+    assert!(!typing(&h));
+    assert_eq!(h.state.input.mode, Mode::Normal);
+    assert!(picked(&h).is_some(), "a press elsewhere picks the text");
+    assert_eq!(marks(&h), 1, "and starts nothing new");
+    tap(&mut h, (100.0, 300.0));
+    assert!(picked(&h).is_none(), "the next press elsewhere lets go");
+    tap(&mut h, (110.0, 107.0));
+    assert!(picked(&h).is_some(), "a tap on text picks it");
+    tap(&mut h, (110.0, 107.0));
+    assert!(typing(&h), "a tap on picked text types in it");
+    assert_eq!(typed_text(&h), "hello");
+}
+
+#[test]
+fn a_press_inside_the_text_being_typed_moves_its_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("hello");
+    tap(&mut h, (100.2, 107.0));
+    assert!(typing(&h), "the text stays open");
+    h.keys("x");
+    assert_eq!(typed_text(&h), "xhello");
+}
+
+#[test]
+fn dragging_a_side_of_picked_text_wraps_it_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>tt");
+    tap(&mut h, (100.0, 100.0));
+    h.keys("several words that wrap<esc><esc>");
+    let frame = picked(&h).expect("the text is picked");
+    let wide = frame.rect.max().y - frame.rect.min().y;
+    let right = side(&frame, ink::tool::Edge::Right);
+    draw(&mut h, Stylus::Tip, &line(right, (160.0, right.1)));
+    let wrapped = picked(&h).expect("still picked");
+    assert!(
+        (wrapped.rect.max().x - wrapped.rect.min().x - 60.0).abs() < 1.0,
+        "{wrapped:?}"
+    );
+    assert!(
+        wrapped.rect.max().y - wrapped.rect.min().y > wide,
+        "it wraps onto more lines"
+    );
+    let left = side(&wrapped, ink::tool::Edge::Left);
+    draw(&mut h, Stylus::Tip, &line(left, (80.0, left.1)));
+    let widened = picked(&h).expect("still picked");
+    let at = widened.placement.forward().apply(widened.rect.min());
+    assert!(
+        (at.x - 80.0).abs() < 1.0,
+        "the left side follows the pen: {at:?}"
+    );
+    h.keys("uu");
+    assert_eq!(texts(&h), ["several words that wrap"]);
+    assert_eq!(
+        picked_wrap(&h),
+        ink::text::Wrap::Lines,
+        "each drag undoes as one step"
+    );
+}
+
+fn picked_wrap(h: &Harness) -> ink::text::Wrap {
+    match h.state.layout.focused().active() {
+        Some(Tab::Ink(InkTabs::Paged(tab))) => {
+            let drawing = h.state.pageds[tab.file()].edited.drawing();
+            let (_, mark) = drawing.marks(FIRST).unwrap().iter().next().unwrap();
+            match &mark.ink {
+                ink::doc::Ink::Text(text) => text.wrap,
+                _ => panic!("a text mark"),
+            }
+        }
+        Some(_) | None => panic!("a paged drawing is focused"),
+    }
 }

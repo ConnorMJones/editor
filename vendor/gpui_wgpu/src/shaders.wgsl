@@ -1274,19 +1274,25 @@ struct PolychromeSprite {
 
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
-    @location(0) tile_position: vec2<f32>,
+    /// The sprite's own 0..1 space, reaching a device pixel past each edge.
+    @location(0) unit: vec2<f32>,
     @location(1) @interpolate(flat) sprite_id: u32,
     @location(3) clip_distances: vec4<f32>,
 }
 
 @vertex
 fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PolySpriteVarying {
-    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let corner = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = load_poly_sprite(instance_id);
+    // Grown a device pixel on every side, so a turned edge has room to fade out.
+    let mapped = transpose(sprite.transformation.rotation_scale);
+    let size = vec2<f32>(sprite.bounds.size);
+    let reach = max(vec2<f32>(length(mapped * vec2<f32>(size.x, 0.0)), length(mapped * vec2<f32>(0.0, size.y))), vec2<f32>(1e-6));
+    let unit_vertex = corner * (1.0 + 2.0 / reach) - 1.0 / reach;
 
     var out = PolySpriteVarying();
     out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
-    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    out.unit = unit_vertex;
     out.sprite_id = instance_id;
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     return out;
@@ -1294,13 +1300,20 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sprite = load_poly_sprite(input.sprite_id);
+    let unit = clamp(input.unit, vec2<f32>(0.0), vec2<f32>(1.0));
+    let sample = textureSample(t_sprite, s_sprite, to_tile_position(unit, sprite.tile));
+    let per_pixel = vec2<f32>(
+        length(vec2<f32>(dpdx(input.unit.x), dpdy(input.unit.x))),
+        length(vec2<f32>(dpdx(input.unit.y), dpdy(input.unit.y))),
+    );
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let sprite = load_poly_sprite(input.sprite_id);
+    let inside = min(input.unit, vec2<f32>(1.0) - input.unit) / max(per_pixel, vec2<f32>(1e-6));
+    let edge = saturate(min(inside.x, inside.y) + 0.5);
     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
@@ -1308,7 +1321,7 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = vec4<f32>(vec3<f32>(grayscale), sample.a);
     }
-    return blend_color(color, sprite.opacity * saturate(0.5 - distance));
+    return blend_color(color, sprite.opacity * edge * saturate(0.5 - distance));
 }
 
 // --- surfaces --- //

@@ -118,8 +118,8 @@ pub fn command(state: &mut State, command: ViewCommand) {
             }
             Ok(())
         }
-        (Some(Viewed::Pages { view, .. }), ViewCommand::Fit) => {
-            view.fit = view.fit.next();
+        (Some(Viewed::Pages { view, stack, last }), ViewCommand::Fit) => {
+            view.step_fit(stack, last.map(|measure| measure.viewport));
             Ok(())
         }
         (Some(Viewed::Plane { .. }), ViewCommand::Fit) => Err(Notice::BoardHasNoPages),

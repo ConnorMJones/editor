@@ -539,3 +539,18 @@ fn a_side_handle_stretches_one_way_in_the_marks_own_frame() {
         placement(&edited)
     );
 }
+
+#[test]
+fn a_tap_on_a_held_handle_changes_nothing() {
+    let mut tools = tools();
+    let edited = turned_image();
+    let select = ToolKind::Select(Gather::Box);
+    let tap = path(&[(175.0, 250.0), (175.5, 250.0)]);
+    gesture(&mut tools, select, edited.drawing(), &tap);
+    let on_corner = path(&[(150.0, 300.0), (150.5, 300.0)]);
+    assert!(matches!(
+        gesture(&mut tools, select, edited.drawing(), &on_corner),
+        Outcome::Ignored
+    ));
+    assert_eq!(picked(&tools), 1, "still held");
+}

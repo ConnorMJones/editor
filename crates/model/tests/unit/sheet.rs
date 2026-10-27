@@ -1,6 +1,6 @@
 use model::geom::{Point, Vector};
 use model::sheet::{
-    Fit, GAP, PageIndex, PageSize, PlaneView, SheetView, Stack, StackEdit, Viewport, Zoom,
+    Fit, PageIndex, PageSize, PlaneView, SheetView, Stack, StackEdit, Viewport, Zoom,
 };
 use model::units::Px;
 
@@ -25,19 +25,18 @@ fn page_columns(view: &SheetView, stack: &Stack, viewport: Viewport) -> (f32, f3
 }
 
 #[test]
-fn fitting_the_width_centres_the_page_at_any_pane_size() {
+fn fitting_the_width_fills_the_pane_edge_to_edge() {
     let stack = stack(3);
     let view = SheetView::start(&stack);
     for (width, height) in [(800.0, 600.0), (300.0, 900.0), (1900.0, 400.0)] {
         let (left, right) = page_columns(&view, &stack, viewport(width, height));
-        let gap = GAP * view.scale(&stack, viewport(width, height));
-        assert!((left - gap).abs() < 1e-2, "{width}: {left}");
-        assert!((right - (width - gap)).abs() < 1e-2, "{width}: {right}");
+        assert!(left.abs() < 1e-2, "{width}: {left}");
+        assert!((right - width).abs() < 1e-2, "{width}: {right}");
     }
 }
 
 #[test]
-fn fitting_the_height_shows_the_whole_page_centred() {
+fn fitting_the_height_fills_the_pane_top_to_bottom() {
     let stack = stack(3);
     let mut view = SheetView::start(&stack);
     view.fit = Fit::Height;
@@ -49,8 +48,7 @@ fn fitting_the_height_shows_the_whole_page_centred() {
     let bottom = page
         .to_pane
         .apply(Point::new(0.0, PageSize::A4.height.get()));
-    let gap = GAP * frame.scale;
-    assert!((top.y - gap).abs() < 1e-2 && (bottom.y - (600.0 - gap)).abs() < 1e-2);
+    assert!(top.y.abs() < 1e-2 && (bottom.y - 600.0).abs() < 1e-2);
     let middle = page
         .to_pane
         .apply(Point::new(PageSize::A4.width.get() * 0.5, 0.0));
@@ -69,7 +67,7 @@ fn panning_never_leaves_the_pages() {
         view.pan(&stack, pane, by);
         let (left, right) = page_columns(&view, &stack, pane);
         assert!(
-            left > 0.0 && right < 800.0,
+            left.abs() < 1e-2 && (right - 800.0).abs() < 1e-2,
             "a fitted width can't pan sideways"
         );
     }
@@ -78,17 +76,14 @@ fn panning_never_leaves_the_pages() {
         .page(&stack, PageIndex(0))
         .to_pane
         .apply(Point::new(0.0, 0.0));
-    assert!(
-        (top.y - GAP * frame.scale).abs() < 1e-2,
-        "stops at the first page's top"
-    );
+    assert!(top.y.abs() < 1e-2, "stops at the first page's top");
     view.pan(&stack, pane, Vector::new(0.0, 1e6));
     let frame = view.frame(&stack, pane);
     let last = frame.page(&stack, PageIndex(1));
     let bottom = last
         .to_pane
         .apply(Point::new(0.0, PageSize::A4.height.get()));
-    assert!((bottom.y - (600.0 - GAP * frame.scale)).abs() < 1e-2);
+    assert!((bottom.y - 600.0).abs() < 1e-2);
     assert_eq!(view.centre.page, PageIndex(1), "the page in focus follows");
 }
 
@@ -156,4 +151,24 @@ fn a_plane_zooms_about_the_cursor() {
     let under = view.frame(pane).from_pane.apply(at);
     view.zoom_about(pane, at, 0.5);
     assert!(view.frame(pane).to_pane.apply(under).distance(at) < 1e-3);
+}
+
+#[test]
+fn stepping_the_fit_never_shows_the_same_scale_twice() {
+    let stack = stack(2);
+    let mut view = SheetView::start(&stack);
+    let wide = viewport(1200.0, 600.0);
+    view.step_fit(&stack, Some(wide));
+    assert_eq!(view.fit, Fit::Height);
+    view.step_fit(&stack, Some(wide));
+    assert_eq!(view.fit, Fit::Width);
+    // The whole page fills the height of a wide pane and the width of a tall one.
+    for (pane, after) in [(wide, Fit::Width), (viewport(300.0, 1200.0), Fit::Height)] {
+        view.fit = Fit::Page;
+        view.step_fit(&stack, Some(pane));
+        assert_eq!(view.fit, after);
+    }
+    view.fit = Fit::Page;
+    view.step_fit(&stack, None);
+    assert_eq!(view.fit, Fit::Width, "unmeasured, the width");
 }

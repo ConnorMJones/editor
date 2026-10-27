@@ -14,7 +14,7 @@ use ink::doc::{Background, Board, Drawing, GeometryId, LayerIndex, Layers, PageL
 use ink::history::{Edited, Revision};
 use ink::input::{Model, WindowParams};
 use ink::text::{FontFamily, TextStyle};
-use ink::tool::{ToolKind, Tools};
+use ink::tool::{Gather, Grip, Picked, Selecting, ToolKind, Tools};
 
 use crate::drawing::typing::Open;
 use model::geom::{Affine, Pane, Surface};
@@ -128,6 +128,16 @@ impl<T: Copy + PartialEq> Hand<T> {
     pub fn cancel_stroke(&mut self) {
         self.tools.cancel();
         self.pen = Pen::Up;
+    }
+
+    pub fn pick(&mut self, target: T, picked: Picked) {
+        self.cancel_stroke();
+        self.tip = ToolKind::Select(Gather::Box);
+        self.tools.select = Selecting::Holding {
+            target,
+            picked,
+            grip: Grip::Still,
+        };
     }
 
     /// A hand with the same settings and no stroke in progress.

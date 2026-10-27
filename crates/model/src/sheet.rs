@@ -6,8 +6,11 @@ use std::ops::Range;
 use crate::geom::{Affine, Pane, Point, Sheet, Surface, Vector};
 use crate::units::{Positive, Px};
 
-/// Space between stacked pages, and the least space a fit leaves at the pane's edges, in points.
+/// Space between stacked pages, in points.
 pub const GAP: f32 = 16.0;
+
+/// Scales closer than this share of each other look the same.
+pub const SAME_SCALE: f32 = 0.01;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageIndex(pub usize);
@@ -203,17 +206,6 @@ pub enum Fit {
     Page,
 }
 
-impl Fit {
-    /// The fit after this one, for a key that steps through them.
-    pub fn next(self) -> Fit {
-        match self {
-            Fit::Width => Fit::Height,
-            Fit::Height => Fit::Page,
-            Fit::Page => Fit::Width,
-        }
-    }
-}
-
 /// A factor on a view's base scale, within what a pane can usefully show.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct Zoom(f32); // private: clamped to the zoom range
@@ -299,12 +291,31 @@ impl SheetView {
     pub fn scale(&self, stack: &Stack, viewport: Viewport) -> f32 {
         let page = stack.place(self.centre.page).size;
         let fitted = match self.fit {
-            Fit::Width => viewport.width.get() / (stack.width() + 2.0 * GAP),
-            Fit::Height => viewport.height.get() / (page.height.get() + 2.0 * GAP),
-            Fit::Page => (viewport.width.get() / (page.width.get() + 2.0 * GAP))
-                .min(viewport.height.get() / (page.height.get() + 2.0 * GAP)),
+            Fit::Width => viewport.width.get() / stack.width(),
+            Fit::Height => viewport.height.get() / page.height.get(),
+            Fit::Page => (viewport.width.get() / page.width.get())
+                .min(viewport.height.get() / page.height.get()),
         };
         fitted * self.zoom.get()
+    }
+
+    /// Swaps a width fit and a height fit
+    pub fn step_fit(&mut self, stack: &Stack, viewport: Option<Viewport>) {
+        self.fit = match (self.fit, viewport) {
+            (Fit::Width, _) => Fit::Height,
+            (Fit::Height, _) => Fit::Width,
+            (Fit::Page, None) => Fit::Width,
+            (Fit::Page, Some(viewport)) => {
+                let now = self.scale(stack, viewport);
+                [Fit::Width, Fit::Height]
+                    .into_iter()
+                    .find(|fit| {
+                        let scale = SheetView { fit: *fit, ..*self }.scale(stack, viewport);
+                        (scale - now).abs() > now * SAME_SCALE
+                    })
+                    .unwrap_or(Fit::Width)
+            }
+        };
     }
 
     /// The view at `viewport`. The centre keeps the stack on screen: a stack smaller than the
@@ -371,7 +382,7 @@ impl SheetView {
         self.centre = match viewport {
             Some(viewport) => {
                 let scale = self.scale(stack, viewport);
-                let below = viewport.height.get() / scale * 0.5 - GAP;
+                let below = viewport.height.get() / scale * 0.5;
                 let centre = placed.place.apply(Point::new(middle, below));
                 spot(stack, clamp(stack, viewport, scale, centre))
             }
@@ -420,7 +431,7 @@ impl SheetFrame {
 fn clamp(stack: &Stack, viewport: Viewport, scale: f32, centre: Point<Sheet>) -> Point<Sheet> {
     // The range is centred on the middle of the content and empty when the content fits.
     let axis = |at: f32, content: f32, visible: f32| {
-        let reach = ((content + 2.0 * GAP - visible) * 0.5).max(0.0);
+        let reach = ((content - visible) * 0.5).max(0.0);
         at.clamp(content * 0.5 - reach, content * 0.5 + reach)
     };
     Point::new(

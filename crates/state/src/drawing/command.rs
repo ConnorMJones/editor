@@ -15,7 +15,7 @@ use model::notice::Notice;
 use model::sheet::StackEdit;
 
 use crate::State;
-use crate::drawing::typing;
+use crate::drawing::typing::{self, Ended};
 use crate::drawing::{BoardTab, Hand, InkFile, InkTabs, PagedId, PagedTab};
 use crate::view::layout::Layout;
 use crate::view::tab::Tab;
@@ -187,7 +187,13 @@ fn ink<D: Drawing>(
             };
             ended.map(After::of)
         }
-        InkCommand::FinishText => typing::finish(&mut hand.typing, file, fonts).map(After::of),
+        InkCommand::FinishText => match typing::finish(&mut hand.typing, file, fonts)? {
+            Ended::Kept { target, picked } => {
+                hand.pick(target, picked);
+                Ok(After::Typed)
+            }
+            ended @ (Ended::NothingOpen | Ended::Dropped) => Ok(After::of(ended)),
+        },
         InkCommand::DeletePicked => {
             let change = hand.tools.select.delete().ok_or(Notice::NothingPicked)?;
             commit(file, change.into()).map(|()| After::Nothing)
@@ -274,10 +280,10 @@ fn history<D: Drawing>(file: &mut InkFile<D>, step: Step) -> Result<(), Notice> 
 }
 
 impl After {
-    fn of(ended: typing::Ended) -> After {
+    fn of<T>(ended: Ended<T>) -> After {
         match ended {
-            typing::Ended::NothingOpen => After::Nothing,
-            typing::Ended::Finished => After::Typed,
+            Ended::NothingOpen => After::Nothing,
+            Ended::Dropped | Ended::Kept { .. } => After::Typed,
         }
     }
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 use ink::doc::{Board, Drawing, LayerIndex, Paged, Visibility};
 use ink::input::{Elapsed, Pressure, Sample, Tilt};
 use ink::text::Fonts;
-use ink::tool::{Outcome, PenInput, ToolKind};
+use ink::tool::{Grip, Outcome, PenInput, Selecting, ToolKind};
 use model::geom::{Pane, Point, Surface};
 use model::mode::Mode;
 use model::notice::Notice;
@@ -111,10 +111,28 @@ fn on<D: Drawing>(
 ) -> Result<(), Notice> {
     let (gesture, input) = match (phase, hand.pen) {
         (PenPhase::Down(stylus), _) => {
-            // Pressing anywhere ends the text being typed.
+            let landed = land(file.edited.drawing(), hand.layer);
+            match (hand.typing.as_deref_mut(), &landed) {
+                (Some(open), Some(landed))
+                    if open.target == landed.target
+                        && open.text.frame().holds(landed.onto.apply(sample.at)) =>
+                {
+                    open.text.cursor_to(landed.onto.apply(sample.at));
+                    return Ok(());
+                }
+                (Some(_) | None, _) => {}
+            }
             match typing::finish(&mut hand.typing, file, fonts)? {
-                Ended::Finished => *mode = Mode::Normal,
                 Ended::NothingOpen => {}
+                Ended::Dropped => {
+                    *mode = Mode::Normal;
+                    return Ok(());
+                }
+                Ended::Kept { target, picked } => {
+                    *mode = Mode::Normal;
+                    hand.pick(target, picked);
+                    return Ok(());
+                }
             }
             let drawing = file.edited.drawing();
             match drawing
@@ -127,7 +145,7 @@ fn on<D: Drawing>(
                 None => return Err(Notice::NoLayer),
             }
             // A stroke starting off every page draws nothing.
-            let Some(landed) = land(drawing, hand.layer) else {
+            let Some(landed) = landed else {
                 return Ok(());
             };
             let gesture = Gesture {
@@ -172,6 +190,15 @@ fn on<D: Drawing>(
             let paint = hand.tools.brush.paint;
             hand.typing = Some(Box::new(typing::open(at, &hand.style, paint, fonts)));
             *mode = Mode::Insert;
+            Ok(())
+        }
+        Outcome::Rewrap { target, id, area } => {
+            let picked = typing::rewrap(file, fonts, target, id, area)?;
+            hand.tools.select = Selecting::Holding {
+                target,
+                picked,
+                grip: Grip::Still,
+            };
             Ok(())
         }
         Outcome::Ignored | Outcome::Drawn => Ok(()),

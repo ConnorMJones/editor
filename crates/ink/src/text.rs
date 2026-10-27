@@ -14,7 +14,7 @@ use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex
 
 use crate::brush::Size;
 use crate::doc::{Built, GeometryId};
-use crate::geom::{Local, Point};
+use crate::geom::{Local, Point, Rect};
 use crate::mesh::Mesh;
 
 /// The size glyph outlines are read at before scaling to ems.
@@ -91,6 +91,7 @@ pub struct TextInk {
     pub style: TextStyle,
     pub wrap: Wrap,
     pub built: Built,
+    pub area: Rect<Local>,
 }
 
 /// Where a caret between two characters stands, in the text's own space.
@@ -105,6 +106,7 @@ pub struct Caret {
 pub struct Laid {
     pub carets: Box<[Caret]>,
     pub inked: Inked,
+    pub area: Rect<Local>,
 }
 
 #[derive(Debug)]
@@ -161,7 +163,10 @@ impl Fonts {
             .collect();
         let mut by_byte: Vec<Option<Caret>> = vec![None; text.len() + 1];
         let mut mesh = Mesh::default();
+        let (mut widest, mut bottom) = (0.0_f32, line_height);
         for run in buffer.layout_runs() {
+            widest = widest.max(run.line_w);
+            bottom = bottom.max(run.line_top + run.line_height);
             let start = line_starts[run.line_i];
             let caret = |x: f32| Caret {
                 at: Point::new(x, run.line_top),
@@ -217,6 +222,10 @@ impl Fonts {
                 last
             })
             .collect();
+        let area = Rect::spanning(
+            Point::new(0.0, 0.0),
+            Point::new(width.unwrap_or(widest), bottom),
+        );
         let inked = match mesh.bounds() {
             None => Inked::Blank,
             Some(bounds) => Inked::Ink(Arc::new(TextInk {
@@ -228,9 +237,14 @@ impl Fonts {
                     mesh,
                     bounds,
                 },
+                area,
             })),
         };
-        Laid { carets, inked }
+        Laid {
+            carets,
+            inked,
+            area,
+        }
     }
 }
 

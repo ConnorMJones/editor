@@ -15,6 +15,9 @@ use crate::input::{Modeled, Modeler, Sample};
 use crate::mesh::MeshBuilder;
 use crate::text::{TextInk, Wrap};
 
+/// The narrowest a text frame's side can wrap its text, in points.
+pub const MIN_WRAP: f32 = 4.0;
+
 /// Pen input on the surface of the target fixed at `Down`.
 #[derive(Clone, Copy, Debug)]
 pub enum PenInput<T> {
@@ -34,6 +37,11 @@ pub enum Outcome<T> {
     Failed(StrokeError),
     /// The text tool asks for text to be typed there.
     Type(TypeAt<T>),
+    Rewrap {
+        target: T,
+        id: MarkId,
+        area: Rect<Local>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,13 +381,26 @@ impl Picked {
 pub struct Frame {
     pub rect: Rect<Local>,
     pub placement: Placement,
+    pub sides: Sides,
+}
+
+/// What dragging a frame's side does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sides {
+    Stretch,
+    Wrap,
 }
 
 impl Frame {
     pub fn of(mark: &Mark) -> Frame {
+        let (rect, sides) = match &mark.ink {
+            Ink::Text(text) => (text.area, Sides::Wrap),
+            Ink::Stroke(_) | Ink::Shape(_) | Ink::Image(_) => (mark.built().bounds, Sides::Stretch),
+        };
         Frame {
-            rect: mark.built().bounds,
+            rect,
             placement: mark.placement,
+            sides,
         }
     }
 
@@ -387,6 +408,7 @@ impl Frame {
         Frame {
             rect: bounds.mapped(Placement::ALIGNED.back()),
             placement: Placement::ALIGNED,
+            sides: Sides::Stretch,
         }
     }
 
@@ -404,22 +426,21 @@ impl Frame {
     pub fn handles(&self, reach: Size) -> impl Iterator<Item = (Handle, Point<Surface>)> + '_ {
         let forward = self.placement.forward();
         (Handle::ALL.into_iter())
-            .filter(move |handle| match handle {
-                Handle::Edge(edge) => {
+            .filter(move |handle| match (handle, self.sides) {
+                (Handle::Edge(Edge::Top | Edge::Bottom), Sides::Wrap) => false,
+                (Handle::Edge(edge), Sides::Stretch | Sides::Wrap) => {
                     let (near, far) = (edge.of(&self.rect), edge.opposite().of(&self.rect));
                     forward.apply(near).distance(forward.apply(far)) >= 3.0 * reach.get()
                 }
-                Handle::Corner(_) | Handle::Rotate => true,
+                (Handle::Corner(_) | Handle::Rotate, Sides::Stretch | Sides::Wrap) => true,
             })
             .map(move |handle| (handle, handle.at(self, reach)))
     }
 
     /// The frame after `by`, or `None` when `by` flattens it.
     pub fn moved(&self, by: &Affine<Surface, Surface>) -> Option<Frame> {
-        Placement::new(self.placement.forward().then(by)).map(|placement| Frame {
-            rect: self.rect,
-            placement,
-        })
+        Placement::new(self.placement.forward().then(by))
+            .map(|placement| Frame { placement, ..*self })
     }
 }
 
@@ -437,6 +458,7 @@ pub enum Grip {
     },
     Resizing {
         resize: Resize,
+        from: Point<Surface>,
         to: Point<Surface>,
     },
 }
@@ -558,7 +580,53 @@ impl Grip {
             Grip::Still => Grip::Still,
             Grip::Moving { from, .. } => Grip::Moving { from, to },
             Grip::Rotating { center, from, .. } => Grip::Rotating { center, from, to },
-            Grip::Resizing { resize, .. } => Grip::Resizing { resize, to },
+            Grip::Resizing { resize, from, .. } => Grip::Resizing { resize, from, to },
+        }
+    }
+
+    pub fn travel(&self) -> f32 {
+        match *self {
+            Grip::Still => 0.0,
+            Grip::Moving { from, to }
+            | Grip::Rotating { from, to, .. }
+            | Grip::Resizing { from, to, .. } => from.distance(to),
+        }
+    }
+
+    pub fn rewrapped(&self, frame: &Frame) -> Option<Rect<Local>> {
+        let (min, max) = (frame.rect.min(), frame.rect.max());
+        let local = |to| frame.placement.back().apply(to);
+        match (*self, frame.sides) {
+            (
+                Grip::Resizing {
+                    resize: Resize::Edge(Edge::Left),
+                    to,
+                    ..
+                },
+                Sides::Wrap,
+            ) => Some(Rect::spanning(
+                Point::new(local(to).x.min(max.x - MIN_WRAP), min.y),
+                max,
+            )),
+            (
+                Grip::Resizing {
+                    resize: Resize::Edge(Edge::Right),
+                    to,
+                    ..
+                },
+                Sides::Wrap,
+            ) => Some(Rect::spanning(
+                min,
+                Point::new(local(to).x.max(min.x + MIN_WRAP), max.y),
+            )),
+            (_, Sides::Stretch | Sides::Wrap) => None,
+        }
+    }
+
+    pub fn held(&self, frame: &Frame) -> Frame {
+        match self.rewrapped(frame) {
+            Some(rect) => Frame { rect, ..*frame },
+            None => *frame,
         }
     }
 
@@ -572,18 +640,20 @@ impl Grip {
                 let (a, b) = (from - center, to - center);
                 Affine::rotation_about(center, a.cross(b).atan2(a.dot(b)))
             }
-            Grip::Resizing { resize, to } => {
+            Grip::Resizing { resize, to, .. } => {
                 let (rect, back) = (&frame.rect, frame.placement.back());
                 let to = back.apply(to);
-                let local = match resize {
+                let local = match (resize, frame.sides) {
+                    // Text held by a side wraps again rather than stretching.
+                    (Resize::Edge(_), Sides::Wrap) => return Affine::identity(),
                     // Scaled by how far the pen has gone along the corner's diagonal.
-                    Resize::Corner(corner) => {
+                    (Resize::Corner(corner), Sides::Stretch | Sides::Wrap) => {
                         let anchor = corner.opposite().of(rect);
                         let diagonal = corner.of(rect) - anchor;
                         let scale = (to - anchor).dot(diagonal) / diagonal.dot(diagonal);
                         Affine::scaling_about(anchor, scale, scale)
                     }
-                    Resize::Edge(edge) => {
+                    (Resize::Edge(edge), Sides::Stretch) => {
                         let anchor = edge.opposite().of(rect);
                         let grabbed = edge.of(rect);
                         match edge {
@@ -633,10 +703,12 @@ impl<T: Copy + PartialEq> Selecting<T> {
                     .map(|(handle, _)| match handle {
                         Handle::Corner(corner) => Grip::Resizing {
                             resize: Resize::Corner(corner),
+                            from: at,
                             to: at,
                         },
                         Handle::Edge(edge) => Grip::Resizing {
                             resize: Resize::Edge(edge),
+                            from: at,
                             to: at,
                         },
                         Handle::Rotate => Grip::Rotating {
@@ -757,26 +829,50 @@ impl<T: Copy + PartialEq> Selecting<T> {
                     grip,
                 },
                 PenInput::Up(sample),
-            ) => {
-                let grip = grip.to(sample.at);
-                let by = grip.transform(&picked.frame);
-                // A refused transform leaves the marks, and so the frame, as they were.
-                let frame = picked.frame.moved(&by).unwrap_or(picked.frame);
-                *self = Selecting::Holding {
-                    target,
-                    picked: Picked {
-                        ids: picked.ids.clone(),
-                        frame,
-                    },
-                    grip: Grip::Still,
-                };
-                match grip {
-                    Grip::Still => Outcome::Ignored,
-                    Grip::Moving { .. } | Grip::Rotating { .. } | Grip::Resizing { .. } => {
-                        Outcome::Commit(MarkChange::Transform(target, picked.ids, by))
+            ) => match (grip.to(sample.at), picked.ids.as_slice()) {
+                // A tap: text held alone opens to be typed, and anything else stays as it was.
+                (grip, ids) if grip.travel() <= reach.get() => {
+                    let typed = match ids {
+                        [id] => (drawing.marks(target))
+                            .and_then(|marks| marks.get(*id))
+                            .and_then(|mark| TypeAt::mark(target, *id, mark)),
+                        _ => None,
+                    };
+                    match typed {
+                        Some(at) => Outcome::Type(at),
+                        None => {
+                            *self = still(target, picked);
+                            Outcome::Ignored
+                        }
                     }
                 }
-            }
+                (grip, ids) => match (grip.rewrapped(&picked.frame), ids) {
+                    // Only a lone text mark's frame wraps.
+                    (Some(area), [id]) => {
+                        let id = *id;
+                        let frame = Frame {
+                            rect: area,
+                            ..picked.frame
+                        };
+                        *self = still(
+                            target,
+                            Picked {
+                                ids: picked.ids,
+                                frame,
+                            },
+                        );
+                        Outcome::Rewrap { target, id, area }
+                    }
+                    (Some(_) | None, _) => {
+                        let by = grip.transform(&picked.frame);
+                        // A refused transform leaves the marks, and so the frame, as they were.
+                        let frame = picked.frame.moved(&by).unwrap_or(picked.frame);
+                        let ids = picked.ids.clone();
+                        *self = still(target, Picked { ids, frame });
+                        Outcome::Commit(MarkChange::Transform(target, picked.ids, by))
+                    }
+                },
+            },
             (Selecting::Holding { target, picked, .. }, PenInput::Cancel) => {
                 *self = Selecting::Holding {
                     target,
@@ -806,6 +902,14 @@ impl<T: Copy + PartialEq> Selecting<T> {
             | Selecting::Boxing { .. }
             | Selecting::Lassoing { .. } => None,
         }
+    }
+}
+
+fn still<T>(target: T, picked: Picked) -> Selecting<T> {
+    Selecting::Holding {
+        target,
+        picked,
+        grip: Grip::Still,
     }
 }
 
@@ -939,6 +1043,21 @@ pub enum TypeAt<T> {
     },
 }
 
+impl<T> TypeAt<T> {
+    pub fn mark(target: T, id: MarkId, mark: &Mark) -> Option<TypeAt<T>> {
+        match &mark.ink {
+            Ink::Text(text) => Some(TypeAt::Mark {
+                target,
+                id,
+                text: text.clone(),
+                placement: mark.placement,
+                paint: mark.paint,
+            }),
+            Ink::Stroke(_) | Ink::Shape(_) | Ink::Image(_) => None,
+        }
+    }
+}
+
 impl<T: Copy> Placing<T> {
     pub fn input<D: Drawing<Target = T>>(
         &mut self,
@@ -950,20 +1069,11 @@ impl<T: Copy> Placing<T> {
             (_, PenInput::Down { target, sample }) => {
                 let under = (drawing.marks(target).into_iter())
                     .flat_map(|marks| marks.iter())
-                    .filter_map(|(id, mark)| match &mark.ink {
-                        Ink::Text(text) => Some((id, mark, text)),
-                        Ink::Stroke(_) | Ink::Shape(_) | Ink::Image(_) => None,
-                    })
-                    .filter(|(_, mark, _)| mark.touches(sample.at, reach.get()))
+                    .filter(|(_, mark)| mark.touches(sample.at, reach.get()))
+                    .filter_map(|(id, mark)| TypeAt::mark(target, id, mark))
                     .last();
                 match under {
-                    Some((id, mark, text)) => Outcome::Type(TypeAt::Mark {
-                        target,
-                        id,
-                        text: text.clone(),
-                        placement: mark.placement,
-                        paint: mark.paint,
-                    }),
+                    Some(at) => Outcome::Type(at),
                     None => {
                         *self = Placing::Dragging {
                             target,

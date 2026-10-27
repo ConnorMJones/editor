@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use helix_core::smallvec;
 use ink::doc::{Drawing, ImageInk, Ink, LayerIndex, Mark, PageLayer, PageSize, Placement};
-use ink::tool::{Frame, Gather, Grip, Picked, Selecting, ToolKind};
+use ink::tool::{Frame, Picked};
 use model::geom::{Point, Surface, Vector};
 use model::notice::Notice;
 use model::picture::Encoding;
 
 use crate::State;
-use crate::drawing::{BoardId, Hand, InkFile, InkTabs, PagedId};
+use crate::drawing::{BoardId, InkFile, InkTabs, PagedId};
 use crate::view::tab::Tab;
 use crate::viewer::{ProbeError, probe};
 
@@ -83,7 +83,7 @@ pub fn embedded(
                 place(drawing, target, centre, &read, widest).map(|picked| {
                     match state.layout.focused_mut().active_mut() {
                         Some(Tab::Ink(InkTabs::Paged(tab))) if tab.file() == file => {
-                            pick(&mut tab.hand, target, picked)
+                            tab.hand.pick(target, picked)
                         }
                         Some(_) | None => {}
                     }
@@ -99,7 +99,7 @@ pub fn embedded(
             Some(drawing) => place(drawing, target, centre, &read, f32::INFINITY).map(|picked| {
                 match state.layout.focused_mut().active_mut() {
                     Some(Tab::Ink(InkTabs::Board(tab))) if tab.file() == file => {
-                        pick(&mut tab.hand, target, picked)
+                        tab.hand.pick(target, picked)
                     }
                     Some(_) | None => {}
                 }
@@ -150,15 +150,4 @@ pub fn place<D: Drawing>(
         ids: smallvec![id],
         frame,
     })
-}
-
-/// The tip takes the box select tool with `picked` held.
-pub fn pick<T: Copy + PartialEq>(hand: &mut Hand<T>, target: T, picked: Picked) {
-    hand.cancel_stroke();
-    hand.tip = ToolKind::Select(Gather::Box);
-    hand.tools.select = Selecting::Holding {
-        target,
-        picked,
-        grip: Grip::Still,
-    };
 }

@@ -443,9 +443,10 @@ pub fn paint_ink<D: Drawing>(
             picked,
             grip,
         } => on_screen(*target).map(|(shown, to_screen)| {
+            let held = grip.held(&picked.frame);
             let by = grip.transform(&picked.frame).then(&to_screen);
             let reach = frame::reach(&shown.from_pane);
-            for (handle, sits) in picked.frame.handles(reach) {
+            for (handle, sits) in held.handles(reach) {
                 let at = by.apply(sits);
                 let side = REACH.0;
                 let square = Bounds::new(
@@ -459,10 +460,8 @@ pub fn paint_ink<D: Drawing>(
                 window.paint_quad(fill(square, screen.accent).corner_radii(round));
             }
             line(
-                &mut (Corner::AROUND.into_iter()).map(|corner| {
-                    let frame = &picked.frame;
-                    by.apply(frame.placement.forward().apply(corner.of(&frame.rect)))
-                }),
+                &mut (Corner::AROUND.into_iter())
+                    .map(|corner| by.apply(held.placement.forward().apply(corner.of(&held.rect)))),
                 Closed::Yes,
             )
         }),
@@ -475,7 +474,18 @@ pub fn paint_ink<D: Drawing>(
                     Closed::Yes,
                 )
             }),
-            Placing::Idle => None,
+            // Text being typed shows the box it wraps in.
+            Placing::Idle => hand.typing.as_ref().and_then(|open| {
+                on_screen(open.target).map(|(_, to_screen)| {
+                    let frame = open.text.frame();
+                    let to_screen = frame.placement.forward().then(&to_screen);
+                    line(
+                        &mut (Corner::AROUND.into_iter())
+                            .map(|corner| to_screen.apply(corner.of(&frame.rect))),
+                        Closed::Yes,
+                    )
+                })
+            }),
         },
     };
     match path {

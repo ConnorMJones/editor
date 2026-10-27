@@ -31,21 +31,21 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | Keys | Context | Action |
 | --- | --- | --- |
 | `b` / `e` | drawing | The pen's tip draws / erases whole strokes. |
-| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to resize it keeping its shape, a side to stretch it, the dot above to rotate. |
+| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to resize it keeping its shape, a side to stretch it (on text, to set where it wraps), the dot above to rotate. A tap on picked text types in it. |
 | `tl` / `ta` / `tr` / `to` | drawing | The tip drags out a line / arrow / rectangle / ellipse. |
-| `tt` | drawing | The tip places text: a tap starts it, a drag sets its wrap width, a press on text edits it. Typing uses helix keys in insert, normal and select mode. |
-| `esc` | text in normal mode | Keep the text and go back to drawing; pressing elsewhere keeps it too. Blank text is dropped. |
+| `tt` | drawing | The tip places text: a tap starts it, a drag sets its wrap width, a press on text edits it. Typing uses helix keys in insert, normal and select mode; a press inside the text moves the cursor. |
+| `esc` | text in normal mode | Keep the text and pick it, with the tip on box select; a press outside the text does the same and nothing more. Blank text is dropped. |
 | `:image <path>`, `space i` | drawing, note | Put an image in: a drawing embeds it in the middle of the view, at its pixel size in points and no wider than most of the page, and it moves, turns and scales like any mark; a note links it as `![[name]]` on the cursor's line, or a new line below. `space i` picks from the project's images. |
 | drop a file | drawing, note | An image dropped in the middle of a drawing lands where it was let go; on a note it is linked, copied beside the note first (lowercase, dashed name) when it comes from outside the project. Other files, and drops near an edge, open as before. |
-| `p`, `:paste-image` | drawing, note | Put the clipboard's image in. A note keeps it beside itself as `pasted-image-<date>.png` (UTC); `space p` in a note does the same when the clipboard holds an image and no text. |
+| `space p`, `:paste-image` | drawing, note | Put the clipboard's image in. A note keeps it beside itself as `pasted-image-<date>.png` (UTC); `space p` in a note does the same when the clipboard holds an image and no text. |
 | `dd`, `del` | drawing | Delete the selection. |
 | `u` / `U` | drawing | Undo / redo the drawing. |
 | `+` / `-` / `=` | pages, drawing, image | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
-| `zf` | pages, drawing, image | Fit to the pane's width, then its height, then the whole page. |
+| `zf` | pages, drawing, image | Swap between fitting the pane's width and its height; an image, which opens fitted whole, goes to the one that fills more. |
 | `h j k l`, arrows, wheel | pages, drawing, image | Pan; pages stay on screen. On typst pages `j`/`k` scroll and only `h`/`l` pan. |
-| `]p` / `[p`, `gg` / `G` | drawing | Next / previous page, first / last page. |
-| `o` / `O` | drawing | A blank page below / above the page in focus. |
-| `dp` | drawing | Remove the page in focus. |
+| `pn` / `pp`, `gg` / `ge` | drawing | Next / previous page, first / last page. |
+| `po` / `pO` | drawing | A blank page below / above the page in focus. |
+| `pd` | drawing | Remove the page in focus. |
 | `]l` / `[l` | drawing | Next / previous layer becomes active. |
 | `space l h` / `space l n` | drawing | Hide or show the active layer / add a layer. |
 ";
