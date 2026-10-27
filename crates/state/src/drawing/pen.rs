@@ -192,8 +192,8 @@ fn on<D: Drawing>(
             *mode = Mode::Insert;
             Ok(())
         }
-        Outcome::Rewrap { target, id, area } => {
-            let picked = typing::rewrap(file, fonts, target, id, area)?;
+        Outcome::Rewrap { target, mark, to } => {
+            let picked = typing::rewrap(file, fonts, target, mark, to)?;
             hand.tools.select = Selecting::Holding {
                 target,
                 picked,

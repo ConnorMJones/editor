@@ -304,7 +304,7 @@ pub fn paint_ink<D: Drawing>(
                     target: on,
                     picked,
                     grip,
-                } if *on == target => (&picked.ids, grip.transform(&picked.frame)),
+                } if *on == target => (picked.ids(), grip.transform(picked)),
                 Selecting::Holding { .. }
                 | Selecting::Idle
                 | Selecting::Pressed { .. }
@@ -312,8 +312,8 @@ pub fn paint_ink<D: Drawing>(
                 | Selecting::Lassoing { .. } => (&[], Affine::identity()),
             };
             // A text mark being edited is drawn from the text instead.
-            let editing = hand.typing.as_ref().and_then(|open| match open.writing {
-                Writing::Replacing(id) if open.target == target => Some(id),
+            let editing = hand.typing.as_ref().and_then(|open| match &open.writing {
+                Writing::Replacing(was) if open.target == target => Some(was.id),
                 Writing::Replacing(_) | Writing::New => None,
             });
             let shown = marks
@@ -443,10 +443,10 @@ pub fn paint_ink<D: Drawing>(
             picked,
             grip,
         } => on_screen(*target).map(|(shown, to_screen)| {
-            let held = grip.held(&picked.frame);
-            let by = grip.transform(&picked.frame).then(&to_screen);
+            let held = grip.held(picked);
+            let by = grip.transform(picked).then(&to_screen);
             let reach = frame::reach(&shown.from_pane);
-            for (handle, sits) in held.handles(reach) {
+            for (handle, sits) in held.handles(picked.sides(), reach) {
                 let at = by.apply(sits);
                 let side = REACH.0;
                 let square = Bounds::new(

@@ -795,7 +795,7 @@ fn a_placed_image_is_picked_ready_to_move() {
             );
             assert!(matches!(
                 &tab.hand.tools.select,
-                ink::tool::Selecting::Holding { picked, .. } if picked.ids.len() == 1
+                ink::tool::Selecting::Holding { picked, .. } if picked.ids().len() == 1
             ));
         }
         Some(_) | None => panic!("a paged drawing is focused"),
@@ -822,7 +822,7 @@ fn a_placed_image_is_picked_ready_to_move() {
 fn picked(h: &Harness) -> Option<ink::tool::Frame> {
     match h.state.layout.focused().active() {
         Some(Tab::Ink(InkTabs::Paged(tab))) => match &tab.hand.tools.select {
-            ink::tool::Selecting::Holding { picked, .. } => Some(picked.frame),
+            ink::tool::Selecting::Holding { picked, .. } => Some(picked.frame()),
             _ => None,
         },
         Some(_) | None => panic!("a paged drawing is focused"),

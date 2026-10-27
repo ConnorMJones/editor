@@ -154,7 +154,7 @@ pub fn insert(state: &mut State, into: ImageInto, from: ImageFrom, out: &mut Vec
             embed::embedded(state, PathBuf::from("clipboard"), into, read);
             Ok(())
         }
-        (ImageInto::Note { dir }, ImageFrom::File { path, .. }) => {
+        (ImageInto::Note { dir }, ImageFrom::File { path, encoding }) => {
             match RelPath::new(state.project.root.path(), &path) {
                 Ok(file) => {
                     link(state, &file);
@@ -166,10 +166,7 @@ pub fn insert(state: &mut State, into: ImageInto, from: ImageFrom, out: &mut Vec
                         .file_stem()
                         .and_then(|stem| stem.to_str())
                         .unwrap_or("");
-                    let extension = (path.extension().and_then(|ext| ext.to_str()))
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    beside(state, &dir, &KebabName::of(stem), &extension).map(|file| {
+                    beside(state, &dir, &KebabName::of(stem), encoding).map(|file| {
                         out.push(Effect::Job(Job::Fs {
                             root: state.project.root.path().to_owned(),
                             op: FsOp::Copy {
@@ -184,7 +181,7 @@ pub fn insert(state: &mut State, into: ImageInto, from: ImageFrom, out: &mut Vec
         }
         (ImageInto::Note { dir }, ImageFrom::Pasted(bytes, encoding)) => {
             let name = KebabName::of(&format!("pasted image {}", stamp(SystemTime::now())));
-            beside(state, &dir, &name, extension(encoding)).map(|file| {
+            beside(state, &dir, &name, encoding).map(|file| {
                 out.push(Effect::Job(Job::Fs {
                     root: state.project.root.path().to_owned(),
                     op: FsOp::Write {
@@ -202,13 +199,14 @@ pub fn insert(state: &mut State, into: ImageInto, from: ImageFrom, out: &mut Vec
     }
 }
 
-/// A file in `dir` named `name.extension` that doesn't exist yet: `name-2`, `name-3` after.
+/// A file in `dir` named `name` that doesn't exist yet: `name-2`, `name-3` after.
 pub fn beside(
     state: &State,
     dir: &Path,
     name: &KebabName,
-    extension: &str,
+    encoding: Encoding,
 ) -> Result<RelPath, Notice> {
+    let extension = extension(encoding);
     let free = (1..)
         .map(|count| match count {
             1 => dir.join(format!("{}.{extension}", name.as_str())),

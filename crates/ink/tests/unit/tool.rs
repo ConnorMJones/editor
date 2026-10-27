@@ -102,7 +102,7 @@ fn bounds(edited: &Edited<Board>) -> Vec<Rect<Surface>> {
 
 fn picked(tools: &Tools<LayerIndex>) -> usize {
     match &tools.select {
-        Selecting::Holding { picked, .. } => picked.ids.len(),
+        Selecting::Holding { picked, .. } => picked.ids().len(),
         Selecting::Idle
         | Selecting::Pressed { .. }
         | Selecting::Boxing { .. }
@@ -270,7 +270,7 @@ fn a_tap_picks_the_mark_under_it() {
         Selecting::Holding { picked, .. } => {
             let marks = edited.drawing().marks(LayerIndex(0)).unwrap();
             let (top, _) = marks.iter().last().unwrap();
-            assert_eq!(picked.ids.as_slice(), [top]);
+            assert_eq!(picked.ids(), [top]);
         }
         other => panic!("{other:?}"),
     }
@@ -331,7 +331,7 @@ fn the_handles_rotate_and_scale_the_selection() {
             picked,
             grip: Grip::Still,
             ..
-        } => picked.frame,
+        } => picked.frame(),
         other => panic!("{other:?}"),
     };
     let held = box_of(&tools);
@@ -492,7 +492,7 @@ fn a_turned_mark_is_handled_on_its_own_corners_and_keeps_its_shape() {
         &tap,
     );
     let frame = match &tools.select {
-        Selecting::Holding { picked, .. } => picked.frame,
+        Selecting::Holding { picked, .. } => picked.frame(),
         other => panic!("{other:?}"),
     };
     let corner = Handle::Corner(ink::tool::Corner::BottomRight).at(&frame, reach());

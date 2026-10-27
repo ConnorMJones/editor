@@ -12,6 +12,7 @@ use model::notice::Notice;
 use model::picture::Encoding;
 
 use crate::State;
+use crate::drawing::command::add;
 use crate::drawing::{BoardId, InkFile, InkTabs, PagedId};
 use crate::view::tab::Tab;
 use crate::viewer::{ProbeError, probe};
@@ -143,10 +144,8 @@ pub fn place<D: Drawing>(
         ))),
     };
     let frame = Frame::of(&mark);
-    let id = (file.edited.add(target, mark)).map_err(|error| Notice::DrawingRefused {
-        reason: error.to_string(),
-    })?;
-    Ok(Picked {
+    let id = add(file, target, mark)?;
+    Ok(Picked::Marks {
         ids: smallvec![id],
         frame,
     })

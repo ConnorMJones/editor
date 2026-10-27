@@ -3,15 +3,14 @@
 
 use helix_core::{Rope, Selection, smallvec};
 use ink::brush::Paint;
-use ink::brush::Size;
-use ink::doc::{Drawing, Ink, Mark, MarkChange, MarkId, Placement};
-use ink::geom::{Affine, Local, Point, Rect, Surface};
+use ink::doc::{Drawing, Ink, Mark, MarkChange, Placement};
+use ink::geom::{Point, Surface, Vector};
 use ink::text::{Fonts, Inked, Laid, TextStyle, Wrap};
-use ink::tool::{Frame, Picked, Sides, TypeAt};
+use ink::tool::{Frame, Picked, Rewrapped, TextMark, TypeAt};
 use model::notice::Notice;
 
 use crate::State;
-use crate::drawing::command::commit;
+use crate::drawing::command::{add, commit};
 use crate::drawing::{InkFile, InkTabs};
 use crate::text::buffer::TextDoc;
 use crate::view::tab::Tab;
@@ -23,10 +22,10 @@ pub struct Open<T> {
 }
 
 /// Whether finishing adds a mark or replaces the one being edited, which is hidden meanwhile.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Writing {
     New,
-    Replacing(MarkId),
+    Replacing(TextMark),
 }
 
 /// Text being typed, where it sits and how it looks, and its layout as of `laid_version`.
@@ -68,7 +67,6 @@ impl TextBox {
         Frame {
             rect: self.laid.area,
             placement: self.placement,
-            sides: Sides::Wrap,
         }
     }
 
@@ -93,23 +91,17 @@ pub fn open<T>(at: TypeAt<T>, style: &TextStyle, paint: Paint, fonts: &Fonts) ->
             writing: Writing::New,
             text: TextBox::new("", Placement::at(at), style.clone(), wrap, paint, fonts),
         },
-        TypeAt::Mark {
+        TypeAt::Mark { target, mark } => Open {
             target,
-            id,
-            text,
-            placement,
-            paint,
-        } => Open {
-            target,
-            writing: Writing::Replacing(id),
             text: TextBox::new(
-                &text.text,
-                placement,
-                text.style.clone(),
-                text.wrap,
-                paint,
+                &mark.text.text,
+                mark.placement,
+                mark.text.style.clone(),
+                mark.text.wrap,
+                mark.paint,
                 fonts,
             ),
+            writing: Writing::Replacing(mark),
         },
     }
 }
@@ -130,40 +122,39 @@ pub fn finish<D: Drawing>(
         text,
     } = *open;
     let typed = String::from(&text.doc.text);
-    let mark = |ink| Mark {
+    let typed_mark = |id, ink| TextMark {
+        id,
+        text: ink,
         placement: text.placement,
         paint: text.paint,
-        ink: Ink::Text(ink),
     };
-    let kept = |id, mark: &Mark| Ended::Kept {
+    let kept = |mark| Ended::Kept {
         target,
-        picked: Picked {
-            ids: smallvec![id],
-            frame: Frame::of(mark),
-        },
+        picked: Picked::Text(mark),
     };
     match (writing, fonts.lay_out(&typed, &text.style, text.wrap).inked) {
         (Writing::New, Inked::Blank) => Ok(Ended::Dropped),
         (Writing::New, Inked::Ink(ink)) => {
-            let mark = mark(ink);
-            let id = (file.edited.add(target, mark.clone())).map_err(refused)?;
-            Ok(kept(id, &mark))
+            let mark = Mark {
+                placement: text.placement,
+                paint: text.paint,
+                ink: Ink::Text(ink.clone()),
+            };
+            let id = add(file, target, mark)?;
+            Ok(kept(typed_mark(id, ink)))
         }
-        (Writing::Replacing(id), Inked::Blank) => {
-            commit(file, MarkChange::Remove(target, smallvec![id]).into()).map(|()| Ended::Dropped)
+        (Writing::Replacing(was), Inked::Blank) => {
+            commit(file, MarkChange::Remove(target, smallvec![was.id]).into())
+                .map(|()| Ended::Dropped)
         }
-        (Writing::Replacing(id), Inked::Ink(ink)) => {
-            let was = (file.edited.drawing().marks(target))
-                .and_then(|marks| marks.get(id))
-                .map(|was| &was.ink);
-            match was {
-                Some(Ink::Text(was)) if was.text == ink.text => {}
-                Some(_) | None => commit(
-                    file,
-                    MarkChange::Replace(target, id, mark(ink.clone())).into(),
-                )?,
-            }
-            Ok(kept(id, &mark(ink)))
+        (Writing::Replacing(was), Inked::Ink(ink)) if was.text.text == ink.text => Ok(kept(was)),
+        (Writing::Replacing(was), Inked::Ink(ink)) => {
+            let mark = typed_mark(was.id, ink);
+            commit(
+                file,
+                MarkChange::Replace(target, mark.id, mark.mark()).into(),
+            )?;
+            Ok(kept(mark))
         }
     }
 }
@@ -172,44 +163,19 @@ pub fn rewrap<D: Drawing>(
     file: &mut InkFile<D>,
     fonts: &Fonts,
     target: D::Target,
-    id: MarkId,
-    area: Rect<Local>,
+    mark: TextMark,
+    to: Rewrapped,
 ) -> Result<Picked, Notice> {
-    let marks = file.edited.drawing().marks(target);
-    let mark = marks
-        .and_then(|marks| marks.get(id))
-        .ok_or(Notice::NothingPicked)?;
-    let text = match &mark.ink {
-        Ink::Text(text) => text,
-        Ink::Stroke(_) | Ink::Shape(_) | Ink::Image(_) => return Err(Notice::NothingPicked),
+    let rewrapped = TextMark {
+        text: fonts.rewrap(&mark.text, Wrap::At(to.width)),
+        placement: mark.placement.shifted(Vector::new(to.left, 0.0)),
+        ..mark
     };
-    let width = Size::new(area.max().x - area.min().x).map_err(refused)?;
-    let ink = match fonts
-        .lay_out(&text.text, &text.style, Wrap::At(width))
-        .inked
-    {
-        Inked::Ink(ink) => ink,
-        // The same text as before, which was not blank.
-        Inked::Blank => return Err(Notice::NothingPicked),
-    };
-    let shifted = Affine::translation(area.min().x, 0.0).then(&mark.placement.forward());
-    let rewrapped = Mark {
-        placement: Placement::new(shifted).ok_or(Notice::NothingPicked)?,
-        paint: mark.paint,
-        ink: Ink::Text(ink),
-    };
-    let frame = Frame::of(&rewrapped);
-    commit(file, MarkChange::Replace(target, id, rewrapped).into())?;
-    Ok(Picked {
-        ids: smallvec![id],
-        frame,
-    })
-}
-
-fn refused(error: impl std::fmt::Display) -> Notice {
-    Notice::DrawingRefused {
-        reason: error.to_string(),
-    }
+    commit(
+        file,
+        MarkChange::Replace(target, rewrapped.id, rewrapped.mark()).into(),
+    )?;
+    Ok(Picked::Text(rewrapped))
 }
 
 /// Lays out again each text being typed whose doc changed since.

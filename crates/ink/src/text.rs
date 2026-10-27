@@ -135,6 +135,14 @@ impl Fonts {
         })))
     }
 
+    pub fn rewrap(&self, text: &TextInk, wrap: Wrap) -> Arc<TextInk> {
+        match self.lay_out(&text.text, &text.style, wrap).inked {
+            Inked::Ink(ink) => ink,
+            // Wrapping moves glyphs and never drops them, and this text inked before.
+            Inked::Blank => unreachable!("text that inked once inks again"),
+        }
+    }
+
     pub fn lay_out(&self, text: &str, style: &TextStyle, wrap: Wrap) -> Laid {
         let mut shaper = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let Shaper {

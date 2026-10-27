@@ -12,7 +12,7 @@ use slotmap::SlotMap;
 use smallvec::SmallVec;
 
 use crate::brush::{Brush, EPSILON, Paint};
-use crate::geom::{Affine, Local, Rect, Surface, triangle_distance};
+use crate::geom::{Affine, Local, Rect, Surface, Vector, triangle_distance};
 use crate::input::{Modeler, Sample};
 use crate::mesh::MeshBuilder;
 use crate::text::TextInk;
@@ -103,6 +103,13 @@ impl Placement {
             back: forward.inverse()?,
             forward,
         })
+    }
+
+    pub fn shifted(&self, by: Vector<Local>) -> Placement {
+        Placement {
+            forward: Affine::translation(by.x, by.y).then(&self.forward),
+            back: self.back.then(&Affine::translation(-by.x, -by.y)),
+        }
     }
 
     pub fn forward(&self) -> &Affine<Local, Surface> {

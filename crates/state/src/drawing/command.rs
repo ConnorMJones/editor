@@ -1,8 +1,8 @@
 //! Keys on a focused drawing, and undo and redo there.
 
 use ink::doc::{
-    Board, Drawing, Layer, LayerChange, LayerIndex, LayerName, PageIndex, Paged, PagedChange,
-    ShapeKind, Visibility,
+    Board, Drawing, Layer, LayerChange, LayerIndex, LayerName, Mark, MarkId, PageIndex, Paged,
+    PagedChange, ShapeKind, Visibility,
 };
 use ink::history::HistoryError;
 use ink::text::Fonts;
@@ -236,6 +236,18 @@ pub fn commit<D: Drawing>(file: &mut InkFile<D>, change: D::Change) -> Result<()
     file.edited
         .commit(change)
         .map(|_| ())
+        .map_err(|error| Notice::DrawingRefused {
+            reason: error.to_string(),
+        })
+}
+
+pub fn add<D: Drawing>(
+    file: &mut InkFile<D>,
+    target: D::Target,
+    mark: Mark,
+) -> Result<MarkId, Notice> {
+    file.edited
+        .add(target, mark)
         .map_err(|error| Notice::DrawingRefused {
             reason: error.to_string(),
         })
