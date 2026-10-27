@@ -238,7 +238,7 @@ pub fn wanted<D: Drawing>(
                     id: image.built.id,
                     picture: Picture {
                         source: Source::Bytes(image.encoded.clone()),
-                        encoding: image.encoding,
+                        encoding: image.encoding.encoding(),
                     },
                     size: size(
                         px(image.extent.width.get() * a.hypot(b)),

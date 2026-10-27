@@ -19,6 +19,7 @@ use model::sheet::Stack;
 
 use crate::drawing::embed::{self, Destination};
 use crate::drawing::{BoardId, PagedId};
+use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
 use crate::input::picker::{self, Hit, Preview, Search};
@@ -51,6 +52,11 @@ pub enum Job {
     Export {
         path: PathBuf,
         bytes: Vec<u8>,
+    },
+    ExportDrawing {
+        export: ::export::Export,
+        fonts: Fonts,
+        path: PathBuf,
     },
 
     Index {
@@ -208,7 +214,7 @@ pub enum JobResult {
     },
     Exported {
         path: PathBuf,
-        result: io::Result<usize>,
+        result: Result<usize, ExportFailed>,
     },
     Typeset(typeset::Done),
 
@@ -420,6 +426,7 @@ pub fn run(job: Job) -> JobResult {
         Job::Open { .. } => "open",
         Job::Write { .. } => "write",
         Job::Export { .. } => "export",
+        Job::ExportDrawing { .. } => "export drawing",
         Job::Index { .. } => "index",
         Job::ListDir { .. } => "list dir",
         Job::Rescan { .. } => "rescan",
@@ -485,7 +492,21 @@ pub fn run(job: Job) -> JobResult {
             }
         }
         Job::Export { path, bytes } => JobResult::Exported {
-            result: std::fs::write(&path, &bytes).map(|()| bytes.len()),
+            result: (std::fs::write(&path, &bytes).map(|()| bytes.len()))
+                .map_err(ExportFailed::Write),
+            path,
+        },
+        Job::ExportDrawing {
+            export,
+            fonts,
+            path,
+        } => JobResult::Exported {
+            result: (::export::render(&export, &fonts).map_err(ExportFailed::Render)).and_then(
+                |bytes| {
+                    (std::fs::write(&path, &bytes).map(|()| bytes.len()))
+                        .map_err(ExportFailed::Write)
+                },
+            ),
             path,
         },
         Job::Index { root } => JobResult::Indexed(files::walk(&root, &Folder::Root, None)),
@@ -720,7 +741,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             saving,
             result,
         } => apply::written(state, saving, path, result, out),
-        JobResult::Exported { path, result } => typeset::exported(state, path, result),
+        JobResult::Exported { path, result } => crate::export::exported(state, path, result),
         JobResult::Typeset(done) => typeset::finish(state, done, out),
         JobResult::Indexed(walked) => files::indexed(state, walked, out),
         JobResult::Listed { dir, result } => tree::listed(state, dir, result, out),

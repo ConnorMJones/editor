@@ -4,14 +4,13 @@
 use std::sync::Arc;
 
 use model::color::Rgb;
-use model::picture::{Bitmap, Encoding};
 use model::theme::{Alpha, Color};
 
 use crate::brush::{Brush, Curve, Fraction, InvalidFraction, InvalidSize, Paint, Size, WidthFrom};
 use crate::doc::{
-    Background, Board, Drawing, Geometry, ImageInk, Ink, InvalidLayerName, InvalidPageSize,
-    InvalidSpacing, Layer, LayerIndex, LayerName, Layers, Mark, Marks, PageSize, Paged, Pattern,
-    Placement, Sensor, Shape, ShapeInk, Spacing, StrokeError, Visibility,
+    Background, Board, Drawing, Embedded, Geometry, ImageInk, Ink, InvalidLayerName,
+    InvalidPageSize, InvalidSpacing, Layer, LayerIndex, LayerName, Layers, Mark, Marks, PageSize,
+    Paged, Pattern, Placement, Sensor, Shape, ShapeInk, Spacing, StrokeError, Visibility,
 };
 use crate::geom::{Affine, Local, Point, Rect, Vector};
 use crate::input::{
@@ -545,12 +544,11 @@ impl Reader<'_> {
 
 pub fn write_image(out: &mut Vec<u8>, ink: &ImageInk) {
     out.push(match ink.encoding {
-        Encoding::Bitmap(Bitmap::Png) => 0,
-        Encoding::Bitmap(Bitmap::Jpeg) => 1,
-        Encoding::Bitmap(Bitmap::Webp) => 2,
-        Encoding::Bitmap(Bitmap::Gif) => 3,
-        Encoding::Bitmap(Bitmap::Bmp) => 4,
-        Encoding::Svg => 5,
+        Embedded::Png => 0,
+        Embedded::Jpeg => 1,
+        Embedded::Webp => 2,
+        Embedded::Gif => 3,
+        Embedded::Svg => 4,
     });
     f32s(out, &[ink.extent.width.get(), ink.extent.height.get()]);
     out.extend((ink.encoded.len() as u32).to_le_bytes());
@@ -560,12 +558,11 @@ pub fn write_image(out: &mut Vec<u8>, ink: &ImageInk) {
 impl Reader<'_> {
     pub fn image(&mut self) -> Result<ImageInk, FormatError> {
         let encoding = match self.u8()? {
-            0 => Encoding::Bitmap(Bitmap::Png),
-            1 => Encoding::Bitmap(Bitmap::Jpeg),
-            2 => Encoding::Bitmap(Bitmap::Webp),
-            3 => Encoding::Bitmap(Bitmap::Gif),
-            4 => Encoding::Bitmap(Bitmap::Bmp),
-            5 => Encoding::Svg,
+            0 => Embedded::Png,
+            1 => Embedded::Jpeg,
+            2 => Embedded::Webp,
+            3 => Embedded::Gif,
+            4 => Embedded::Svg,
             tag => {
                 return Err(FormatError::Tag {
                     what: "image encoding",

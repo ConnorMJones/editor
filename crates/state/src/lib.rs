@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod drawing;
+pub mod export;
 pub mod git;
 pub mod input;
 pub mod insert;

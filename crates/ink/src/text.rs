@@ -2,6 +2,7 @@
 //! placed for every use.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use cosmic_text::{
@@ -17,6 +18,8 @@ use crate::doc::{Built, GeometryId};
 use crate::geom::{Local, Point, Rect};
 use crate::mesh::Mesh;
 
+pub use cosmic_text::fontdb::ID as FontId;
+
 /// The size glyph outlines are read at before scaling to ems.
 pub const OUTLINE_SIZE: f32 = 64.0;
 /// How far a filled outline may stray from the curve, in ems.
@@ -30,23 +33,40 @@ pub struct Fonts(pub Arc<Mutex<Shaper>>);
 
 pub struct Shaper {
     system: FontSystem, // private: `glyphs` holds meshes of this system's fonts
-    glyphs: HashMap<GlyphKey, Arc<GlyphMesh>>, // private: `glyphs` holds meshes of this system's fonts
+    glyphs: HashMap<GlyphKey, Arc<Glyph>>, // private: `glyphs` holds meshes of this system's fonts
     pub swash: SwashCache,
     pub buffer: Buffer,
     pub tessellator: FillTessellator,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
-    pub font: fontdb::ID,
+    pub font: FontId,
     pub glyph: u16,
     pub weight: u16,
 }
 
-/// A glyph's outline filled, in ems with y down from the baseline.
-pub struct GlyphMesh {
+/// A glyph's outline and its fill, in ems with y down from the baseline.
+pub struct Glyph {
+    pub outline: Path,
     pub vertices: Vec<[f32; 2]>,
     pub triangles: Vec<[u32; 3]>,
+}
+
+/// A glyph where layout put it; `origin` is on its baseline, and `text` its bytes in the text.
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub key: GlyphKey,
+    pub origin: Point<Local>,
+    pub size: f32,
+    pub advance: f32,
+    pub text: Range<usize>,
+}
+
+/// A font's file, as embedded in exports.
+pub struct Face {
+    pub data: Vec<u8>,
+    pub index: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +112,7 @@ pub struct TextInk {
     pub wrap: Wrap,
     pub built: Built,
     pub area: Rect<Local>,
+    pub glyphs: Box<[Placed]>,
 }
 
 /// Where a caret between two characters stands, in the text's own space.
@@ -135,6 +156,26 @@ impl Fonts {
         })))
     }
 
+    pub fn glyph(&self, key: GlyphKey) -> Arc<Glyph> {
+        let mut shaper = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Shaper {
+            system,
+            swash,
+            glyphs,
+            tessellator,
+            ..
+        } = &mut *shaper;
+        cached(system, swash, tessellator, glyphs, key)
+    }
+
+    pub fn face(&self, font: FontId) -> Option<Face> {
+        let shaper = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        shaper.system.db().with_face_data(font, |data, index| Face {
+            data: data.to_vec(),
+            index,
+        })
+    }
+
     pub fn rewrap(&self, text: &TextInk, wrap: Wrap) -> Arc<TextInk> {
         match self.lay_out(&text.text, &text.style, wrap).inked {
             Inked::Ink(ink) => ink,
@@ -171,6 +212,7 @@ impl Fonts {
             .collect();
         let mut by_byte: Vec<Option<Caret>> = vec![None; text.len() + 1];
         let mut mesh = Mesh::default();
+        let mut placed = Vec::new();
         let (mut widest, mut bottom) = (0.0_f32, line_height);
         for run in buffer.layout_runs() {
             widest = widest.max(run.line_w);
@@ -192,18 +234,18 @@ impl Fonts {
                     glyph: glyph.glyph_id,
                     weight: glyph.font_weight.0,
                 };
-                let shape = match glyphs.get(&key) {
-                    Some(shape) => shape.clone(),
-                    None => {
-                        let shape = Arc::new(fill_glyph(system, swash, tessellator, key));
-                        glyphs.insert(key, shape.clone());
-                        shape
-                    }
-                };
+                let shape = cached(system, swash, tessellator, glyphs, key);
                 let origin = Point::<Local>::new(
                     glyph.x + glyph.font_size * glyph.x_offset,
                     run.line_y + glyph.y - glyph.font_size * glyph.y_offset,
                 );
+                placed.push(Placed {
+                    key,
+                    origin,
+                    size: glyph.font_size,
+                    advance: glyph.w,
+                    text: start + glyph.start..start + glyph.end,
+                });
                 let first = mesh.vertices.len() as u32;
                 mesh.vertices.extend(shape.vertices.iter().map(|[x, y]| {
                     Point::new(
@@ -246,6 +288,7 @@ impl Fonts {
                     bounds,
                 },
                 area,
+                glyphs: placed.into(),
             })),
         };
         Laid {
@@ -256,13 +299,26 @@ impl Fonts {
     }
 }
 
+pub fn cached(
+    system: &mut FontSystem,
+    swash: &mut SwashCache,
+    tessellator: &mut FillTessellator,
+    glyphs: &mut HashMap<GlyphKey, Arc<Glyph>>,
+    key: GlyphKey,
+) -> Arc<Glyph> {
+    glyphs
+        .entry(key)
+        .or_insert_with(|| Arc::new(fill_glyph(system, swash, tessellator, key)))
+        .clone()
+}
+
 /// `key`'s outline filled into triangles; a glyph without one, such as a space, has none.
 pub fn fill_glyph(
     system: &mut FontSystem,
     swash: &mut SwashCache,
     tessellator: &mut FillTessellator,
     key: GlyphKey,
-) -> GlyphMesh {
+) -> Glyph {
     let (cache, _, _) = CacheKey::new(
         key.font,
         key.glyph,
@@ -271,7 +327,8 @@ pub fn fill_glyph(
         fontdb::Weight(key.weight),
         CacheKeyFlags::DISABLE_HINTING,
     );
-    let empty = || GlyphMesh {
+    let empty = || Glyph {
+        outline: Path::new(),
         vertices: Vec::new(),
         triangles: Vec::new(),
     };
@@ -315,16 +372,18 @@ pub fn fill_glyph(
         true => path.end(true),
         false => {}
     }
+    let outline = path.build();
     let mut buffers: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
     let filled = tessellator.tessellate_path(
-        &path.build(),
+        &outline,
         &FillOptions::non_zero().with_tolerance(TOLERANCE),
         &mut BuffersBuilder::new(&mut buffers, |vertex: FillVertex| {
             vertex.position().to_array()
         }),
     );
     match filled {
-        Ok(()) => GlyphMesh {
+        Ok(()) => Glyph {
+            outline,
             vertices: buffers.vertices,
             triangles: (buffers.indices.chunks_exact(3))
                 .map(|triangle| [triangle[0], triangle[1], triangle[2]])

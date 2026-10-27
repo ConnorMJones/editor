@@ -465,7 +465,7 @@ fn turned_image() -> Edited<Board> {
     let mut edited = board();
     let ink = ink::doc::ImageInk::new(
         std::sync::Arc::from(&b"pixels"[..]),
-        model::picture::Encoding::Bitmap(model::picture::Bitmap::Png),
+        ink::doc::Embedded::Png,
         ink::doc::PageSize::new(100.0, 50.0).unwrap(),
     );
     let mark = ink::doc::Mark {

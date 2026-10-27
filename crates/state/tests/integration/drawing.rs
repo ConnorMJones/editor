@@ -925,3 +925,68 @@ fn picked_wrap(h: &Harness) -> ink::text::Wrap {
         Some(_) | None => panic!("a paged drawing is focused"),
     }
 }
+
+#[test]
+fn a_paged_drawing_exports_every_page_to_pdf_and_the_page_in_focus_to_svg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>");
+    draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
+    h.keys("po:export-pdf<ret>");
+    let pdf = fs::read(dir.path().join("notes.pdf")).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert!(
+        String::from_utf8_lossy(&pdf).contains("/Count 2"),
+        "both pages"
+    );
+    assert!(matches!(h.state.notice, Some(Notice::Exported { .. })));
+    h.keys(":export-svg<ret>");
+    let svg = fs::read_to_string(dir.path().join("notes-2.svg")).unwrap();
+    assert!(svg.starts_with("<svg"), "the second page, in focus");
+}
+
+#[test]
+fn a_board_exports_what_is_picked_or_else_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o board.bdt<ret>:export-png<ret>");
+    assert!(
+        matches!(h.state.notice, Some(Notice::ExportFailed { .. })),
+        "an empty board has nothing to show"
+    );
+    draw(&mut h, Stylus::Tip, &line((0.0, 0.0), (100.0, 0.0)));
+    draw(&mut h, Stylus::Tip, &line((0.0, 300.0), (100.0, 300.0)));
+    h.keys(":export-png<ret>");
+    let everything = fs::read(dir.path().join("board.png")).unwrap();
+    let height = |png: &[u8]| u32::from_be_bytes(png[20..24].try_into().unwrap());
+    h.keys("s");
+    tap(&mut h, (50.0, 0.0));
+    h.keys(":export-png<ret>");
+    let picked = fs::read(dir.path().join("board.png")).unwrap();
+    assert!(
+        height(&picked) < height(&everything) / 2,
+        "{} against {}",
+        height(&picked),
+        height(&everything)
+    );
+}
+
+#[test]
+fn text_exports_only_as_pdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.md<ret>:export-svg<ret>");
+    assert!(matches!(h.state.notice, Some(Notice::NotExportable { .. })));
+}
+
+#[test]
+fn a_bmp_is_stored_as_png() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(40, 20)
+        .save(dir.path().join("photo.bmp"))
+        .unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o notes.pdt<ret>:image photo.bmp<ret>");
+    let (bytes, _) = images(&h)[0].clone();
+    assert!(bytes.starts_with(b"\x89PNG"), "{:?}", &bytes[..4]);
+}

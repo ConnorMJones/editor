@@ -11,6 +11,7 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 # Our crates.
 cli = { path = "crates/cli" }
+export = { path = "crates/export" }
 ink = { path = "crates/ink" }
 model = { path = "crates/model" }
 state = { path = "crates/state" }
@@ -18,6 +19,7 @@ typeset = { path = "crates/typeset" }
 
 # Used by our crates. Several are shared with the vendored crates below.
 anyhow = "1.0.86"
+base64 = "0.22.1"
 async-channel = { version = "2.5", default-features = false }
 bitflags = "2.6.0"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -25,6 +27,9 @@ git2 = { version = "0.21.0", default-features = false }
 ignore = "0.4.33"
 # Same version helix-core uses, so the tree keeps one copy.
 imara-diff = "0.2.0"
+# PDF output for drawings; the same version typst-pdf uses.
+krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
+krilla-svg = "0.8.1"
 notify = { version = "8.2.0", default-features = false }
 nucleo = "0.5.0"
 # Markdown parsing for the rendered view.

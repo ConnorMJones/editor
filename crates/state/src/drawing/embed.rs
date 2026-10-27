@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use helix_core::smallvec;
-use ink::doc::{Drawing, ImageInk, Ink, LayerIndex, Mark, PageLayer, PageSize, Placement};
+use ink::doc::{
+    Drawing, Embedded, ImageInk, Ink, LayerIndex, Mark, PageLayer, PageSize, Placement,
+};
 use ink::tool::{Frame, Picked};
 use model::geom::{Point, Surface, Vector};
 use model::notice::Notice;
@@ -37,22 +39,37 @@ pub enum Destination {
     },
 }
 
-/// An image file read whole, and its size in pixels.
+/// An image as a drawing stores it, and its size in pixels.
 pub struct Read {
     pub encoded: Arc<[u8]>,
-    pub encoding: Encoding,
+    pub embedded: Embedded,
     pub pixels: PageSize,
+}
+
+impl Read {
+    /// A BMP is stored as PNG.
+    pub fn new(encoded: Arc<[u8]>, encoding: Encoding) -> Result<Read, ProbeError> {
+        let pixels = probe(&encoded, encoding)?;
+        let (encoded, embedded) = match Embedded::of(encoding) {
+            Some(embedded) => (encoded, embedded),
+            None => {
+                let mut png = Vec::new();
+                image::load_from_memory(&encoded)?
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+                (png.into(), Embedded::Png)
+            }
+        };
+        Ok(Read {
+            encoded,
+            embedded,
+            pixels,
+        })
+    }
 }
 
 /// Reads `path` whole and measures it, in a job.
 pub fn read(path: &std::path::Path, encoding: Encoding) -> Result<Read, ProbeError> {
-    let encoded: Arc<[u8]> = std::fs::read(path)?.into();
-    let pixels = probe(&encoded, encoding)?;
-    Ok(Read {
-        encoded,
-        encoding,
-        pixels,
-    })
+    Read::new(std::fs::read(path)?.into(), encoding)
 }
 
 /// Places a read image; a drawing closed since the job started is left alone.
@@ -139,7 +156,7 @@ pub fn place<D: Drawing>(
         },
         ink: Ink::Image(Arc::new(ImageInk::new(
             read.encoded.clone(),
-            read.encoding,
+            read.embedded,
             extent,
         ))),
     };

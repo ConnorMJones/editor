@@ -366,6 +366,6 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::Document(command) => document::command(state, command),
         Command::View(command) => view::sheet::command(state, command),
         Command::Drawing(command) => drawing::command::command(state, command),
-        Command::ExportPdf => crate::render::typeset::export_pdf(state, out),
+        Command::Export(to) => crate::export::export(state, to, out),
     }
 }

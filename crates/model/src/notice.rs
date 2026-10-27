@@ -1,6 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::command::ExportAs;
 use crate::typeset::{Diagnostic, SourceFile};
 
 /// Status-line feedback produced by commands and finished jobs.
@@ -177,6 +178,13 @@ pub enum Notice {
     NotTypst {
         path: PathBuf,
     },
+    ExportFailed {
+        path: PathBuf,
+        reason: String,
+    },
+    NotExportable {
+        to: ExportAs,
+    },
     OutsideProject {
         file: SourceFile,
     },
@@ -340,6 +348,12 @@ impl std::fmt::Display for Notice {
             },
             Notice::Exported { path, bytes } => {
                 write!(f, "exported {} ({bytes} B)", path.display())
+            }
+            Notice::ExportFailed { path, reason } => {
+                write!(f, "exporting {}: {reason}", path.display())
+            }
+            Notice::NotExportable { to } => {
+                write!(f, "export-{0}: nothing here exports as {0}", to.extension())
             }
             Notice::MarkdownExport => f.write_str("export-pdf: not supported for markdown yet"),
             Notice::NotTypst { path } => {

@@ -121,6 +121,7 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | `pd` | drawing | Remove the page in focus. |
 | `]l` / `[l` | drawing | Next / previous layer becomes active. |
 | `space l h` / `space l n` | drawing | Hide or show the active layer / add a layer. |
+| `:export-pdf` / `:export-svg` / `:export-png` | drawing | Write the drawing beside its file: a paged drawing's every page as PDF, or the page in focus as `<name>-<page>.svg` or `.png`; a board's picked marks, or all of it, with a margin. Hidden layers are left out; PDF text stays text, SVG and PNG text is drawn as outlines, and PNG is 2 pixels to the point. |
 
 ## Typed commands (`:`)
 
@@ -154,6 +155,8 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | `:conflict-both` |
 | `:conflict-base` |
 | `:export-pdf` |
+| `:export-svg` |
+| `:export-png` |
 
 ## Normal
 

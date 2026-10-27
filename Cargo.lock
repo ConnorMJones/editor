@@ -1763,6 +1763,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "export"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ink",
+ "krilla",
+ "krilla-svg",
+ "lyon_tessellation",
+ "model",
+ "resvg",
+ "smallvec",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6076,6 +6091,7 @@ name = "state"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "export",
  "git2",
  "grammars",
  "helix-core",

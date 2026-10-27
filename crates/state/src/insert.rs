@@ -146,11 +146,7 @@ pub fn insert(state: &mut State, into: ImageInto, from: ImageFrom, out: &mut Vec
             Ok(())
         }
         (ImageInto::Drawing(into), ImageFrom::Pasted(encoded, encoding)) => {
-            let read = (crate::viewer::probe(&encoded, encoding)).map(|pixels| embed::Read {
-                encoded,
-                encoding,
-                pixels,
-            });
+            let read = embed::Read::new(encoded, encoding);
             embed::embedded(state, PathBuf::from("clipboard"), into, read);
             Ok(())
         }

@@ -655,13 +655,3 @@ pub fn reprobe(figures: &mut Figures, paths: &[PathBuf], out: &mut Vec<Effect>) 
         out.push(Effect::Job(Job::Probe(image.clone())));
     }
 }
-
-pub fn exported(state: &mut State, path: PathBuf, result: std::io::Result<usize>) {
-    state.notice = Some(match result {
-        Ok(bytes) => Notice::Exported { path, bytes },
-        Err(error) => {
-            tracing::warn!(?path, %error, "export failed");
-            Notice::WriteFailed { path, error }
-        }
-    });
-}

@@ -1,0 +1,20 @@
+[package]
+name = "export"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+ink.workspace = true
+krilla.workspace = true
+krilla-svg.workspace = true
+lyon_tessellation.workspace = true
+model.workspace = true
+resvg.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true

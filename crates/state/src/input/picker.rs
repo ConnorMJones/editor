@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::regex::bytes::{Regex, RegexBuilder};
 use model::command::{
-    Command, Cycle, Direction, HunkOp, HunkTarget, PickerCommand, PickerKind, Shown, Take,
-    TreeCommand, WindowCommand,
+    Command, Cycle, Direction, ExportAs, HunkOp, HunkTarget, PickerCommand, PickerKind, Shown,
+    Take, TreeCommand, WindowCommand,
 };
 use model::picture::Encoding;
 use model::window::{Axis, Side};
@@ -346,7 +346,9 @@ pub static PALETTE: &[(&str, Command)] = &[
     ("split-toggle", Command::ToggleMode(Shown::Split)),
     ("render-toggle", Command::ToggleMode(Shown::Render)),
     ("mode-next", Command::CycleMode(Direction::Forward)),
-    ("export-pdf", Command::ExportPdf),
+    ("export-pdf", Command::Export(ExportAs::Pdf)),
+    ("export-svg", Command::Export(ExportAs::Svg)),
+    ("export-png", Command::Export(ExportAs::Png)),
     (
         "backlinks",
         Command::Picker(PickerCommand::Open(PickerKind::Backlinks)),

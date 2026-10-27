@@ -148,7 +148,24 @@ pub enum Command {
     Document(DocumentCommand),
     Drawing(DrawingCommand),
     View(ViewCommand),
-    ExportPdf,
+    Export(ExportAs),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportAs {
+    Pdf,
+    Svg,
+    Png,
+}
+
+impl ExportAs {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportAs::Pdf => "pdf",
+            ExportAs::Svg => "svg",
+            ExportAs::Png => "png",
+        }
+    }
 }
 
 /// Keys of a focused document or pages view.

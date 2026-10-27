@@ -20,6 +20,7 @@ helix-stdx.workspace = true
 image.workspace = true
 ignore.workspace = true
 imara-diff.workspace = true
+export.workspace = true
 ink.workspace = true
 model.workspace = true
 serde.workspace = true

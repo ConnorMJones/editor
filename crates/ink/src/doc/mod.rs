@@ -18,7 +18,7 @@ use crate::mesh::MeshBuilder;
 use crate::text::TextInk;
 
 pub use board::{Board, BoardChange};
-pub use image::ImageInk;
+pub use image::{Embedded, ImageInk};
 pub use layer::{InvalidLayerName, Layer, LayerIndex, LayerMarks, LayerName, Layers, Visibility};
 pub use paged::{
     Background, InvalidPageSize, InvalidSpacing, Page, PageIndex, PageLayer, PageSize, Paged,

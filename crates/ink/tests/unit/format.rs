@@ -304,7 +304,7 @@ fn text_reads_back_as_written() {
 fn image_mark() -> Mark {
     let ink = ink::doc::ImageInk::new(
         std::sync::Arc::from(&b"\x89PNG not decoded by ink"[..]),
-        model::picture::Encoding::Bitmap(model::picture::Bitmap::Png),
+        ink::doc::Embedded::Png,
         PageSize::new(120.0, 80.0).unwrap(),
     );
     Mark {
