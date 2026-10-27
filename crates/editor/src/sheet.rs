@@ -22,7 +22,7 @@ use state::view::tab::{Showing, Tab};
 use state::viewer::ImageFile;
 
 use crate::fonts::{PROSE_LINE, hsla};
-use crate::pictures::{decoded, paint_picture};
+use crate::pictures::{Drawn, decoded, paint_picture};
 use crate::rendered::update;
 use crate::workspace::Workspace;
 
@@ -221,7 +221,14 @@ impl Element for SheetElement {
         let pages = (shown.into_iter())
             .map(|PageWanted { area, picture }| PageShown {
                 area,
-                image: decoded(&pictures, &entity, &picture, area, window, cx),
+                image: decoded(
+                    &pictures,
+                    &entity,
+                    &Drawn::Picture(picture),
+                    area,
+                    window,
+                    cx,
+                ),
             })
             .collect();
         Some(Prepared {

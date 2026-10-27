@@ -12,6 +12,7 @@ workspace = true
 cosmic-text.workspace = true
 lyon_tessellation.workspace = true
 model.workspace = true
+reader.workspace = true
 slotmap.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
@@ -19,6 +20,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+krilla.workspace = true
 
 [[bench]]
 name = "ink"

@@ -27,6 +27,7 @@ const DRAWINGS: &str = "\
 The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
 Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
 Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
+PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg` / `ge` move through them. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
 
 | Keys | Context | Action |
 | --- | --- | --- |

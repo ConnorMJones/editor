@@ -105,7 +105,10 @@ fn a_primary_selection_that_does_not_exist_is_rejected() {
     match &mut saved.panes[0] {
         SessionPane::Tabs { tabs, .. } => match &mut tabs[0].view {
             SessionView::Text { primary, .. } => *primary = 1,
-            SessionView::Paged { .. } | SessionView::Board { .. } | SessionView::Image { .. } => {
+            SessionView::Paged { .. }
+            | SessionView::Board { .. }
+            | SessionView::Pdf { .. }
+            | SessionView::Image { .. } => {
                 panic!("a.txt is text")
             }
         },

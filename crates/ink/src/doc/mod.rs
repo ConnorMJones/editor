@@ -22,7 +22,7 @@ pub use image::{Embedded, ImageInk};
 pub use layer::{InvalidLayerName, Layer, LayerIndex, LayerMarks, LayerName, Layers, Visibility};
 pub use paged::{
     Background, InvalidPageSize, InvalidSpacing, Page, PageIndex, PageLayer, PageSize, Paged,
-    PagedChange, Pattern, Spacing,
+    PagedChange, Pattern, PdfSource, Spacing, Underlay,
 };
 pub use shape::{Built, HEAD, HEAD_ANGLE, HEAD_SHARE, Shape, ShapeInk, ShapeKind};
 
@@ -327,6 +327,8 @@ pub enum ChangeError {
     Flattened,
     #[error("a document keeps at least one page")]
     LastPage,
+    #[error("a PDF's pages are its own, and only a PDF's")]
+    PdfPages,
 }
 
 /// A paged document or a board: where marks go, and the changes it takes.

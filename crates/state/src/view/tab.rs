@@ -2,7 +2,7 @@
 
 use model::command::{Direction, Resize, Shown};
 
-use crate::drawing::{self, BoardId, InkTabs, PagedId};
+use crate::drawing::{self, BoardId, InkTabs, PagedId, PdfId};
 use crate::git::diffview::DiffSides;
 use crate::project::path::TextKind;
 use crate::render::document::{DocumentSeen, DocumentState};
@@ -12,21 +12,16 @@ use crate::text::buffer::BufferId;
 use crate::view::layout::TextView;
 use crate::viewer::{ImageId, ImageTab};
 
-/// A set of modes, one enum per set; each kind of text in `TextTabs` takes one.
 pub trait Modes: Sized + Clone {
-    /// `space tab` order, holding every mode `shown` returns; it starts with `first`.
     const ORDER: &'static [Shown];
 
-    /// The mode a tab opens in.
     fn first() -> Self;
 
     fn shown(&self) -> Shown;
 
-    /// `shown`, a rendering opening `at`; `None` for a mode this set lacks.
     fn enter(shown: Shown, at: Opening) -> Option<Self>;
 }
 
-/// Text that only shows as text.
 #[derive(Clone)]
 pub enum TextModes {
     Source,
@@ -56,13 +51,11 @@ impl Modes for TextModes {
     }
 }
 
-/// Text that renders, laid out as `R` describes.
 #[derive(Clone)]
 pub enum MarkupModes<R: Rendering> {
     Source,
     Diff(DiffSides),
     Render(R),
-    /// `seen` is `None` until the first sync; `share` is the source side's part of the width.
     Split {
         render: R,
         seen: Option<R::Seen>,
@@ -100,10 +93,8 @@ impl<R: Rendering> Modes for MarkupModes<R> {
     }
 }
 
-/// A text file's tab: the text every mode shares, and the mode shown.
 #[derive(Clone)]
 pub struct TextTab<M: Modes> {
-    /// Selection and scroll, kept across modes.
     pub text: TextView,
     pub mode: M,
 }
@@ -121,7 +112,6 @@ impl<M: Modes> TextTab<M> {
         Ok(())
     }
 
-    /// The mode `direction` of the current one in `ORDER`, wrapping around.
     fn next(&self, direction: Direction) -> Shown {
         let order = M::ORDER;
         let at = (order.iter())
@@ -134,11 +124,9 @@ impl<M: Modes> TextTab<M> {
     }
 }
 
-/// The kind of file has no such mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoMode;
 
-/// A text file's tab, by its kind of text; each kind can only be in its own set of modes.
 #[derive(Clone)]
 pub enum TextTabs {
     Code(TextTab<TextModes>),
@@ -146,8 +134,6 @@ pub enum TextTabs {
     Typst(TextTab<MarkupModes<PagesState>>),
 }
 
-/// Whether a rendering fills its tab, or sits beside the source it follows with where they last
-/// agreed.
 #[derive(Clone, Copy)]
 pub enum Beside<S> {
     Alone,
@@ -159,7 +145,6 @@ pub enum BesideMut<'a, S> {
     Source(&'a mut Option<S>, &'a mut Share),
 }
 
-/// What a tab draws, with the state that mode keeps.
 #[derive(Clone, Copy)]
 pub enum Showing<'a> {
     Source(&'a TextView),
@@ -184,7 +169,6 @@ pub enum ShowingMut<'a> {
 }
 
 impl<'a> Showing<'a> {
-    /// The text drawn as editable source: in source mode, or beside a rendering.
     pub fn source(&self) -> Option<&'a TextView> {
         match self {
             Showing::Source(text)
@@ -211,7 +195,6 @@ impl<'a> ShowingMut<'a> {
 }
 
 impl TextTabs {
-    /// `buffer`'s tab in its first mode, as its kind of text has them.
     pub fn open(buffer: BufferId, kind: TextKind) -> TextTabs {
         match kind {
             TextKind::Code => TextTabs::Code(TextTab::new(buffer)),
@@ -224,7 +207,6 @@ impl TextTabs {
         self.text().buffer()
     }
 
-    /// The selection and scroll every mode shares.
     pub fn text(&self) -> &TextView {
         match self {
             TextTabs::Code(tab) => &tab.text,
@@ -249,7 +231,6 @@ impl TextTabs {
         }
     }
 
-    /// Switches to `shown`, a rendering opening `at`.
     pub fn enter(&mut self, shown: Shown, at: Opening) -> Result<(), NoMode> {
         match self {
             TextTabs::Code(tab) => tab.enter(shown, at),
@@ -258,7 +239,6 @@ impl TextTabs {
         }
     }
 
-    /// The mode `space tab` moves to.
     pub fn next(&self, direction: Direction) -> Shown {
         match self {
             TextTabs::Code(tab) => tab.next(direction),
@@ -326,8 +306,6 @@ impl TextTabs {
     }
 }
 
-/// The source side's part of a split's width, strictly between 0 and 1; the host draws each side
-/// at least a few columns wide whatever it holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Share(f32); // private: checked by its constructor
 
@@ -350,7 +328,6 @@ impl Share {
         self.0
     }
 
-    /// One key's resize, stopping a step short of either edge.
     pub fn resized(self, resize: Resize) -> Share {
         match resize {
             Resize::Narrow => Share((self.0 - Share::STEP).max(Share::STEP)),
@@ -360,16 +337,15 @@ impl Share {
     }
 }
 
-/// What a tab holds, which names it among a pane's tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Opened {
     Text(BufferId),
     Paged(PagedId),
     Board(BoardId),
+    Pdf(PdfId),
     Image(ImageId),
 }
 
-/// A file that can be written: anything open but an image, which is only viewed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Writable {
     Text(BufferId),
@@ -383,6 +359,8 @@ impl Opened {
             Opened::Text(buffer) => Some(Writable::Text(buffer)),
             Opened::Paged(id) => Some(Writable::Paged(id)),
             Opened::Board(id) => Some(Writable::Board(id)),
+            // Until markup is written into the PDF itself.
+            Opened::Pdf(_) => None,
             Opened::Image(_) => None,
         }
     }
@@ -398,7 +376,6 @@ impl From<Writable> for Opened {
     }
 }
 
-/// A tab: text in its modes, a drawing, or an image.
 pub enum Tab {
     Text(TextTabs),
     Ink(InkTabs),
@@ -430,17 +407,16 @@ impl Tab {
 }
 
 impl Tab {
-    /// A new tab on `opened`, in its kind's first mode or with the tools ink tabs start with.
     pub fn open(opened: Opened, state: &crate::State) -> Tab {
         match opened {
             Opened::Text(buffer) => Tab::Text(TextTabs::open(buffer, state.buffers[buffer].kind)),
             Opened::Paged(id) => Tab::Ink(drawing::open_paged(state, id)),
             Opened::Board(id) => Tab::Ink(drawing::open_board(state, id)),
+            Opened::Pdf(id) => Tab::Ink(drawing::open_pdf(state, id)),
             Opened::Image(id) => Tab::Image(ImageTab::open(id)),
         }
     }
 
-    /// The tab a split starts its new pane with.
     pub fn split_copy(&self) -> Tab {
         match self {
             Tab::Text(text) => Tab::Text(text.clone()),

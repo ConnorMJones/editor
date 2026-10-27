@@ -15,8 +15,12 @@ use gpui::{
 };
 use helix_core::SmallVec;
 use model::picture::{Bitmap, Encoding, Picture, Source};
+use reader::pdf::Document;
 
 use crate::workspace::Workspace;
+
+/// The most pixels a PDF page is rendered at; a page drawn larger is stretched.
+pub const PAGE_PIXELS: f32 = 16.0e6;
 
 #[derive(Default)]
 pub struct Pictures {
@@ -32,16 +36,27 @@ pub struct PictureKey {
     pub size: Size<DevicePixels>,
 }
 
-/// A file by its path and the time it was read at, or bytes by their address.
+/// What a cache entry draws.
+#[derive(Clone)]
+pub enum Drawn {
+    Picture(Picture),
+    PdfPage {
+        document: Arc<Document>,
+        page: usize,
+    },
+}
+
+/// A file by its path and the time it was read at, or bytes and documents by their address.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum SourceKey {
     File(Arc<Path>, SystemTime),
     Bytes(usize),
+    PdfPage(usize, usize),
 }
 
 pub struct Entry {
     /// Held so no other bytes reuse the address in the key.
-    pub picture: Picture,
+    pub what: Drawn,
     pub image: Decoded,
     pub drawn: u64,
 }
@@ -53,10 +68,19 @@ pub enum Decoded {
 }
 
 impl SourceKey {
-    pub fn of(source: &Source) -> SourceKey {
-        match source {
-            Source::File { path, modified } => SourceKey::File(path.clone(), *modified),
-            Source::Bytes(bytes) => SourceKey::Bytes(Arc::as_ptr(bytes) as *const u8 as usize),
+    pub fn of(what: &Drawn) -> SourceKey {
+        match what {
+            Drawn::Picture(Picture {
+                source: Source::File { path, modified },
+                ..
+            }) => SourceKey::File(path.clone(), *modified),
+            Drawn::Picture(Picture {
+                source: Source::Bytes(bytes),
+                ..
+            }) => SourceKey::Bytes(Arc::as_ptr(bytes) as *const u8 as usize),
+            Drawn::PdfPage { document, page } => {
+                SourceKey::PdfPage(Arc::as_ptr(document) as usize, *page)
+            }
         }
     }
 }
@@ -69,7 +93,16 @@ pub fn picture_canvas(
 ) -> Canvas<Option<Arc<RenderImage>>> {
     let (pictures, workspace) = (pictures.clone(), workspace.clone());
     canvas(
-        move |bounds, window, cx| decoded(&pictures, &workspace, &picture, bounds, window, cx),
+        move |bounds, window, cx| {
+            decoded(
+                &pictures,
+                &workspace,
+                &Drawn::Picture(picture.clone()),
+                bounds,
+                window,
+                cx,
+            )
+        },
         |bounds, image, window, _| match image {
             Some(image) => paint_picture(bounds, image, window),
             None => {}
@@ -84,12 +117,12 @@ pub fn paint_picture(bounds: Bounds<Pixels>, image: Arc<RenderImage>, window: &m
     }
 }
 
-/// `picture` decoded at `bounds`' device size, asked for in the background when missing;
+/// `what` decoded at `bounds`' device size, asked for in the background when missing;
 /// meanwhile a decode of another size stands in.
 pub fn decoded(
     pictures: &Rc<RefCell<Pictures>>,
     workspace: &WeakEntity<Workspace>,
-    picture: &Picture,
+    what: &Drawn,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -101,7 +134,7 @@ pub fn decoded(
         } => size,
         Size { .. } => return None,
     };
-    let source = SourceKey::of(&picture.source);
+    let source = SourceKey::of(what);
     let key = PictureKey {
         source: source.clone(),
         size,
@@ -109,7 +142,7 @@ pub fn decoded(
     let mut pictures = pictures.borrow_mut();
     let Pictures { frame, entries } = &mut *pictures;
     let frame = *frame;
-    let same = |entry: &Entry| SourceKey::of(&entry.picture.source) == source;
+    let same = |entry: &Entry| SourceKey::of(&entry.what) == source;
     match entries.get_mut(&key) {
         Some(entry) => entry.drawn = frame,
         // One decode of a picture runs at a time, so a live resize settles on the last size.
@@ -121,13 +154,13 @@ pub fn decoded(
                 entries.insert(
                     key.clone(),
                     Entry {
-                        picture: picture.clone(),
+                        what: what.clone(),
                         image: Decoded::Pending,
                         drawn: frame,
                     },
                 );
-                let (renderer, picture) = (cx.svg_renderer(), picture.clone());
-                let job = cx.background_spawn(async move { decode(&picture, size, &renderer) });
+                let (renderer, what) = (cx.svg_renderer(), what.clone());
+                let job = cx.background_spawn(async move { decode(&what, size, &renderer) });
                 let (workspace, key) = (workspace.clone(), key.clone());
                 cx.spawn(async move |cx| {
                     let image = job.await;
@@ -169,12 +202,34 @@ pub fn decoded(
         })
 }
 
-/// Vectors are drawn at `size`; bitmaps are decoded whole and scaled down to `size` when larger.
+/// Vectors and PDF pages are drawn at `size`, a page at no more than `PAGE_PIXELS`; bitmaps are
+/// decoded whole and scaled down to `size` when larger.
 pub fn decode(
-    picture: &Picture,
+    what: &Drawn,
     size: Size<DevicePixels>,
     renderer: &SvgRenderer,
 ) -> anyhow::Result<Arc<RenderImage>> {
+    let picture = match what {
+        Drawn::Picture(picture) => picture,
+        Drawn::PdfPage { document, page } => {
+            let (width, height) = (size.width.0 as f32, size.height.0 as f32);
+            let shrink = (PAGE_PIXELS / (width * height)).sqrt().min(1.0);
+            let side = |side: f32| (side * shrink).clamp(1.0, f32::from(u16::MAX)) as u16;
+            let mut rendered = document.render(*page, side(width), side(height))?;
+            for pixel in rendered.pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            let pixels = image::RgbaImage::from_raw(
+                u32::from(rendered.width),
+                u32::from(rendered.height),
+                rendered.pixels,
+            )
+            .ok_or_else(|| anyhow::anyhow!("a page raster of the wrong length"))?;
+            let frames: SmallVec<[image::Frame; 1]> =
+                SmallVec::from_elem(image::Frame::new(pixels), 1);
+            return Ok(Arc::new(RenderImage::new(frames)));
+        }
+    };
     let read;
     let bytes: &[u8] = match &picture.source {
         Source::File { path, .. } => {

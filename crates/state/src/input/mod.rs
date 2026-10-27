@@ -13,6 +13,7 @@ use model::mode::Mode;
 use model::register::Register;
 
 use crate::apply::{apply, commit_focused};
+use crate::drawing::{InkTabs, PdfMode, PdfTab};
 use crate::input::keymap::{Context, Resolved};
 use crate::view::tab::{Beside, Showing, Tab};
 use crate::{Effect, Files, Focus, Overlay, Sidebar, State, Sticky, view::scroll};
@@ -30,7 +31,17 @@ pub fn context(state: &State) -> Context {
             Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
         ) => match state.layout.focused().active() {
             Some(Tab::Ink(ink)) => match (ink.typed(), state.input.mode) {
-                (None, _) => Context::Drawing,
+                (None, _) => match ink {
+                    InkTabs::Pdf(PdfTab {
+                        mode: PdfMode::Read,
+                        ..
+                    }) => Context::PdfRead,
+                    InkTabs::Pdf(PdfTab {
+                        mode: PdfMode::Markup,
+                        ..
+                    }) => Context::PdfMarkup,
+                    InkTabs::Paged(_) | InkTabs::Board(_) => Context::Drawing,
+                },
                 // Text being typed takes the keys; normal mode adds a way out.
                 (Some(_), Mode::Normal) => Context::DrawingText,
                 (Some(_), Mode::Insert | Mode::Select) => mode_context(state),
@@ -123,7 +134,9 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::Document
             | Context::Pages
             | Context::Drawing
-            | Context::ImageViewer),
+            | Context::ImageViewer
+            | Context::PdfRead
+            | Context::PdfMarkup),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -326,6 +339,8 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::Pages
         | Context::Drawing
         | Context::ImageViewer
+        | Context::PdfRead
+        | Context::PdfMarkup
         | Context::DrawingText => None,
     }
 }

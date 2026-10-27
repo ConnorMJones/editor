@@ -26,7 +26,7 @@ fn viewport() -> Viewport {
     Viewport::new(Px(800.0), Px(600.0)).unwrap()
 }
 
-fn measure() -> Measure {
+pub fn measure() -> Measure {
     Measure {
         viewport: viewport(),
         line: Px(20.0),
@@ -54,6 +54,13 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
                 .to_pane
                 .apply(Point::new(x, y))
         }
+        Some(Tab::Ink(InkTabs::Pdf(tab))) => {
+            let stack = h.state.pdfs[tab.file()].edited.drawing().stack();
+            tab.view
+                .frame(stack, viewport())
+                .to_pane
+                .apply(Point::new(x, y))
+        }
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             tab.view.frame(viewport()).to_pane.apply(Point::new(x, y))
         }
@@ -62,7 +69,7 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
 }
 
 /// One stroke through `points` on the focused pane, in sheet coordinates.
-fn draw(h: &mut Harness, stylus: Stylus, points: &[(f32, f32)]) {
+pub fn draw(h: &mut Harness, stylus: Stylus, points: &[(f32, f32)]) {
     let pane = h.state.layout.focus();
     h.run(|state, _| sheet::measured(state, pane, measure()));
     let points: Vec<Point<Pane>> = points.iter().map(|at| on_pane(h, *at)).collect();
@@ -77,7 +84,7 @@ fn draw(h: &mut Harness, stylus: Stylus, points: &[(f32, f32)]) {
     }
 }
 
-fn line(from: (f32, f32), to: (f32, f32)) -> Vec<(f32, f32)> {
+pub fn line(from: (f32, f32), to: (f32, f32)) -> Vec<(f32, f32)> {
     (0..=20)
         .map(|step| {
             let t = step as f32 / 20.0;
@@ -96,6 +103,10 @@ fn marks(h: &Harness) -> usize {
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             let drawing = h.state.boards[tab.file()].edited.drawing();
             drawing.marks(LayerIndex(0)).unwrap().len()
+        }
+        Some(Tab::Ink(InkTabs::Pdf(tab))) => {
+            let drawing = h.state.pdfs[tab.file()].edited.drawing();
+            drawing.marks(FIRST).unwrap().len()
         }
         Some(Tab::Text(_) | Tab::Image(_)) | None => panic!("no drawing is focused"),
     }

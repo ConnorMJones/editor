@@ -74,9 +74,9 @@ pub fn export(state: &mut State, to: ExportAs, out: &mut Vec<Effect>) {
                 path: file.path.with_extension(to.extension()),
             })
         }
-        (Some(Tab::Text(_)), ExportAs::Svg | ExportAs::Png) | (Some(Tab::Image(_)) | None, _) => {
-            Err(Notice::NotExportable { to })
-        }
+        (Some(Tab::Ink(InkTabs::Pdf(_))), _)
+        | (Some(Tab::Text(_)), ExportAs::Svg | ExportAs::Png)
+        | (Some(Tab::Image(_)) | None, _) => Err(Notice::NotExportable { to }),
     };
     match job {
         Ok(job) => out.push(Effect::Job(job)),

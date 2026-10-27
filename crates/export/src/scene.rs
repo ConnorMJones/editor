@@ -76,7 +76,6 @@ pub fn region<'a>(board: &'a Board, region: &Region) -> Option<Scene<'a>> {
 }
 
 impl Scene<'_> {
-    /// The paper, then its pattern; a pattern follows the surface, so regions line up.
     pub fn paper(&self) -> SmallVec<[Fill; 2]> {
         let sheet = |color| Fill {
             color,
@@ -84,6 +83,8 @@ impl Scene<'_> {
         };
         match self.paper {
             Background::Plain(paper) => smallvec![sheet(paper)],
+            // The writers draw the PDF's own page.
+            Background::Pdf { .. } => SmallVec::new(),
             Background::Pattern {
                 paper,
                 ink,

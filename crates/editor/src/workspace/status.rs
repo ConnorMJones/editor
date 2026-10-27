@@ -7,7 +7,7 @@ use model::command::Shown;
 use model::mode::Mode;
 use model::sheet::{Fit, Zoom};
 use state::State;
-use state::drawing::InkTabs;
+use state::drawing::{InkTabs, PdfMode, PdfTab};
 use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
 use state::text::buffer::{Disk, Highlight};
@@ -26,11 +26,11 @@ struct Status {
     parts: [Part; 4],
 }
 
-/// The box at the line's start: the input mode for text, or that a drawing takes the pen.
 #[derive(Clone, Copy)]
 enum Label {
     Mode,
     Ink,
+    Read,
     View,
 }
 
@@ -81,6 +81,7 @@ impl Workspace {
         let (label, label_bg) = match status.label {
             Label::Mode => (mode.label(), theme.mode[mode]),
             Label::Ink => ("INK", theme.mode[Mode::Normal]),
+            Label::Read => ("READ", theme.mode[Mode::Normal]),
             Label::View => ("VIEW", theme.mode[Mode::Normal]),
         };
         let (label, label_bg, label_fg) = match focused {
@@ -231,6 +232,17 @@ fn ink_status(state: &State, ink: &InkTabs) -> Status {
             let layers = file.edited.drawing().layers();
             (tab.hand.tip, tab.hand.layer, layers, file.disk, place)
         }
+        InkTabs::Pdf(tab) => {
+            let file = &state.pdfs[tab.file()];
+            let pages = file.edited.drawing().stack().sizes().len();
+            let place = format!(
+                "page {}/{pages}  {}",
+                tab.view.centre.page.0 + 1,
+                scale(tab.view.fit, tab.view.zoom)
+            );
+            let layers = file.edited.drawing().layers();
+            (tab.hand.tip, tab.hand.layer, layers, file.disk, place)
+        }
         InkTabs::Board(tab) => {
             let file = &state.boards[tab.file()];
             let layers = file.edited.drawing().layers();
@@ -249,12 +261,28 @@ fn ink_status(state: &State, ink: &InkTabs) -> Status {
         ToolKind::Shape(ShapeKind::Ellipse) => "ellipse",
         ToolKind::Text => "text",
     };
+    let label = match ink {
+        InkTabs::Pdf(PdfTab {
+            mode: PdfMode::Read,
+            ..
+        }) => Label::Read,
+        InkTabs::Pdf(PdfTab {
+            mode: PdfMode::Markup,
+            ..
+        })
+        | InkTabs::Paged(_)
+        | InkTabs::Board(_) => Label::Ink,
+    };
+    let tool = match label {
+        Label::Read => Part::NONE,
+        Label::Ink | Label::Mode | Label::View => Part::plain(tool.to_owned()),
+    };
     Status {
-        label: Label::Ink,
+        label,
         file: name(state, opened),
         flags: format!("{}{}", modified_flag(state, opened), disk_flag(disk)),
         parts: [
-            Part::plain(tool.to_owned()),
+            tool,
             Part::plain(layer_label(layers, layer)),
             Part::plain(place),
             Part::NONE,

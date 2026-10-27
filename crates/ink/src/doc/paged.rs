@@ -3,6 +3,7 @@ use std::sync::Arc;
 use model::color::Rgb;
 pub use model::sheet::{InvalidPageSize, PageIndex, PageSize};
 use model::sheet::{Stack, StackError};
+use reader::pdf::Document;
 
 use crate::doc::{
     ChangeError, Drawing, LayerChange, LayerIndex, LayerMarks, Layers, Mark, MarkChange, MarkId,
@@ -12,9 +13,21 @@ use crate::doc::{
 /// Pages in reading order, each with its own size, background and marks; never empty.
 #[derive(Clone, Debug)]
 pub struct Paged {
-    layers: Layers,   // private: pages, stack and layers stay in step
-    pages: Vec<Page>, // private: pages, stack and layers stay in step
-    stack: Stack,     // private: pages, stack and layers stay in step
+    layers: Layers,     // private: pages, stack and layers stay in step
+    pages: Vec<Page>,   // private: pages, stack and layers stay in step
+    stack: Stack,       // private: pages, stack and layers stay in step
+    underlay: Underlay,
+}
+
+#[derive(Clone, Debug)]
+pub enum Underlay {
+    Blank,
+    Pdf(PdfSource),
+}
+
+#[derive(Clone, Debug)]
+pub struct PdfSource {
+    pub document: Arc<Document>,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +44,9 @@ pub enum Background {
         ink: Rgb,
         pattern: Pattern,
         spacing: Spacing,
+    },
+    Pdf {
+        page: u32,
     },
 }
 
@@ -110,7 +126,6 @@ impl From<StackError> for ChangeError {
 }
 
 impl Paged {
-    /// One blank page on one layer.
     pub fn new(size: PageSize, background: Background) -> Paged {
         let layers = Layers::new();
         let page = Page {
@@ -121,6 +136,7 @@ impl Paged {
             layers,
             pages: vec![page],
             stack: Stack::one(size),
+            underlay: Underlay::Blank,
         }
     }
 
@@ -147,7 +163,28 @@ impl Paged {
             layers,
             pages,
             stack,
+            underlay: Underlay::Blank,
         }))
+    }
+
+    pub fn over_pdf(document: Arc<Document>) -> Paged {
+        let layers = Layers::new();
+        let pages = (0..document.pages.sizes().len() as u32)
+            .map(|page| Page {
+                background: Background::Pdf { page },
+                marks: LayerMarks::empty(&layers),
+            })
+            .collect();
+        Paged {
+            layers,
+            pages,
+            stack: document.pages.clone(),
+            underlay: Underlay::Pdf(PdfSource { document }),
+        }
+    }
+
+    pub fn underlay(&self) -> &Underlay {
+        &self.underlay
     }
 
     pub fn pages(&self) -> &[Page] {
@@ -197,20 +234,28 @@ impl Drawing for Paged {
                 at,
                 size,
                 background,
-            } => {
-                self.stack.insert(at, size)?;
-                let page = Page {
-                    background,
-                    marks: LayerMarks::empty(&self.layers),
-                };
-                self.pages.insert(at.0, page);
-                Ok(())
-            }
-            PagedChange::RemovePage(at) => {
-                self.stack.remove(at)?;
-                self.pages.remove(at.0);
-                Ok(())
-            }
+            } => match (&self.underlay, background) {
+                (Underlay::Pdf(_), _) | (Underlay::Blank, Background::Pdf { .. }) => {
+                    Err(ChangeError::PdfPages)
+                }
+                (Underlay::Blank, Background::Plain(_) | Background::Pattern { .. }) => {
+                    self.stack.insert(at, size)?;
+                    let page = Page {
+                        background,
+                        marks: LayerMarks::empty(&self.layers),
+                    };
+                    self.pages.insert(at.0, page);
+                    Ok(())
+                }
+            },
+            PagedChange::RemovePage(at) => match self.underlay {
+                Underlay::Pdf(_) => Err(ChangeError::PdfPages),
+                Underlay::Blank => {
+                    self.stack.remove(at)?;
+                    self.pages.remove(at.0);
+                    Ok(())
+                }
+            },
             PagedChange::Layers(LayerChange::Add(layer)) => {
                 self.layers.push(layer);
                 for page in &mut self.pages {

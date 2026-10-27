@@ -5,14 +5,12 @@ use std::path::{Component, Path, PathBuf};
 
 use model::picture::Encoding;
 
-/// `/`-separated UTF-8 under the root with only normal components; never the root itself.
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[serde(try_from = "String", into = "String")]
 pub struct RelPath(String); // private: checked by `new` and `parse`
 
-/// A folder: the root, or one under it. Hashes and borrows as its path, empty for the root.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Folder {
     Root,
@@ -53,7 +51,6 @@ impl RelPath {
         }
     }
 
-    /// Parses an already root-relative `/`-separated path, as git reports them.
     pub fn parse(path: &str) -> Result<RelPath, RelPathError> {
         match (
             path.is_empty(),
@@ -69,12 +66,10 @@ impl RelPath {
         &self.0
     }
 
-    /// The last component.
     pub fn file_name(&self) -> &str {
         self.0.rsplit('/').next().unwrap_or(&self.0)
     }
 
-    /// `name` must be a single normal component.
     pub fn join(&self, name: &str) -> RelPath {
         RelPath(format!("{}/{name}", self.0))
     }
@@ -94,7 +89,6 @@ impl RelPath {
         Folder::of(self.folder_path())
     }
 
-    /// The path of the folder this sits in, empty for the root.
     pub fn folder_path(&self) -> &str {
         match self.0.rsplit_once('/') {
             Some((folder, _)) => folder,
@@ -102,7 +96,6 @@ impl RelPath {
         }
     }
 
-    /// Paths of the folders above, from the nearest up to the root's empty path.
     pub fn ancestors(&self) -> impl Iterator<Item = &str> {
         let mut rest = Some(self.0.as_str());
         std::iter::from_fn(move || {
@@ -116,7 +109,6 @@ impl RelPath {
         })
     }
 
-    /// True when `self` is `dir` or lies beneath it.
     pub fn is_within(&self, dir: &RelPath) -> bool {
         self.0 == dir.0
             || (self.0.starts_with(&dir.0) && self.0.as_bytes().get(dir.0.len()) == Some(&b'/'))
@@ -126,7 +118,6 @@ impl RelPath {
         root.join(&self.0)
     }
 
-    /// `self` with its `from` prefix replaced by `to`, when it is within `from`.
     pub fn rebased(&self, from: &RelPath, to: &RelPath) -> Option<RelPath> {
         match self.0.strip_prefix(&from.0)? {
             "" => Some(to.clone()),
@@ -136,7 +127,6 @@ impl RelPath {
 }
 
 impl Folder {
-    /// A folder path as `ancestors` yields it: empty for the root.
     pub fn of(path: &str) -> Folder {
         match path {
             "" => Folder::Root,
@@ -144,7 +134,6 @@ impl Folder {
         }
     }
 
-    /// `/`-separated, empty for the root.
     pub fn as_str(&self) -> &str {
         match self {
             Folder::Root => "",
@@ -152,7 +141,6 @@ impl Folder {
         }
     }
 
-    /// `name` must be a single normal component.
     pub fn join(&self, name: &str) -> RelPath {
         match self {
             Folder::Root => RelPath(name.to_owned()),
@@ -167,7 +155,6 @@ impl Folder {
         }
     }
 
-    /// Where this folder is once `from` has moved to `to`.
     pub fn moved(self, from: &RelPath, to: &RelPath) -> Folder {
         match self {
             Folder::Sub(dir) => Folder::Sub(dir.rebased(from, to).unwrap_or(dir)),
@@ -175,7 +162,6 @@ impl Folder {
         }
     }
 
-    /// True for everything under the root, or `path` within this folder.
     pub fn contains(&self, path: &RelPath) -> bool {
         match self {
             Folder::Root => true,
@@ -231,12 +217,12 @@ impl fmt::Display for Folder {
     }
 }
 
-/// What a file holds, by its extension: the one place a file's kind is decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
     Text(TextKind),
     Paged,
     Board,
+    Pdf,
     Image(Encoding),
 }
 
@@ -256,6 +242,7 @@ impl FileKind {
             (None, Some("typ")) => FileKind::Text(TextKind::Typst),
             (None, Some("pdt")) => FileKind::Paged,
             (None, Some("bdt")) => FileKind::Board,
+            (None, Some("pdf")) => FileKind::Pdf,
             (None, Some(_) | None) => FileKind::Text(TextKind::Code),
         }
     }

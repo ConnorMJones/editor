@@ -28,14 +28,15 @@ use crate::view::tab::{Opened, Tab};
 new_key_type! {
     pub struct PagedId;
     pub struct BoardId;
+    pub struct PdfId;
 }
 
 pub const PAPER: Background = Background::Plain(model::color::Rgb::hex(0xffffff));
 
 pub type PagedFiles = SlotMap<PagedId, InkFile<Paged>>;
 pub type BoardFiles = SlotMap<BoardId, InkFile<Board>>;
+pub type PdfFiles = SlotMap<PdfId, InkFile<Paged>>;
 
-/// An open drawing; `saved` is the revision last written.
 pub struct InkFile<D> {
     pub path: PathBuf,
     pub edited: Edited<D>,
@@ -63,6 +64,7 @@ impl<D: Drawing> InkFile<D> {
 pub enum InkTabs {
     Paged(PagedTab),
     Board(BoardTab),
+    Pdf(PdfTab),
 }
 
 /// A paged document's tab, viewed as pages fitted to the pane.
@@ -72,7 +74,20 @@ pub struct PagedTab {
     pub hand: Hand<PageLayer>,
 }
 
-/// A board's tab, viewed as a plane.
+pub struct PdfTab {
+    file: PdfId, // private: a tab's file is its identity
+    pub view: SheetView,
+    pub hand: Hand<PageLayer>,
+    pub mode: PdfMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PdfMode {
+    Read,
+    Markup,
+}
+
 pub struct BoardTab {
     file: BoardId, // private: a tab's file is its identity
     pub view: PlaneView,
@@ -84,11 +99,8 @@ pub struct Hand<T> {
     pub tip: ToolKind,
     pub tools: Tools,
     pub doing: Doing<T>,
-    /// How new text looks.
     pub style: TextStyle,
-    /// Names the stroke in progress for the host, which keeps its mesh.
     pub live: GeometryId,
-    /// The pane's size when last drawn, for keys that move by part of it.
     pub last: Option<Measure>,
 }
 
@@ -97,7 +109,6 @@ pub enum Doing<T> {
         using: Using<T>,
         pen: Pen,
     },
-    /// The text takes the keys and the pen until it ends.
     Typing(Box<Open<T>>),
 }
 
@@ -114,8 +125,6 @@ pub enum Pen {
     Down(Gesture),
 }
 
-/// What is fixed when the pen goes down: the tool, how the pane maps onto the surface, the
-/// host's clock then, and how far a tap reaches.
 #[derive(Clone, Copy, Debug)]
 pub struct Gesture {
     pub tool: ToolKind,
@@ -137,7 +146,6 @@ impl<T: Copy + PartialEq> Hand<T> {
         }
     }
 
-    /// Drops the stroke under way, as when the drawing under it changes by other means.
     pub fn cancel_stroke(&mut self) {
         match self.doing {
             Doing::Ink { .. } => self.doing = Doing::IDLE,
@@ -145,7 +153,6 @@ impl<T: Copy + PartialEq> Hand<T> {
         }
     }
 
-    /// Text being typed keeps the keys, leaving `picked` unpicked.
     pub fn pick(&mut self, target: T, picked: Picked) {
         match self.doing {
             Doing::Ink { .. } => {
@@ -159,7 +166,6 @@ impl<T: Copy + PartialEq> Hand<T> {
         }
     }
 
-    /// A hand with the same settings and no stroke in progress.
     pub fn copy(&self) -> Hand<T> {
         Hand {
             tip: self.tip,
@@ -181,6 +187,21 @@ impl PagedTab {
     }
 }
 
+impl PdfTab {
+    pub fn new(file: PdfId, view: SheetView, hand: Hand<PageLayer>, mode: PdfMode) -> PdfTab {
+        PdfTab {
+            file,
+            view,
+            hand,
+            mode,
+        }
+    }
+
+    pub fn file(&self) -> PdfId {
+        self.file
+    }
+}
+
 impl BoardTab {
     pub fn new(file: BoardId, view: PlaneView, hand: Hand<LayerIndex>) -> BoardTab {
         BoardTab { file, view, hand }
@@ -192,7 +213,6 @@ impl BoardTab {
 }
 
 impl InkTabs {
-    /// A tab on the same drawing at the same place, with no stroke in progress.
     pub fn copy(&self) -> InkTabs {
         match self {
             InkTabs::Paged(tab) => {
@@ -201,6 +221,9 @@ impl InkTabs {
             InkTabs::Board(tab) => {
                 InkTabs::Board(BoardTab::new(tab.file, tab.view, tab.hand.copy()))
             }
+            InkTabs::Pdf(tab) => {
+                InkTabs::Pdf(PdfTab::new(tab.file, tab.view, tab.hand.copy(), tab.mode))
+            }
         }
     }
 
@@ -208,14 +231,15 @@ impl InkTabs {
         match self {
             InkTabs::Paged(tab) => Opened::Paged(tab.file),
             InkTabs::Board(tab) => Opened::Board(tab.file),
+            InkTabs::Pdf(tab) => Opened::Pdf(tab.file),
         }
     }
 
-    /// Drops the stroke or selection under way, as when the drawing is replaced.
     pub fn cancel_strokes(&mut self) {
         match self {
             InkTabs::Paged(tab) => tab.hand.cancel_stroke(),
             InkTabs::Board(tab) => tab.hand.cancel_stroke(),
+            InkTabs::Pdf(tab) => tab.hand.cancel_stroke(),
         }
     }
 }
@@ -253,11 +277,21 @@ impl Default for InkSettings {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Saved {
-    Paged { layer: LayerIndex, view: SheetView },
-    Board { layer: LayerIndex, view: PlaneView },
+    Paged {
+        layer: LayerIndex,
+        view: SheetView,
+    },
+    Board {
+        layer: LayerIndex,
+        view: PlaneView,
+    },
+    Pdf {
+        layer: LayerIndex,
+        view: SheetView,
+        mode: PdfMode,
+    },
 }
 
-/// A new tab on a paged document: its first page fitted to the width.
 pub fn open_paged(state: &State, id: PagedId) -> InkTabs {
     let view = SheetView::start(state.pageds[id].edited.drawing().stack());
     InkTabs::Paged(PagedTab::new(
@@ -267,7 +301,16 @@ pub fn open_paged(state: &State, id: PagedId) -> InkTabs {
     ))
 }
 
-/// A new tab on a board, at its origin.
+pub fn open_pdf(state: &State, id: PdfId) -> InkTabs {
+    let view = SheetView::start(state.pdfs[id].edited.drawing().stack());
+    InkTabs::Pdf(PdfTab::new(
+        id,
+        view,
+        Hand::new(&state.ink, LayerIndex(0)),
+        PdfMode::Read,
+    ))
+}
+
 pub fn open_board(state: &State, id: BoardId) -> InkTabs {
     InkTabs::Board(BoardTab::new(
         id,
@@ -276,8 +319,6 @@ pub fn open_board(state: &State, id: BoardId) -> InkTabs {
     ))
 }
 
-/// A restored tab on a drawing, at its saved layer while the drawing still has it; `None` when
-/// the saved kind isn't the file's.
 pub fn reopen(state: &State, opened: Opened, saved: Saved) -> Option<Tab> {
     let at = |layers: &Layers, layer: LayerIndex| match layers.get(layer) {
         Some(_) => layer,
@@ -294,8 +335,14 @@ pub fn reopen(state: &State, opened: Opened, saved: Saved) -> Option<Tab> {
             let hand = Hand::new(&state.ink, layer);
             Some(Tab::Ink(InkTabs::Board(BoardTab::new(id, view, hand))))
         }
+        (Opened::Pdf(id), Saved::Pdf { layer, view, mode }) => {
+            let layer = at(state.pdfs[id].edited.drawing().layers(), layer);
+            let hand = Hand::new(&state.ink, layer);
+            Some(Tab::Ink(InkTabs::Pdf(PdfTab::new(id, view, hand, mode))))
+        }
         (Opened::Text(_) | Opened::Image(_), _)
-        | (Opened::Paged(_), Saved::Board { .. })
-        | (Opened::Board(_), Saved::Paged { .. }) => None,
+        | (Opened::Paged(_), Saved::Board { .. } | Saved::Pdf { .. })
+        | (Opened::Board(_), Saved::Paged { .. } | Saved::Pdf { .. })
+        | (Opened::Pdf(_), Saved::Paged { .. } | Saved::Board { .. }) => None,
     }
 }

@@ -572,6 +572,7 @@ pub enum Resize {
 pub enum DrawingCommand {
     Page(PageCommand),
     Ink(InkCommand),
+    Read,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

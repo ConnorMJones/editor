@@ -9,7 +9,7 @@ use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
 use crate::apply;
-use crate::drawing::{self, InkTabs};
+use crate::drawing::{self, InkTabs, PdfMode};
 use crate::job::Job;
 use crate::project::path::{Folder, RelPath};
 use crate::render::Opening;
@@ -28,23 +28,18 @@ use ink::doc::LayerIndex;
 use model::command::Shown;
 use model::git::Group;
 
-/// Workspace layout saved on exit and restored with `session.restore = "last"`.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
-    /// Panes in reading order; `layout` and `focus` index into it.
     pub panes: Vec<SessionPane>,
     pub layout: SessionNode,
     pub focus: usize,
     pub sidebar: SessionSidebar,
     pub sidebar_width: SidebarWidth,
-    /// Expanded tree directories relative to the root.
     pub expanded: Vec<RelPath>,
-    /// Collapsed groups of the Changes sidebar.
     pub collapsed: Vec<Group>,
 }
 
-/// `flex` is the node's weight within its parent split.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionNode {
@@ -59,19 +54,16 @@ pub enum SessionNode {
     },
 }
 
-/// A saved tab's view, read into its kind: text's mode, ranges, primary and scroll, or a drawing's.
 enum Restoring {
     Text(SessionMode, Vec<[usize; 2]>, usize, usize),
     Reopen(Reopen),
 }
 
-/// A saved tab rebuilt from its file once read: a drawing, or an image.
 enum Reopen {
     Drawing(drawing::Saved),
     Image(SheetView),
 }
 
-/// `active` and `preview` index into `tabs`.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionPane {
@@ -84,7 +76,6 @@ pub enum SessionPane {
     },
 }
 
-/// A tab: its file, and what its kind of tab keeps.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionItem {
@@ -92,18 +83,15 @@ pub struct SessionItem {
     pub view: SessionView,
 }
 
-/// What a tab keeps: text's mode, selection and scroll, or a drawing's layer and view.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionView {
     Text {
         mode: SessionMode,
-        /// `[anchor, head]` char offsets.
         ranges: Vec<[usize; 2]>,
         primary: usize,
         scroll: usize,
     },
-    /// `x` and `y` are the point on `page` at the pane's centre.
     Paged {
         layer: usize,
         page: usize,
@@ -112,14 +100,23 @@ pub enum SessionView {
         fit: Fit,
         zoom: f32,
     },
-    /// `x` and `y` are the board point at the pane's centre.
+    Pdf {
+        layer: usize,
+        page: usize,
+        x: f32,
+        y: f32,
+        fit: Fit,
+        zoom: f32,
+        mode: PdfMode,
+    },
+    // `x` and `y` are the board point at the pane's centre.
     Board {
         layer: usize,
         x: f32,
         y: f32,
         zoom: f32,
     },
-    /// `x` and `y` are the point on the image at the pane's centre.
+    // `x` and `y` are the point on the image at the pane's centre.
     Image { x: f32, y: f32, fit: Fit, zoom: f32 },
 }
 
@@ -131,7 +128,6 @@ pub enum SessionMode {
     Render {
         top: Opening,
     },
-    /// The source beside its rendering.
     Split {
         top: Opening,
     },
@@ -141,7 +137,6 @@ pub enum SessionMode {
 #[serde(rename_all = "lowercase")]
 pub enum SessionSidebar {
     Hidden,
-    /// The file tree.
     Shown,
     Changes,
 }
@@ -174,7 +169,6 @@ pub enum SessionError {
     Tabs { pane: usize, reason: InvalidTabs },
 }
 
-/// Session file for `root` under `dir`, named after the escaped root path.
 pub fn file(dir: &Path, root: &Path) -> PathBuf {
     let name = root
         .to_string_lossy()
@@ -183,7 +177,6 @@ pub fn file(dir: &Path, root: &Path) -> PathBuf {
     dir.join(format!("{name}.toml"))
 }
 
-/// `None` when no session was saved for this root yet.
 pub fn load(path: &Path) -> Result<Option<Session>, SessionError> {
     match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).map(Some).map_err(SessionError::Parse),
@@ -223,6 +216,15 @@ pub fn snapshot(state: &State) -> Session {
                                 y: tab.view.centre.at.y,
                                 fit: tab.view.fit,
                                 zoom: tab.view.zoom.get(),
+                            },
+                            Tab::Ink(InkTabs::Pdf(tab)) => SessionView::Pdf {
+                                layer: tab.hand.layer.0,
+                                page: tab.view.centre.page.0,
+                                x: tab.view.centre.at.x,
+                                y: tab.view.centre.at.y,
+                                fit: tab.view.fit,
+                                zoom: tab.view.zoom.get(),
+                                mode: tab.mode,
                             },
                             Tab::Ink(InkTabs::Board(tab)) => SessionView::Board {
                                 layer: tab.hand.layer.0,
@@ -285,7 +287,6 @@ fn snapshot_node(node: &Node, flex: Flex, index: &HashMap<PaneId, usize>) -> Ses
     }
 }
 
-/// Files that no longer open are skipped and their emptied panes close; call after `boot`.
 pub fn restore(
     state: &mut State,
     session: Session,
@@ -336,7 +337,6 @@ pub fn restore(
         else {
             continue;
         };
-        // Saved index of each kept item; files deleted since are dropped, not recreated.
         let mut kept: Vec<usize> = Vec::with_capacity(tabs.len());
         let mut items: Vec<Item> = Vec::with_capacity(tabs.len());
         for (saved_index, item) in tabs.into_iter().enumerate() {
@@ -369,6 +369,26 @@ pub fn restore(
                         fit,
                         zoom: Zoom::clamped(zoom),
                     },
+                })),
+                SessionView::Pdf {
+                    layer,
+                    page,
+                    x,
+                    y,
+                    fit,
+                    zoom,
+                    mode,
+                } => Restoring::Reopen(Reopen::Drawing(drawing::Saved::Pdf {
+                    layer: LayerIndex(layer),
+                    view: SheetView {
+                        centre: Spot {
+                            page: PageIndex(page),
+                            at: Point::new(x, y),
+                        },
+                        fit,
+                        zoom: Zoom::clamped(zoom),
+                    },
+                    mode,
                 })),
                 SessionView::Board { layer, x, y, zoom } => {
                     Restoring::Reopen(Reopen::Drawing(drawing::Saved::Board {
@@ -407,7 +427,10 @@ pub fn restore(
                             }
                             (
                                 Reopen::Image(_),
-                                Opened::Text(_) | Opened::Paged(_) | Opened::Board(_),
+                                Opened::Text(_)
+                                | Opened::Paged(_)
+                                | Opened::Board(_)
+                                | Opened::Pdf(_),
                             ) => None,
                         }
                         .ok_or(wrong_kind)?,
@@ -428,12 +451,13 @@ pub fn restore(
                 pane,
                 tab: saved_index,
             })?;
-            // A diff also shows a file deleted from the worktree.
             let buffer = match (mode, path.is_file(), path.exists()) {
                 (_, true, _) | (SessionMode::Diff, false, false) => {
                     match apply::read_now(state, &path, out) {
                         Ok(Opened::Text(buffer)) => buffer,
-                        Ok(Opened::Paged(_) | Opened::Board(_) | Opened::Image(_)) => {
+                        Ok(
+                            Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_),
+                        ) => {
                             return Err(wrong_kind);
                         }
                         Err(notice) => {
@@ -529,7 +553,6 @@ pub fn restore(
     Ok(())
 }
 
-/// Builds the layout tree, taking each pane's id from `slots` as the tree places it.
 fn parse_node(node: SessionNode, slots: &mut [Option<PaneId>]) -> Result<Child, SessionError> {
     match node {
         SessionNode::Pane { pane, flex } => match slots.get_mut(pane) {
@@ -558,7 +581,6 @@ fn parse_node(node: SessionNode, slots: &mut [Option<PaneId>]) -> Result<Child, 
     }
 }
 
-/// How a rendering at `top` is saved: alone in its tab, or beside the source.
 fn saved<S>(top: Opening, beside: Beside<S>) -> SessionMode {
     match beside {
         Beside::Alone => SessionMode::Render { top },
@@ -566,7 +588,6 @@ fn saved<S>(top: Opening, beside: Beside<S>) -> SessionMode {
     }
 }
 
-/// What a text tab keeps: the mode it shows, its selection and its scroll.
 fn text_view(text: &TextTabs) -> SessionView {
     let view = text.text();
     let mode = match text.showing() {

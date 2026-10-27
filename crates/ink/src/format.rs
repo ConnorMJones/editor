@@ -156,6 +156,8 @@ pub fn background(out: &mut Vec<u8>, background: &Background) {
             });
             f32s(out, &[spacing.get()]);
         }
+        // A drawing over a PDF is saved into the PDF; `State.pdfs` never writes one as `.pdt`.
+        Background::Pdf { .. } => unreachable!("a PDF's pages are not written to a .pdt"),
     }
 }
 

@@ -9,6 +9,7 @@ mod git;
 mod harness;
 mod loading;
 mod mouse;
+mod pdf;
 mod rendered;
 mod session;
 mod tabs;

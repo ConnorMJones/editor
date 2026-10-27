@@ -1,5 +1,6 @@
 //! Keys on a focused drawing, and undo and redo there.
 
+use ink::doc::ChangeError;
 use ink::doc::{
     Board, Drawing, Layer, LayerChange, LayerIndex, LayerName, Mark, MarkId, PageIndex, Paged,
     PagedChange, ShapeKind, Visibility,
@@ -12,11 +13,11 @@ use model::command::{
 };
 use model::mode::Mode;
 use model::notice::Notice;
-use model::sheet::StackEdit;
+use model::sheet::{Measure, SheetView, Stack, StackEdit};
 
 use crate::State;
 use crate::drawing::typing::{self, Ended};
-use crate::drawing::{BoardTab, Doing, Hand, InkFile, InkTabs, PagedId, PagedTab};
+use crate::drawing::{BoardTab, Doing, Hand, InkFile, InkTabs, PagedId, PagedTab, PdfMode, PdfTab};
 use crate::view::layout::Layout;
 use crate::view::tab::Tab;
 
@@ -40,6 +41,7 @@ pub fn command(state: &mut State, command: DrawingCommand) {
         layout,
         pageds,
         boards,
+        pdfs,
         notice,
         input,
         fonts,
@@ -53,6 +55,10 @@ pub fn command(state: &mut State, command: DrawingCommand) {
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             let file = &mut boards[tab.file()];
             board(tab, file, command, fonts)
+        }
+        Some(Tab::Ink(InkTabs::Pdf(tab))) => {
+            let file = &mut pdfs[tab.file()];
+            pdf(tab, file, command, fonts)
         }
         Some(Tab::Text(_) | Tab::Image(_)) | None => Err(Notice::NotADrawing),
     };
@@ -73,6 +79,7 @@ fn paged(
     match command {
         DrawingCommand::Page(page) => pages(tab, file, page),
         DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command, fonts),
+        DrawingCommand::Read => Err(Notice::NotAPdf),
     }
 }
 
@@ -85,6 +92,7 @@ fn board(
     match command {
         DrawingCommand::Page(_) => Err(Notice::BoardHasNoPages),
         DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command, fonts),
+        DrawingCommand::Read => Err(Notice::NotAPdf),
     }
 }
 
@@ -96,15 +104,12 @@ fn pages(
     let focus = tab.view.centre.page;
     match command {
         PageCommand::Go(step) => {
-            let stack = file.edited.drawing().stack();
-            let page = match step {
-                PageStep::Next => PageIndex(focus.0 + 1),
-                PageStep::Previous => PageIndex(focus.0.saturating_sub(1)),
-                PageStep::First => PageIndex(0),
-                PageStep::Last => stack.last(),
-            };
-            tab.view
-                .go_to(stack, page, tab.hand.last.map(|measure| measure.viewport));
+            go(
+                &mut tab.view,
+                file.edited.drawing().stack(),
+                step,
+                tab.hand.last,
+            );
             Ok(After::Nothing)
         }
         PageCommand::Insert(side) => {
@@ -126,6 +131,51 @@ fn pages(
             PagedChange::RemovePage(focus),
             StackEdit::Removed(focus),
         ),
+    }
+}
+
+fn go(view: &mut SheetView, stack: &Stack, step: PageStep, last: Option<Measure>) {
+    let focus = view.centre.page;
+    let page = match step {
+        PageStep::Next => PageIndex(focus.0 + 1),
+        PageStep::Previous => PageIndex(focus.0.saturating_sub(1)),
+        PageStep::First => PageIndex(0),
+        PageStep::Last => stack.last(),
+    };
+    view.go_to(stack, page, last.map(|measure| measure.viewport));
+}
+
+fn pdf(
+    tab: &mut PdfTab,
+    file: &mut InkFile<Paged>,
+    command: DrawingCommand,
+    fonts: &Fonts,
+) -> Result<After, Notice> {
+    match command {
+        DrawingCommand::Page(PageCommand::Go(step)) => {
+            go(
+                &mut tab.view,
+                file.edited.drawing().stack(),
+                step,
+                tab.hand.last,
+            );
+            Ok(After::Nothing)
+        }
+        DrawingCommand::Page(PageCommand::Insert(_) | PageCommand::Remove) => {
+            Err(Notice::DrawingRefused {
+                reason: ChangeError::PdfPages.to_string(),
+            })
+        }
+        DrawingCommand::Ink(command) => {
+            tab.mode = PdfMode::Markup;
+            ink(&mut tab.hand, file, command, fonts)
+        }
+        DrawingCommand::Read => {
+            let ended = typing::finish(&mut tab.hand.doing, file, fonts);
+            tab.hand.cancel_stroke();
+            tab.mode = PdfMode::Read;
+            ended.map(After::of)
+        }
     }
 }
 
@@ -263,6 +313,7 @@ pub fn step(state: &mut State, step: Step) {
         layout,
         pageds,
         boards,
+        pdfs,
         notice,
         ..
     } = state;
@@ -274,6 +325,10 @@ pub fn step(state: &mut State, step: Step) {
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             tab.hand.cancel_stroke();
             history(&mut boards[tab.file()], step)
+        }
+        Some(Tab::Ink(InkTabs::Pdf(tab))) => {
+            tab.hand.cancel_stroke();
+            history(&mut pdfs[tab.file()], step)
         }
         Some(Tab::Image(_)) => Err(Notice::ReadOnly),
         Some(Tab::Text(_)) | None => Err(Notice::NotADrawing),

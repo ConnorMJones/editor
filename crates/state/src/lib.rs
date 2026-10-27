@@ -170,6 +170,7 @@ pub struct State {
     /// Open paged documents and boards, as text has `buffers`.
     pub pageds: drawing::PagedFiles,
     pub boards: drawing::BoardFiles,
+    pub pdfs: drawing::PdfFiles,
     pub images: viewer::ImageFiles,
     /// What new ink tabs draw with.
     pub ink: drawing::InkSettings,
@@ -236,6 +237,7 @@ impl State {
             compiles: Compiles::new(),
             pageds: SlotMap::with_key(),
             boards: SlotMap::with_key(),
+            pdfs: SlotMap::with_key(),
             images: SlotMap::with_key(),
             ink: drawing::InkSettings::default(),
         })
@@ -246,6 +248,7 @@ impl State {
         (self.buffers.keys().map(Opened::Text))
             .chain(self.pageds.keys().map(Opened::Paged))
             .chain(self.boards.keys().map(Opened::Board))
+            .chain(self.pdfs.keys().map(Opened::Pdf))
             .chain(self.images.keys().map(Opened::Image))
     }
 
@@ -255,6 +258,7 @@ impl State {
             Opened::Text(buffer) => self.buffers[buffer].disk,
             Opened::Paged(id) => self.pageds[id].disk,
             Opened::Board(id) => self.boards[id].disk,
+            Opened::Pdf(id) => self.pdfs[id].disk,
             Opened::Image(id) => self.images[id].disk,
         }
     }
@@ -265,6 +269,7 @@ impl State {
             Opened::Text(buffer) => self.buffers[buffer].doc.is_modified(),
             Opened::Paged(id) => self.pageds[id].is_modified(),
             Opened::Board(id) => self.boards[id].is_modified(),
+            Opened::Pdf(id) => self.pdfs[id].is_modified(),
             // Images are only viewed.
             Opened::Image(_) => false,
         }
@@ -275,6 +280,7 @@ impl State {
             Opened::Text(buffer) => &self.buffers[buffer].path,
             Opened::Paged(id) => &self.pageds[id].path,
             Opened::Board(id) => &self.boards[id].path,
+            Opened::Pdf(id) => &self.pdfs[id].path,
             Opened::Image(id) => &self.images[id].path,
         }
     }
@@ -295,6 +301,9 @@ impl State {
             Opened::Board(id) => {
                 self.boards.remove(id);
             }
+            Opened::Pdf(id) => {
+                self.pdfs.remove(id);
+            }
             Opened::Image(id) => {
                 self.images.remove(id);
             }
@@ -307,6 +316,7 @@ impl State {
             Opened::Text(buffer) => job::Reload::Text(buffer),
             Opened::Paged(id) => job::Reload::Paged(id, self.fonts.clone()),
             Opened::Board(id) => job::Reload::Board(id, self.fonts.clone()),
+            Opened::Pdf(id) => job::Reload::Pdf(id),
             Opened::Image(id) => job::Reload::Image(id, self.images[id].encoding),
         }
     }

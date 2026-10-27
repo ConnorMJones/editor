@@ -100,6 +100,7 @@ vault; `![[note]]` shows a box naming the resolved note that opens it when click
 The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
 Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
 Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
+PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg` / `ge` move through them. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
 
 | Keys | Context | Action |
 | --- | --- | --- |
@@ -996,11 +997,6 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | `t r` | `Drawing(Ink(Tool(Rectangle)))` |
 | `t o` | `Drawing(Ink(Tool(Ellipse)))` |
 | `t t` | `Drawing(Ink(Tool(Text)))` |
-| `space p` | `PasteImage` |
-| `d d` | `Drawing(Ink(DeletePicked))` |
-| `del` | `Drawing(Ink(DeletePicked))` |
-| `u` | `Undo` |
-| `U` | `Redo` |
 | `p n` | `Drawing(Page(Go(Next)))` |
 | `p p` | `Drawing(Page(Go(Previous)))` |
 | `g g` | `Drawing(Page(Go(First)))` |
@@ -1008,6 +1004,11 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | `p o` | `Drawing(Page(Insert(Below)))` |
 | `p O` | `Drawing(Page(Insert(Above)))` |
 | `p d` | `Drawing(Page(Remove))` |
+| `space p` | `PasteImage` |
+| `d d` | `Drawing(Ink(DeletePicked))` |
+| `del` | `Drawing(Ink(DeletePicked))` |
+| `u` | `Undo` |
+| `U` | `Redo` |
 | `] l` | `Drawing(Ink(Layer(Forward)))` |
 | `[ l` | `Drawing(Ink(Layer(Backward)))` |
 | `space l h` | `Drawing(Ink(ToggleLayer))` |
@@ -1300,6 +1301,150 @@ Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to th
 | `g t` | `Move(Window(Top))` |
 | `g c` | `Move(Window(Center))` |
 | `g b` | `Move(Window(Bottom))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space i` | `Picker(Open(Images))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |
+
+## PdfRead
+
+| Keys | Command |
+| --- | --- |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `b` | `Drawing(Ink(Tool(Brush)))` |
+| `e` | `Drawing(Ink(Tool(Eraser)))` |
+| `s` | `Drawing(Ink(Tool(BoxSelect)))` |
+| `S` | `Drawing(Ink(Tool(LassoSelect)))` |
+| `t l` | `Drawing(Ink(Tool(Line)))` |
+| `t a` | `Drawing(Ink(Tool(Arrow)))` |
+| `t r` | `Drawing(Ink(Tool(Rectangle)))` |
+| `t o` | `Drawing(Ink(Tool(Ellipse)))` |
+| `t t` | `Drawing(Ink(Tool(Text)))` |
+| `p n` | `Drawing(Page(Go(Next)))` |
+| `p p` | `Drawing(Page(Go(Previous)))` |
+| `g g` | `Drawing(Page(Go(First)))` |
+| `g e` | `Drawing(Page(Go(Last)))` |
+| `+` | `View(Zoom(In))` |
+| `-` | `View(Zoom(Out))` |
+| `=` | `View(Zoom(Reset))` |
+| `z f` | `View(Fit)` |
+| `h` | `View(Pan(Left))` |
+| `left` | `View(Pan(Left))` |
+| `l` | `View(Pan(Right))` |
+| `right` | `View(Pan(Right))` |
+| `k` | `View(Pan(Up))` |
+| `up` | `View(Pan(Up))` |
+| `j` | `View(Pan(Down))` |
+| `down` | `View(Pan(Down))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space i` | `Picker(Open(Images))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |
+
+## PdfMarkup
+
+| Keys | Command |
+| --- | --- |
+| `esc` | `Drawing(Read)` |
+| `b` | `Drawing(Ink(Tool(Brush)))` |
+| `e` | `Drawing(Ink(Tool(Eraser)))` |
+| `s` | `Drawing(Ink(Tool(BoxSelect)))` |
+| `S` | `Drawing(Ink(Tool(LassoSelect)))` |
+| `t l` | `Drawing(Ink(Tool(Line)))` |
+| `t a` | `Drawing(Ink(Tool(Arrow)))` |
+| `t r` | `Drawing(Ink(Tool(Rectangle)))` |
+| `t o` | `Drawing(Ink(Tool(Ellipse)))` |
+| `t t` | `Drawing(Ink(Tool(Text)))` |
+| `p n` | `Drawing(Page(Go(Next)))` |
+| `p p` | `Drawing(Page(Go(Previous)))` |
+| `g g` | `Drawing(Page(Go(First)))` |
+| `g e` | `Drawing(Page(Go(Last)))` |
+| `space p` | `PasteImage` |
+| `d d` | `Drawing(Ink(DeletePicked))` |
+| `del` | `Drawing(Ink(DeletePicked))` |
+| `u` | `Undo` |
+| `U` | `Redo` |
+| `] l` | `Drawing(Ink(Layer(Forward)))` |
+| `[ l` | `Drawing(Ink(Layer(Backward)))` |
+| `space l h` | `Drawing(Ink(ToggleLayer))` |
+| `space l n` | `Drawing(Ink(NewLayer))` |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `+` | `View(Zoom(In))` |
+| `-` | `View(Zoom(Out))` |
+| `=` | `View(Zoom(Reset))` |
+| `z f` | `View(Fit)` |
+| `h` | `View(Pan(Left))` |
+| `left` | `View(Pan(Left))` |
+| `l` | `View(Pan(Right))` |
+| `right` | `View(Pan(Right))` |
+| `k` | `View(Pan(Up))` |
+| `up` | `View(Pan(Up))` |
+| `j` | `View(Pan(Down))` |
+| `down` | `View(Pan(Down))` |
 | `space e` | `Tree(Toggle)` |
 | `space f` | `Picker(Open(Files))` |
 | `space i` | `Picker(Open(Images))` |

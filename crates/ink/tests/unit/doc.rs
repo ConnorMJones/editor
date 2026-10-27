@@ -208,3 +208,48 @@ fn an_arrow_head_keeps_its_size_however_long_the_arrow() {
     assert!((head_reach(10.0, 2.0) - short).abs() < 1e-3);
     assert_eq!(head_reach(0.0, 2.0), 0.0);
 }
+
+/// Two blank PDF pages, 200 by 100 and 100 by 300 points.
+fn two_page_pdf() -> std::sync::Arc<reader::pdf::Document> {
+    let mut writer = krilla::Document::new();
+    for (width, height) in [(200.0, 100.0), (100.0, 300.0)] {
+        writer.start_page_with(krilla::page::PageSettings::from_wh(width, height).unwrap());
+    }
+    let bytes: std::sync::Arc<[u8]> = writer.finish().unwrap().into();
+    std::sync::Arc::new(reader::pdf::Document::open(bytes).unwrap())
+}
+
+#[test]
+fn a_drawing_over_a_pdf_has_its_pages_and_keeps_them() {
+    use ink::doc::{
+        Background, ChangeError, Drawing, PageIndex, PageSize, Paged, PagedChange, Underlay,
+    };
+    let mut paged = Paged::over_pdf(two_page_pdf());
+    assert!(matches!(paged.underlay(), Underlay::Pdf(_)));
+    let backgrounds: Vec<Background> = paged.pages().iter().map(|page| page.background).collect();
+    assert_eq!(
+        backgrounds,
+        [Background::Pdf { page: 0 }, Background::Pdf { page: 1 }]
+    );
+    assert_eq!(paged.stack().sizes()[1].height.get(), 300.0);
+    let insert = PagedChange::InsertPage {
+        at: PageIndex(1),
+        size: PageSize::A4,
+        background: Background::Plain(model::color::Rgb::hex(0xffffff)),
+    };
+    assert!(matches!(paged.apply(insert), Err(ChangeError::PdfPages)));
+    assert!(matches!(
+        paged.apply(PagedChange::RemovePage(PageIndex(0))),
+        Err(ChangeError::PdfPages)
+    ));
+    let mut blank = Paged::new(
+        PageSize::A4,
+        Background::Plain(model::color::Rgb::hex(0xffffff)),
+    );
+    let pdf_page = PagedChange::InsertPage {
+        at: PageIndex(1),
+        size: PageSize::A4,
+        background: Background::Pdf { page: 0 },
+    };
+    assert!(matches!(blank.apply(pdf_page), Err(ChangeError::PdfPages)));
+}

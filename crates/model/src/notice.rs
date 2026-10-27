@@ -40,6 +40,7 @@ pub enum Notice {
         path: PathBuf,
     },
     NotADrawing,
+    NotAPdf,
     /// Images go into drawings and notes only.
     NoImagesHere,
     NoImageOnClipboard,
@@ -224,6 +225,7 @@ impl std::fmt::Display for Notice {
             Notice::WrongExtension { path } => {
                 write!(f, "{} names another kind of file", path.display())
             }
+            Notice::NotAPdf => f.write_str("only a PDF is read rather than drawn on"),
             Notice::NotADrawing => f.write_str("not a drawing"),
             Notice::NoImagesHere => f.write_str("images go into drawings and notes"),
             Notice::OffThePages => f.write_str("drop images onto a page"),

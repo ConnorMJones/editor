@@ -121,6 +121,7 @@ impl Workspace {
                 Opened::Text(buffer) => ("tab-text", "tab-close-text", buffer.data().as_ffi()),
                 Opened::Paged(id) => ("tab-paged", "tab-close-paged", id.data().as_ffi()),
                 Opened::Board(id) => ("tab-board", "tab-close-board", id.data().as_ffi()),
+                Opened::Pdf(id) => ("tab-pdf", "tab-close-pdf", id.data().as_ffi()),
                 Opened::Image(id) => ("tab-image", "tab-close-image", id.data().as_ffi()),
             };
             let close = div()

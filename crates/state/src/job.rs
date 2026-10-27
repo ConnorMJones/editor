@@ -18,7 +18,7 @@ use model::picture::Encoding;
 use model::sheet::Stack;
 
 use crate::drawing::embed::{self, Destination};
-use crate::drawing::{BoardId, PagedId};
+use crate::drawing::{BoardId, PagedId, PdfId};
 use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
@@ -34,6 +34,7 @@ use crate::view::tab::Opened;
 use crate::viewer::{self, ImageId, ProbeError, Probed};
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 use ink::history::Revision;
+use reader::pdf::{Document, PdfError};
 
 /// Blocking work run off the UI thread.
 pub enum Job {
@@ -335,6 +336,10 @@ pub enum OpenRead {
         drawing: Board,
         disk: Disk,
     },
+    Pdf {
+        drawing: Paged,
+        disk: Disk,
+    },
     Image {
         encoding: Encoding,
         stack: Stack,
@@ -346,50 +351,47 @@ pub enum OpenRead {
     Unreadable(Unreadable),
 }
 
-/// Bytes that aren't the file kind their name says.
 #[derive(Debug, thiserror::Error)]
 pub enum Unreadable {
     #[error(transparent)]
     Drawing(#[from] FormatError),
     #[error(transparent)]
     Image(#[from] ProbeError),
+    #[error(transparent)]
+    Pdf(#[from] PdfError),
 }
 
-/// A file to read again, with what reading it as its kind needs.
 #[derive(Clone, Debug)]
 pub enum Reload {
     Text(BufferId),
     Paged(PagedId, Fonts),
     Board(BoardId, Fonts),
+    Pdf(PdfId),
     Image(ImageId, Encoding),
 }
 
-/// A file read again, as its own kind.
 pub enum Reloaded {
     Text(BufferId, DiskRead<Rope, NotUtf8>),
     Paged(PagedId, DiskRead<Paged, FormatError>),
     Board(BoardId, DiskRead<Board, FormatError>),
+    Pdf(PdfId, DiskRead<Paged, PdfError>),
     Image(ImageId, DiskRead<PageSize, ProbeError>),
 }
 
-/// What reading a file again found; `E` is why its bytes weren't its kind.
 pub enum DiskRead<T, E> {
     Changed { content: T, mtime: SystemTime },
     Unreadable(E),
     Missed(Missed),
 }
 
-/// A read that found nothing to load.
 pub enum Missed {
     Unchanged,
     Missing,
     Failed(io::Error),
 }
 
-/// Bytes that aren't UTF-8, where text was expected.
 pub struct NotUtf8;
 
-/// `path` read again unless `when` says it hasn't changed, and parsed with `parse`.
 fn read_again<T, E>(
     path: &Path,
     when: ReloadIf,
@@ -536,6 +538,13 @@ pub fn run(job: Job) -> JobResult {
                 Reload::Board(id, fonts) => Reloaded::Board(
                     id,
                     read_again(&path, when, |bytes| ink::format::read_board(&bytes, &fonts)),
+                ),
+                Reload::Pdf(id) => Reloaded::Pdf(
+                    id,
+                    read_again(&path, when, |bytes| {
+                        Document::open(bytes.into())
+                            .map(|document| Paged::over_pdf(Arc::new(document)))
+                    }),
                 ),
                 Reload::Image(id, encoding) => Reloaded::Image(
                     id,
@@ -798,6 +807,17 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts) -> OpenRead {
             || Board::new(crate::drawing::PAPER),
             |drawing, disk| OpenRead::Board { drawing, disk },
         ),
+        FileKind::Pdf => match (std::fs::read(path), modified(path)) {
+            (Ok(bytes), Ok(mtime)) => match Document::open(bytes.into()) {
+                Ok(document) => OpenRead::Pdf {
+                    drawing: Paged::over_pdf(Arc::new(document)),
+                    disk: Disk::Synced { mtime },
+                },
+                Err(error) => OpenRead::Unreadable(error.into()),
+            },
+            (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
+            (Err(error), _) | (Ok(_), Err(error)) => OpenRead::Failed(error),
+        },
         FileKind::Image(encoding) => match viewer::read(path, encoding) {
             Ok(Probed { size, modified }) => OpenRead::Image {
                 encoding,
@@ -810,7 +830,6 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts) -> OpenRead {
     }
 }
 
-/// A drawing's file, read with `read`; a missing file starts as `blank`.
 fn read_drawing<D>(
     path: &Path,
     read: impl FnOnce(&[u8]) -> Result<D, FormatError>,

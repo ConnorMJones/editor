@@ -11,7 +11,6 @@ use crate::drawing::InkTabs;
 use crate::view::layout::PaneId;
 use crate::view::tab::{ShowingMut, Tab};
 
-/// One key's pan, as a part of the pane.
 pub const PAN_STEP: f32 = 0.125;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,7 +19,6 @@ pub enum Wheel {
     Zoom { at: Point<Pane>, factor: f32 },
 }
 
-/// A tab's view with what it looks at, and the pane as last drawn.
 pub enum Viewed<'a> {
     Pages {
         view: &'a mut SheetView,
@@ -33,11 +31,11 @@ pub enum Viewed<'a> {
     },
 }
 
-/// `pane`'s tab as a view; `None` for text, and for typst pages before their first compile.
 pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
     let State {
         layout,
         pageds,
+        pdfs,
         compiles,
         images,
         ..
@@ -45,6 +43,11 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
     match layout.find_pane(pane)?.active_mut()? {
         Tab::Ink(InkTabs::Paged(tab)) => Some(Viewed::Pages {
             stack: pageds[tab.file()].edited.drawing().stack(),
+            view: &mut tab.view,
+            last: &mut tab.hand.last,
+        }),
+        Tab::Ink(InkTabs::Pdf(tab)) => Some(Viewed::Pages {
+            stack: pdfs[tab.file()].edited.drawing().stack(),
             view: &mut tab.view,
             last: &mut tab.hand.last,
         }),
@@ -68,7 +71,6 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
     }
 }
 
-/// The host drew `pane` at `measure`.
 pub fn measured(state: &mut State, pane: PaneId, measure: Measure) {
     match viewed(state, pane) {
         Some(Viewed::Pages { last, .. } | Viewed::Plane { last, .. }) => *last = Some(measure),
@@ -76,7 +78,6 @@ pub fn measured(state: &mut State, pane: PaneId, measure: Measure) {
     }
 }
 
-/// The wheel moved or zoomed `pane`, drawn at `viewport`.
 pub fn wheeled(state: &mut State, pane: PaneId, wheel: Wheel, viewport: Viewport) {
     match (viewed(state, pane), wheel) {
         (Some(Viewed::Pages { view, stack, .. }), Wheel::Pan(by)) => view.pan(stack, viewport, by),

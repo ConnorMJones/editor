@@ -10,7 +10,6 @@ use model::config::OpenAs;
 use model::notice::Notice;
 
 use ink::doc::Drawing;
-use ink::format::FormatError;
 
 use super::map_views;
 use crate::drawing::{InkFile, InkTabs};
@@ -130,7 +129,7 @@ pub fn write_modified(state: &mut State, out: &mut Vec<Effect>) -> Vec<Opened> {
 pub fn reload_job(state: &mut State, opened: Opened) -> Job {
     match opened {
         Opened::Text(id) => state.buffers[id].doc.commit(&state.layout.selection_of(id)),
-        Opened::Paged(_) | Opened::Board(_) | Opened::Image(_) => {}
+        Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_) => {}
     }
     Job::Reload {
         file: state.reload_of(opened),
@@ -179,6 +178,9 @@ fn open_file(state: &State, path: &Path) -> Option<Opened> {
         FileKind::Board => (state.boards.iter())
             .find(|(_, file)| file.path == path)
             .map(|(id, _)| Opened::Board(id)),
+        FileKind::Pdf => (state.pdfs.iter())
+            .find(|(_, file)| file.path == path)
+            .map(|(id, _)| Opened::Pdf(id)),
         FileKind::Image(_) => (state.images.iter())
             .find(|(_, file)| *file.path == *path)
             .map(|(id, _)| Opened::Image(id)),
@@ -209,6 +211,9 @@ fn insert(
         )),
         OpenRead::Board { drawing, disk } => Ok(Opened::Board(
             state.boards.insert(InkFile::new(path, drawing, disk)),
+        )),
+        OpenRead::Pdf { drawing, disk } => Ok(Opened::Pdf(
+            state.pdfs.insert(InkFile::new(path, drawing, disk)),
         )),
         OpenRead::Image {
             encoding,
@@ -303,7 +308,8 @@ fn show(state: &mut State, opened: Opened, waiter: Waiter) {
     panes::show(state, pane, opened, arrive, open);
     match (to, opened) {
         (Some(to), Opened::Text(buffer)) => place(state, pane, buffer, to),
-        (Some(_), Opened::Paged(_) | Opened::Board(_) | Opened::Image(_)) | (None, _) => {}
+        (Some(_), Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_))
+        | (None, _) => {}
     }
 }
 
@@ -435,6 +441,7 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
         buffers,
         pageds,
         boards,
+        pdfs,
         images,
         layout,
         languages,
@@ -486,6 +493,17 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
             },
             None => {}
         },
+        Reloaded::Pdf(id, read) => match pdfs.get_mut(id) {
+            Some(file) => match drawing_reloaded(file, read, policy, notice) {
+                Drawn::Replaced => {
+                    for tab in drawing_tabs(layout, Opened::Pdf(id)) {
+                        tab.cancel_strokes()
+                    }
+                }
+                Drawn::Kept => {}
+            },
+            None => {}
+        },
         Reloaded::Board(id, read) => match boards.get_mut(id) {
             Some(file) => match drawing_reloaded(file, read, policy, notice) {
                 Drawn::Replaced => {
@@ -526,9 +544,9 @@ enum Drawn {
     Kept,
 }
 
-fn drawing_reloaded<D: Drawing>(
+fn drawing_reloaded<D: Drawing, E: std::fmt::Display>(
     file: &mut InkFile<D>,
-    read: DiskRead<D, FormatError>,
+    read: DiskRead<D, E>,
     policy: ReloadPolicy,
     notice: &mut Option<Notice>,
 ) -> Drawn {
@@ -619,9 +637,18 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
             entry.path = path;
             entry.disk = Disk::New;
         }
-        (Writable::Text(_), FileKind::Paged | FileKind::Board | FileKind::Image(_))
-        | (Writable::Paged(_), FileKind::Text(_) | FileKind::Board | FileKind::Image(_))
-        | (Writable::Board(_), FileKind::Text(_) | FileKind::Paged | FileKind::Image(_)) => {
+        (
+            Writable::Text(_),
+            FileKind::Paged | FileKind::Board | FileKind::Pdf | FileKind::Image(_),
+        )
+        | (
+            Writable::Paged(_),
+            FileKind::Text(_) | FileKind::Board | FileKind::Pdf | FileKind::Image(_),
+        )
+        | (
+            Writable::Board(_),
+            FileKind::Text(_) | FileKind::Paged | FileKind::Pdf | FileKind::Image(_),
+        ) => {
             return Err(Notice::WrongExtension { path });
         }
     }

@@ -1078,7 +1078,7 @@ const fn ink(ink: InkCommand) -> Command {
     Command::Drawing(DrawingCommand::Ink(ink))
 }
 
-const DRAWING: Bindings = &[
+const INK_TOOLS: Bindings = &[
     (&[Key::char('b')], tool(InkTool::Brush)),
     (&[Key::char('e')], tool(InkTool::Eraser)),
     (&[Key::char('s')], tool(InkTool::BoxSelect)),
@@ -1088,6 +1088,9 @@ const DRAWING: Bindings = &[
     (&[Key::char('t'), Key::char('r')], tool(InkTool::Rectangle)),
     (&[Key::char('t'), Key::char('o')], tool(InkTool::Ellipse)),
     (&[Key::char('t'), Key::char('t')], tool(InkTool::Text)),
+];
+
+const DRAWING: Bindings = &[
     (&[SPACE, Key::char('p')], Command::PasteImage),
     (
         &[Key::char('d'), Key::char('d')],
@@ -1096,31 +1099,6 @@ const DRAWING: Bindings = &[
     (&[Key::code(KeyCode::Delete)], ink(InkCommand::DeletePicked)),
     (&[Key::char('u')], Command::Undo),
     (&[Key::char('U')], Command::Redo),
-    (
-        &[Key::char('p'), Key::char('n')],
-        page(PageCommand::Go(PageStep::Next)),
-    ),
-    (
-        &[Key::char('p'), Key::char('p')],
-        page(PageCommand::Go(PageStep::Previous)),
-    ),
-    (
-        &[Key::char('g'), Key::char('g')],
-        page(PageCommand::Go(PageStep::First)),
-    ),
-    (
-        &[Key::char('g'), Key::char('e')],
-        page(PageCommand::Go(PageStep::Last)),
-    ),
-    (
-        &[Key::char('p'), Key::char('o')],
-        page(PageCommand::Insert(PageSide::Below)),
-    ),
-    (
-        &[Key::char('p'), Key::char('O')],
-        page(PageCommand::Insert(PageSide::Above)),
-    ),
-    (&[Key::char('p'), Key::char('d')], page(PageCommand::Remove)),
     (
         &[Key::char(']'), Key::char('l')],
         ink(InkCommand::Layer(Direction::Forward)),
@@ -1140,6 +1118,48 @@ const DRAWING: Bindings = &[
     (&[Key::char(':')], Command::CommandMode),
     (&SAVE_ALL, Command::WriteAll),
 ];
+
+const PAGE_GO: Bindings = &[
+    (
+        &[Key::char('p'), Key::char('n')],
+        page(PageCommand::Go(PageStep::Next)),
+    ),
+    (
+        &[Key::char('p'), Key::char('p')],
+        page(PageCommand::Go(PageStep::Previous)),
+    ),
+    (
+        &[Key::char('g'), Key::char('g')],
+        page(PageCommand::Go(PageStep::First)),
+    ),
+    (
+        &[Key::char('g'), Key::char('e')],
+        page(PageCommand::Go(PageStep::Last)),
+    ),
+];
+
+const PAGE_EDIT: Bindings = &[
+    (
+        &[Key::char('p'), Key::char('o')],
+        page(PageCommand::Insert(PageSide::Below)),
+    ),
+    (
+        &[Key::char('p'), Key::char('O')],
+        page(PageCommand::Insert(PageSide::Above)),
+    ),
+    (&[Key::char('p'), Key::char('d')], page(PageCommand::Remove)),
+];
+
+/// A PDF being read; a tool key starts marking it up.
+const PDF_READ: Bindings = &[
+    (&[Key::char(':')], Command::CommandMode),
+    (&SAVE_ALL, Command::WriteAll),
+];
+
+const PDF_MARKUP: Bindings = &[(
+    &[Key::code(KeyCode::Esc)],
+    Command::Drawing(DrawingCommand::Read),
+)];
 
 pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
@@ -1196,6 +1216,9 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         GOTO_BUFFER,
     ],
     &[
+        INK_TOOLS,
+        PAGE_GO,
+        PAGE_EDIT,
         DRAWING,
         SHEET,
         SHEET_VERTICAL,
@@ -1218,6 +1241,29 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         COMMON,
         NORMAL,
         VIEW,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
+        PDF_READ,
+        INK_TOOLS,
+        PAGE_GO,
+        SHEET,
+        SHEET_VERTICAL,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
+        PDF_MARKUP,
+        INK_TOOLS,
+        PAGE_GO,
+        DRAWING,
+        SHEET,
+        SHEET_VERTICAL,
         WORKSPACE,
         WINDOW,
         SPACE_WINDOW,

@@ -15,11 +15,10 @@ use crate::State;
 use crate::drawing::command::commit;
 use crate::drawing::frame::{self, Landed};
 use crate::drawing::typing::{self, Ended};
-use crate::drawing::{Doing, Gesture, Hand, InkFile, InkTabs, Pen};
+use crate::drawing::{Doing, Gesture, Hand, InkFile, InkTabs, PdfMode, Pen};
 use crate::view::layout::PaneId;
 use crate::view::tab::Tab;
 
-/// One reading as the host saw it, on the pane drawn at `viewport`; `time` is the host's clock.
 #[derive(Clone, Copy, Debug)]
 pub struct PenSample {
     pub at: Point<Pane>,
@@ -37,14 +36,12 @@ pub enum PenPhase {
     Cancel,
 }
 
-/// Which end of the pen; a mouse is the tip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stylus {
     Tip,
     Eraser,
 }
 
-/// Pen input on `pane`; a stroke starting there focuses it.
 pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) {
     match phase {
         PenPhase::Down(_) => match state.layout.set_focus(pane) {
@@ -58,6 +55,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
         layout,
         pageds,
         boards,
+        pdfs,
         notice,
         input,
         fonts,
@@ -78,6 +76,22 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                 |paged, layer| frame::paged(paged, &view, viewport).land::<Paged>(at, layer),
             )
         }
+        Some(Tab::Ink(InkTabs::Pdf(tab))) => match tab.mode {
+            PdfMode::Markup => {
+                let view = tab.view;
+                let file = &mut pdfs[tab.file()];
+                on(
+                    &mut tab.hand,
+                    file,
+                    phase,
+                    sample,
+                    fonts,
+                    &mut input.mode,
+                    |paged, layer| frame::paged(paged, &view, viewport).land::<Paged>(at, layer),
+                )
+            }
+            PdfMode::Read => Ok(()),
+        },
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             let view = tab.view;
             let file = &mut boards[tab.file()];
@@ -99,7 +113,6 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
     }
 }
 
-/// `land` finds where a pen-down lands; it runs only for `Down`.
 fn on<D: Drawing>(
     hand: &mut Hand<D::Target>,
     file: &mut InkFile<D>,
@@ -111,8 +124,6 @@ fn on<D: Drawing>(
 ) -> Result<(), Notice> {
     let drawing = file.edited.drawing();
     let outcome = match (phase, &mut hand.doing) {
-        // A press on the text being typed moves its cursor; anywhere else ends the typing,
-        // picking the text, and does nothing more.
         (PenPhase::Down(_), Doing::Typing(open)) => {
             match land(drawing, hand.layer) {
                 Some(landed)
@@ -141,7 +152,6 @@ fn on<D: Drawing>(
                 Some(Visibility::Hidden) => return Err(Notice::LayerHidden),
                 None => return Err(Notice::NoLayer),
             }
-            // A stroke starting off every page draws nothing.
             let Some(landed) = land(drawing, hand.layer) else {
                 return Ok(());
             };
@@ -214,7 +224,6 @@ fn on<D: Drawing>(
     }
 }
 
-/// `sample` on the gesture's surface, timed from its start.
 fn surface(gesture: &Gesture, sample: PenSample) -> Sample<Surface> {
     Sample {
         at: gesture.onto.apply(sample.at),

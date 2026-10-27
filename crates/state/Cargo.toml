@@ -22,6 +22,7 @@ ignore.workspace = true
 imara-diff.workspace = true
 export.workspace = true
 ink.workspace = true
+reader.workspace = true
 model.workspace = true
 serde.workspace = true
 notify.workspace = true

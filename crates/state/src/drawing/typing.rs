@@ -21,14 +21,12 @@ pub struct Open<T> {
     pub text: TextBox,
 }
 
-/// Whether finishing adds a mark or replaces the one being edited, which is hidden meanwhile.
 #[derive(Clone, Debug)]
 pub enum Writing {
     New,
     Replacing(TextMark),
 }
 
-/// Text being typed, where it sits and how it looks, and its layout as of `laid_version`.
 pub struct TextBox {
     pub doc: TextDoc,
     pub selection: Selection,
@@ -37,7 +35,6 @@ pub struct TextBox {
     pub wrap: Wrap,
     pub paint: Paint,
     pub laid: Laid,
-    /// The `TextDoc::version` `laid` was laid out from.
     pub laid_version: u64,
 }
 
@@ -83,7 +80,6 @@ impl TextBox {
     }
 }
 
-/// Text to type where the text tool asked: new text in the hand's style, or a text mark's.
 pub fn open<T>(at: TypeAt<T>, style: &TextStyle, paint: Paint, fonts: &Fonts) -> Open<T> {
     match at {
         TypeAt::New { target, at, wrap } => Open {
@@ -106,8 +102,6 @@ pub fn open<T>(at: TypeAt<T>, style: &TextStyle, paint: Paint, fonts: &Fonts) ->
     }
 }
 
-/// Ends the text being typed, if any: blank text adds nothing and removes the mark it edited, and
-/// changed text becomes one step of the drawing's history.
 pub fn finish<D: Drawing>(
     doing: &mut Doing<D::Target>,
     file: &mut InkFile<D>,
@@ -130,8 +124,6 @@ pub fn finish<D: Drawing>(
     })
 }
 
-/// Commits the text as typed so far as one step, leaving it open; `writing` then names the
-/// mark the drawing holds for it.
 pub fn settle<D: Drawing>(
     open: &mut Open<D::Target>,
     file: &mut InkFile<D>,
@@ -182,7 +174,6 @@ pub fn settle<D: Drawing>(
     Ok(())
 }
 
-/// Settles the text typed on every tab showing a file `which` takes, so a write holds it.
 pub fn settle_on(state: &mut State, which: impl Fn(Opened) -> bool) -> Result<(), Notice> {
     let State {
         layout,
@@ -232,7 +223,6 @@ pub fn rewrap<D: Drawing>(
     Ok(Picked::Text(rewrapped))
 }
 
-/// Lays out again each text being typed whose doc changed since.
 pub fn sync(state: &mut State) {
     let State { layout, fonts, .. } = state;
     let boxes = (layout.panes_mut())
@@ -248,11 +238,11 @@ pub fn sync(state: &mut State) {
 }
 
 impl InkTabs {
-    /// The text the tab is typing, if any.
     pub fn text_box(&mut self) -> Option<&mut TextBox> {
         match self {
             InkTabs::Paged(tab) => tab.hand.doing.text_box(),
             InkTabs::Board(tab) => tab.hand.doing.text_box(),
+            InkTabs::Pdf(tab) => tab.hand.doing.text_box(),
         }
     }
 }
@@ -260,9 +250,7 @@ impl InkTabs {
 #[derive(Clone, Debug)]
 pub enum Ended<T> {
     NothingOpen,
-    /// The text was blank: nothing was added, and the mark it edited is gone.
     Dropped,
-    /// The text stands as the mark `picked` holds.
     Kept {
         target: T,
         picked: Picked,
@@ -274,6 +262,7 @@ impl InkTabs {
         match self {
             InkTabs::Paged(tab) => tab.hand.doing.typed(),
             InkTabs::Board(tab) => tab.hand.doing.typed(),
+            InkTabs::Pdf(tab) => tab.hand.doing.typed(),
         }
     }
 }
