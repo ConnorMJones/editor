@@ -10,8 +10,9 @@ workspace = true
 
 [dependencies]
 hayro.workspace = true
+kurbo.workspace = true
 model.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-krilla.workspace = true
+krilla = { workspace = true, features = ["simple-text"] }

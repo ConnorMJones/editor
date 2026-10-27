@@ -14,6 +14,8 @@ use model::window::{Axis, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 
+use reader::pdf::Heading;
+
 use crate::project::path::RelPath;
 use crate::text::buffer::{BufferId, TextDoc};
 use crate::{Effect, Overlay, State};
@@ -38,6 +40,7 @@ pub enum Items {
     Commands,
     Grep(Grep),
     Backlinks(Referrers),
+    Outline(Vec<Heading>),
 }
 
 pub struct Grep {
@@ -83,6 +86,7 @@ impl Items {
             Items::Commands => PickerKind::Commands,
             Items::Grep(_) => PickerKind::Grep,
             Items::Backlinks(_) => PickerKind::Backlinks,
+            Items::Outline(_) => PickerKind::Outline,
         }
     }
 
@@ -94,6 +98,7 @@ impl Items {
             Items::Commands => PALETTE.len(),
             Items::Grep(grep) => grep.hits.len(),
             Items::Backlinks(referrers) => referrers.hits.len(),
+            Items::Outline(headings) => headings.len(),
         }
     }
 
@@ -111,6 +116,7 @@ impl Items {
             Items::Commands => PALETTE[index].0,
             Items::Grep(grep) => &grep.hits[index].text,
             Items::Backlinks(referrers) => referrers.hits[index].path.as_str(),
+            Items::Outline(headings) => &headings[index].title,
         }
     }
 }
@@ -136,7 +142,7 @@ pub fn filter(picker: &mut Picker, matcher: &mut Matcher, narrowing: Narrowing) 
         PickerKind::Files | PickerKind::Images | PickerKind::Backlinks => {
             matcher.config.set_match_paths()
         }
-        PickerKind::Buffers | PickerKind::Commands | PickerKind::Grep => {}
+        PickerKind::Buffers | PickerKind::Commands | PickerKind::Grep | PickerKind::Outline => {}
     }
     picker.cursor = 0;
     match picker.query.is_empty() {
@@ -347,6 +353,10 @@ pub static PALETTE: &[(&str, Command)] = &[
     ("render-toggle", Command::ToggleMode(Shown::Render)),
     ("mode-next", Command::CycleMode(Direction::Forward)),
     ("export-pdf", Command::Export(ExportAs::Pdf)),
+    (
+        "outline",
+        Command::Picker(PickerCommand::Open(PickerKind::Outline)),
+    ),
     ("export-svg", Command::Export(ExportAs::Svg)),
     ("export-png", Command::Export(ExportAs::Png)),
     (
@@ -417,7 +427,7 @@ pub fn preview_source(picker: &Picker) -> Option<PreviewSource<'_>> {
                 line: hit.line as usize,
             })
         }
-        Items::Commands => None,
+        Items::Commands | Items::Outline(_) => None,
     }
 }
 
@@ -460,7 +470,8 @@ pub fn grepped(
             | Items::Images(_)
             | Items::Buffers(_)
             | Items::Commands
-            | Items::Backlinks(_) => {}
+            | Items::Backlinks(_)
+            | Items::Outline(_) => {}
         },
         Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
     }

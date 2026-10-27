@@ -4,9 +4,14 @@ use gpui::{
     AnyElement, Context, Div, ElementId, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PenEvent, Pixels, ScrollWheelEvent, canvas, div, prelude::*, px,
 };
+use ink::doc::Underlay;
+use model::command::{Command, DrawingCommand};
 use model::window::Axis;
 use slotmap::Key as _;
+use state::apply;
+use state::drawing::frame;
 use state::drawing::pen::{PenPhase, Stylus};
+use state::drawing::{InkTabs, PdfMode, Reading};
 
 use state::view::layout::{Node, Pane, SplitPath};
 use state::view::mode;
@@ -67,6 +72,64 @@ impl Workspace {
                     pane,
                     part,
                 };
+                let popup = match target.and_then(Pane::active) {
+                    Some(Tab::Ink(InkTabs::Pdf(tab))) => match (&tab.mode, tab.hand.last) {
+                        (PdfMode::Read(Reading::Selected(span)), Some(measure)) => {
+                            let paged = self.state.pdfs[tab.file()].edited.drawing();
+                            let frame = frame::paged(paged, &tab.view, measure.viewport);
+                            let corner = match paged.underlay() {
+                                Underlay::Pdf(pdf) => (pdf.document.text(span.page.0))
+                                    .and_then(|text| text.chars.get(span.chars.start))
+                                    .map(|char| char.quad[3]),
+                                Underlay::Blank => None,
+                            };
+                            corner.zip(frame.on(span.page)).map(|(corner, shown)| {
+                                let at = shown.to_pane.apply(corner);
+                                let theme = &self.theme;
+                                let button = |label: &'static str, command: DrawingCommand| {
+                                    div()
+                                        .id(label)
+                                        .px(self.fonts.ui_size * 0.6)
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(hsla(theme.chrome.hover)))
+                                        .child(label)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                apply::apply(
+                                                    &mut this.state,
+                                                    Command::Drawing(command),
+                                                    &mut this.effects,
+                                                );
+                                                this.changed(cx);
+                                            }),
+                                        )
+                                };
+                                div()
+                                    .absolute()
+                                    .left(px(at.x))
+                                    .top(px(at.y) - self.fonts.ui_line * 1.4)
+                                    .h(self.fonts.ui_line * 1.2)
+                                    .flex()
+                                    .items_center()
+                                    .gap(self.fonts.ui_size * 0.2)
+                                    .px(self.fonts.ui_size * 0.2)
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(hsla(theme.chrome.border))
+                                    .bg(hsla(theme.surface))
+                                    .text_color(hsla(theme.text))
+                                    .text_size(self.fonts.ui_size)
+                                    .child(button("Copy", DrawingCommand::Copy))
+                                    .child(button("Search", DrawingCommand::FindSelection))
+                            })
+                        }
+                        (PdfMode::Read(_) | PdfMode::Markup, _) => None,
+                    },
+                    Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => None,
+                };
                 let body = match target.and_then(Pane::active) {
                     Some(Tab::Ink(_)) => div().flex_1().min_h_0().overflow_hidden().child(
                         div()
@@ -75,6 +138,7 @@ impl Workspace {
                                 pane.data().as_ffi(),
                             ))
                             .size_full()
+                            .relative()
                             .on_pen_event(cx.listener(move |this, event: &PenEvent, window, cx| {
                                 let phase = match event.phase {
                                     gpui::PenPhase::Down => {
@@ -164,7 +228,8 @@ impl Workspace {
                             .child(DrawingElement {
                                 workspace: cx.entity(),
                                 pane,
-                            }),
+                            })
+                            .children(popup),
                     ),
                     Some(Tab::Image(_)) => div().flex_1().min_h_0().child(SheetElement {
                         workspace: cx.entity(),

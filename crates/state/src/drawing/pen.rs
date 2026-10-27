@@ -14,6 +14,7 @@ use model::sheet::Viewport;
 use crate::State;
 use crate::drawing::command::commit;
 use crate::drawing::frame::{self, Landed};
+use crate::drawing::reading;
 use crate::drawing::typing::{self, Ended};
 use crate::drawing::{Doing, Gesture, Hand, InkFile, InkTabs, PdfMode, Pen};
 use crate::view::layout::PaneId;
@@ -76,7 +77,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                 |paged, layer| frame::paged(paged, &view, viewport).land::<Paged>(at, layer),
             )
         }
-        Some(Tab::Ink(InkTabs::Pdf(tab))) => match tab.mode {
+        Some(Tab::Ink(InkTabs::Pdf(tab))) => match &mut tab.mode {
             PdfMode::Markup => {
                 let view = tab.view;
                 let file = &mut pdfs[tab.file()];
@@ -90,7 +91,11 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                     |paged, layer| frame::paged(paged, &view, viewport).land::<Paged>(at, layer),
                 )
             }
-            PdfMode::Read => Ok(()),
+            PdfMode::Read(reading) => {
+                let paged = pdfs[tab.file].edited.drawing();
+                reading::pen(reading, &tab.view, paged, phase, sample);
+                Ok(())
+            }
         },
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             let view = tab.view;

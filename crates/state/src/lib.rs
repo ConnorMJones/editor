@@ -421,6 +421,7 @@ pub struct Prompt {
 
 pub enum PromptKind {
     Command,
+    FindInPdf,
     /// Previews on every edit from `snapshot`, which cancel restores.
     Regex {
         op: RegexOp,
@@ -435,6 +436,7 @@ impl PromptKind {
     pub fn history(&self) -> Register {
         match self {
             PromptKind::Command => Register::COMMAND,
+            PromptKind::FindInPdf => Register::SEARCH,
             PromptKind::Regex { register, .. } => *register,
         }
     }
@@ -442,6 +444,7 @@ impl PromptKind {
     pub fn label(&self) -> &'static str {
         match self {
             PromptKind::Command => ":",
+            PromptKind::FindInPdf => "find:",
             PromptKind::Regex { op, .. } => match op {
                 RegexOp::Search(_) => "search:",
                 RegexOp::Select => "select:",
@@ -678,4 +681,5 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     tracing::trace_span!("diffs").in_scope(|| git::track::sync(state, out));
     tracing::trace_span!("diff views").in_scope(|| git::diffview::refresh(state, out));
     tracing::trace_span!("typing").in_scope(|| drawing::typing::sync(state));
+    tracing::trace_span!("pdf text").in_scope(|| drawing::reading::sync(state, out));
 }

@@ -13,9 +13,9 @@ use crate::doc::{
 /// Pages in reading order, each with its own size, background and marks; never empty.
 #[derive(Clone, Debug)]
 pub struct Paged {
-    layers: Layers,     // private: pages, stack and layers stay in step
-    pages: Vec<Page>,   // private: pages, stack and layers stay in step
-    stack: Stack,       // private: pages, stack and layers stay in step
+    layers: Layers,   // private: pages, stack and layers stay in step
+    pages: Vec<Page>, // private: pages, stack and layers stay in step
+    stack: Stack,     // private: pages, stack and layers stay in step
     underlay: Underlay,
 }
 

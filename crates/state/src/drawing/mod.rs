@@ -4,13 +4,17 @@ pub mod command;
 pub mod embed;
 pub mod frame;
 pub mod pen;
+pub mod reading;
 pub mod typing;
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use ink::brush::{Brush, Curve, Fraction, Paint, Size, WidthFrom};
-use ink::doc::{Background, Board, Drawing, GeometryId, LayerIndex, Layers, PageLayer, Paged};
+use ink::doc::{
+    Background, Board, Drawing, GeometryId, LayerIndex, Layers, PageIndex, PageLayer, Paged,
+};
 use ink::history::{Edited, Revision};
 use ink::input::{Model, WindowParams};
 use ink::text::{FontFamily, TextStyle};
@@ -79,13 +83,52 @@ pub struct PdfTab {
     pub view: SheetView,
     pub hand: Hand<PageLayer>,
     pub mode: PdfMode,
+    pub found: Found,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    Nothing,
+    Searching {
+        query: String,
+    },
+    /// `hits` is never empty; `at` is the one shown.
+    Hits {
+        query: String,
+        hits: Vec<TextSpan>,
+        at: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PdfMode {
+    Read(Reading),
+    Markup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PdfMode {
+pub enum ResumeIn {
     Read,
     Markup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reading {
+    Idle,
+    /// `anchor` and `head` index `page`'s characters.
+    Selecting {
+        page: PageIndex,
+        anchor: usize,
+        head: usize,
+    },
+    Selected(TextSpan),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextSpan {
+    pub page: PageIndex,
+    pub chars: Range<usize>,
 }
 
 pub struct BoardTab {
@@ -105,10 +148,7 @@ pub struct Hand<T> {
 }
 
 pub enum Doing<T> {
-    Ink {
-        using: Using<T>,
-        pen: Pen,
-    },
+    Ink { using: Using<T>, pen: Pen },
     Typing(Box<Open<T>>),
 }
 
@@ -194,6 +234,7 @@ impl PdfTab {
             view,
             hand,
             mode,
+            found: Found::Nothing,
         }
     }
 
@@ -222,7 +263,11 @@ impl InkTabs {
                 InkTabs::Board(BoardTab::new(tab.file, tab.view, tab.hand.copy()))
             }
             InkTabs::Pdf(tab) => {
-                InkTabs::Pdf(PdfTab::new(tab.file, tab.view, tab.hand.copy(), tab.mode))
+                let mode = match tab.mode {
+                    PdfMode::Read(_) => PdfMode::Read(Reading::Idle),
+                    PdfMode::Markup => PdfMode::Markup,
+                };
+                InkTabs::Pdf(PdfTab::new(tab.file, tab.view, tab.hand.copy(), mode))
             }
         }
     }
@@ -288,7 +333,7 @@ pub enum Saved {
     Pdf {
         layer: LayerIndex,
         view: SheetView,
-        mode: PdfMode,
+        mode: ResumeIn,
     },
 }
 
@@ -307,7 +352,7 @@ pub fn open_pdf(state: &State, id: PdfId) -> InkTabs {
         id,
         view,
         Hand::new(&state.ink, LayerIndex(0)),
-        PdfMode::Read,
+        PdfMode::Read(Reading::Idle),
     ))
 }
 
@@ -338,6 +383,10 @@ pub fn reopen(state: &State, opened: Opened, saved: Saved) -> Option<Tab> {
         (Opened::Pdf(id), Saved::Pdf { layer, view, mode }) => {
             let layer = at(state.pdfs[id].edited.drawing().layers(), layer);
             let hand = Hand::new(&state.ink, layer);
+            let mode = match mode {
+                ResumeIn::Read => PdfMode::Read(Reading::Idle),
+                ResumeIn::Markup => PdfMode::Markup,
+            };
             Some(Tab::Ink(InkTabs::Pdf(PdfTab::new(id, view, hand, mode))))
         }
         (Opened::Text(_) | Opened::Image(_), _)

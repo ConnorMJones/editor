@@ -251,10 +251,7 @@ impl InkTabs {
 pub enum Ended<T> {
     NothingOpen,
     Dropped,
-    Kept {
-        target: T,
-        picked: Picked,
-    },
+    Kept { target: T, picked: Picked },
 }
 
 impl InkTabs {

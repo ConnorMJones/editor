@@ -1154,6 +1154,24 @@ const PAGE_EDIT: Bindings = &[
 const PDF_READ: Bindings = &[
     (&[Key::char(':')], Command::CommandMode),
     (&SAVE_ALL, Command::WriteAll),
+    (&[Key::char('y')], Command::Drawing(DrawingCommand::Copy)),
+    (&[Key::char('/')], Command::Drawing(DrawingCommand::Find)),
+    (
+        &[SPACE, Key::char('t')],
+        Command::Picker(PickerCommand::Open(PickerKind::Outline)),
+    ),
+    (
+        &[Key::char('n')],
+        Command::Drawing(DrawingCommand::FindNext(Direction::Forward)),
+    ),
+    (
+        &[Key::char('N')],
+        Command::Drawing(DrawingCommand::FindNext(Direction::Backward)),
+    ),
+    (
+        &[Key::code(KeyCode::Esc)],
+        Command::Drawing(DrawingCommand::Read),
+    ),
 ];
 
 const PDF_MARKUP: Bindings = &[(

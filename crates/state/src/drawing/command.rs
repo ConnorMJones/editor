@@ -1,10 +1,10 @@
 //! Keys on a focused drawing, and undo and redo there.
 
-use ink::doc::ChangeError;
 use ink::doc::{
     Board, Drawing, Layer, LayerChange, LayerIndex, LayerName, Mark, MarkId, PageIndex, Paged,
     PagedChange, ShapeKind, Visibility,
 };
+use ink::doc::{ChangeError, Underlay};
 use ink::history::HistoryError;
 use ink::text::Fonts;
 use ink::tool::{Gather, ToolKind};
@@ -13,13 +13,17 @@ use model::command::{
 };
 use model::mode::Mode;
 use model::notice::Notice;
+use model::register::Clipboard;
 use model::sheet::{Measure, SheetView, Stack, StackEdit};
 
-use crate::State;
 use crate::drawing::typing::{self, Ended};
-use crate::drawing::{BoardTab, Doing, Hand, InkFile, InkTabs, PagedId, PagedTab, PdfMode, PdfTab};
+use crate::drawing::{
+    BoardTab, Doing, Found, Hand, InkFile, InkTabs, PagedId, PagedTab, PdfMode, PdfTab, Reading,
+};
+use crate::input::prompt;
 use crate::view::layout::Layout;
 use crate::view::tab::Tab;
+use crate::{Effect, Overlay, PromptKind, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -34,9 +38,11 @@ enum After {
     Follow(PagedId, StackEdit),
     /// The text being typed was finished, so the keys leave its modes.
     Typed,
+    Find,
+    FindText(String),
 }
 
-pub fn command(state: &mut State, command: DrawingCommand) {
+pub fn command(state: &mut State, command: DrawingCommand, out: &mut Vec<Effect>) {
     let State {
         layout,
         pageds,
@@ -45,6 +51,8 @@ pub fn command(state: &mut State, command: DrawingCommand) {
         notice,
         input,
         fonts,
+        overlay,
+        project,
         ..
     } = state;
     let result = match layout.focused_mut().active_mut() {
@@ -58,7 +66,7 @@ pub fn command(state: &mut State, command: DrawingCommand) {
         }
         Some(Tab::Ink(InkTabs::Pdf(tab))) => {
             let file = &mut pdfs[tab.file()];
-            pdf(tab, file, command, fonts)
+            pdf(tab, file, command, fonts, out)
         }
         Some(Tab::Text(_) | Tab::Image(_)) | None => Err(Notice::NotADrawing),
     };
@@ -66,6 +74,10 @@ pub fn command(state: &mut State, command: DrawingCommand) {
         Ok(After::Nothing) => {}
         Ok(After::Follow(file, edit)) => follow(layout, file, edit),
         Ok(After::Typed) => input.mode = Mode::Normal,
+        Ok(After::Find) => {
+            *overlay = Overlay::Prompt(prompt::open(PromptKind::FindInPdf, &project.index))
+        }
+        Ok(After::FindText(query)) => crate::drawing::reading::find(state, query, out),
         Err(refused) => *notice = Some(refused),
     }
 }
@@ -79,7 +91,11 @@ fn paged(
     match command {
         DrawingCommand::Page(page) => pages(tab, file, page),
         DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command, fonts),
-        DrawingCommand::Read => Err(Notice::NotAPdf),
+        DrawingCommand::Read
+        | DrawingCommand::Copy
+        | DrawingCommand::Find
+        | DrawingCommand::FindSelection
+        | DrawingCommand::FindNext(_) => Err(Notice::NotAPdf),
     }
 }
 
@@ -92,7 +108,11 @@ fn board(
     match command {
         DrawingCommand::Page(_) => Err(Notice::BoardHasNoPages),
         DrawingCommand::Ink(command) => ink(&mut tab.hand, file, command, fonts),
-        DrawingCommand::Read => Err(Notice::NotAPdf),
+        DrawingCommand::Read
+        | DrawingCommand::Copy
+        | DrawingCommand::Find
+        | DrawingCommand::FindSelection
+        | DrawingCommand::FindNext(_) => Err(Notice::NotAPdf),
     }
 }
 
@@ -150,6 +170,7 @@ fn pdf(
     file: &mut InkFile<Paged>,
     command: DrawingCommand,
     fonts: &Fonts,
+    out: &mut Vec<Effect>,
 ) -> Result<After, Notice> {
     match command {
         DrawingCommand::Page(PageCommand::Go(step)) => {
@@ -170,10 +191,46 @@ fn pdf(
             tab.mode = PdfMode::Markup;
             ink(&mut tab.hand, file, command, fonts)
         }
+        DrawingCommand::Copy => match (&tab.mode, file.edited.drawing().underlay()) {
+            (PdfMode::Read(Reading::Selected(span)), Underlay::Pdf(pdf)) => {
+                let text = (pdf.document.text(span.page.0))
+                    .map(|text| text.slice(span.chars.clone()).to_owned())
+                    .ok_or(Notice::NothingSelected)?;
+                out.push(Effect::WriteClipboard {
+                    clipboard: Clipboard::System,
+                    text,
+                });
+                Ok(After::Nothing)
+            }
+            (_, _) => Err(Notice::NothingSelected),
+        },
+        DrawingCommand::Find => Ok(After::Find),
+        DrawingCommand::FindSelection => match (&tab.mode, file.edited.drawing().underlay()) {
+            (PdfMode::Read(Reading::Selected(span)), Underlay::Pdf(pdf)) => {
+                (pdf.document.text(span.page.0))
+                    .map(|text| After::FindText(text.slice(span.chars.clone()).to_owned()))
+                    .ok_or(Notice::NothingSelected)
+            }
+            (_, _) => Err(Notice::NothingSelected),
+        },
+        DrawingCommand::FindNext(direction) => match &mut tab.found {
+            Found::Hits { hits, at, .. } => {
+                let count = hits.len();
+                *at = match direction {
+                    Direction::Forward => (*at + 1) % count,
+                    Direction::Backward => (*at + count - 1) % count,
+                };
+                let viewport = tab.hand.last.map(|measure| measure.viewport);
+                tab.view
+                    .go_to(file.edited.drawing().stack(), hits[*at].page, viewport);
+                Ok(After::Nothing)
+            }
+            Found::Nothing | Found::Searching { .. } => Err(Notice::NoSearch),
+        },
         DrawingCommand::Read => {
             let ended = typing::finish(&mut tab.hand.doing, file, fonts);
             tab.hand.cancel_stroke();
-            tab.mode = PdfMode::Read;
+            tab.mode = PdfMode::Read(Reading::Idle);
             ended.map(After::of)
         }
     }

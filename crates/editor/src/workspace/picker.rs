@@ -23,7 +23,7 @@ impl Workspace {
         let fonts = &self.fonts;
         let previewed = match picker.items {
             Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Backlinks(_) => true,
-            Items::Commands | Items::Images(_) => false,
+            Items::Commands | Items::Images(_) | Items::Outline(_) => false,
         };
         let viewport = window.viewport_size();
         let width = match previewed {
@@ -45,7 +45,8 @@ impl Workspace {
             | Items::Images(_)
             | Items::Buffers(_)
             | Items::Commands
-            | Items::Backlinks(_) => {
+            | Items::Backlinks(_)
+            | Items::Outline(_) => {
                 format!("{}/{}", picker.matches.len(), picker.items.len())
             }
         };
@@ -75,6 +76,15 @@ impl Workspace {
                                     })
                                     .unwrap_or_default();
                                 ((*name).to_owned(), keys)
+                            }
+                            Items::Outline(headings) => {
+                                let heading = &headings[index as usize];
+                                (
+                                    format!("{}{}", "  ".repeat(heading.depth), heading.title),
+                                    heading
+                                        .page
+                                        .map_or(String::new(), |page| (page + 1).to_string()),
+                                )
                             }
                             Items::Grep(Grep { hits, .. })
                             | Items::Backlinks(Referrers { hits, .. }) => {

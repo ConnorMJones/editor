@@ -33,7 +33,7 @@ pub fn context(state: &State) -> Context {
             Some(Tab::Ink(ink)) => match (ink.typed(), state.input.mode) {
                 (None, _) => match ink {
                     InkTabs::Pdf(PdfTab {
-                        mode: PdfMode::Read,
+                        mode: PdfMode::Read(_),
                         ..
                     }) => Context::PdfRead,
                     InkTabs::Pdf(PdfTab {

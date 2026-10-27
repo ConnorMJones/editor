@@ -546,6 +546,7 @@ pub enum PickerKind {
     Images,
     /// Notes linking to the focused note.
     Backlinks,
+    Outline,
 }
 
 /// What a tab shows of its file; each kind of file offers some of these.
@@ -573,6 +574,10 @@ pub enum DrawingCommand {
     Page(PageCommand),
     Ink(InkCommand),
     Read,
+    Copy,
+    Find,
+    FindSelection,
+    FindNext(Direction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

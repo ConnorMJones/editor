@@ -351,7 +351,8 @@ fn grep_picker_jumps_to_hit() {
             | Items::Images(_)
             | Items::Buffers(_)
             | Items::Commands
-            | Items::Backlinks(_) => {
+            | Items::Backlinks(_)
+            | Items::Outline(_) => {
                 panic!("wrong picker")
             }
         },

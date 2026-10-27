@@ -197,7 +197,11 @@ pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
                 *items = picker::images(&files);
                 picker::filter(picker, &mut state.matcher, picker::Narrowing::All);
             }
-            Items::Buffers(_) | Items::Commands | Items::Grep(_) | Items::Backlinks(_) => {}
+            Items::Buffers(_)
+            | Items::Commands
+            | Items::Grep(_)
+            | Items::Backlinks(_)
+            | Items::Outline(_) => {}
         },
         Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
     }

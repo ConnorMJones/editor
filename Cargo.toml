@@ -27,6 +27,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 git2 = { version = "0.21.0", default-features = false }
 # PDF parsing and rendering; the version typst-svg uses.
 hayro = "0.7.1"
+kurbo = "0.13.1"
 ignore = "0.4.33"
 # Same version helix-core uses, so the tree keeps one copy.
 imara-diff = "0.2.0"

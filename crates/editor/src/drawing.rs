@@ -29,8 +29,8 @@ use reader::pdf::Document;
 use slotmap::Key as _;
 use state::drawing::frame::{self, InkFrame, Paper, REACH};
 use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
-use state::drawing::typing::{TextBox, Writing};
-use state::drawing::{Doing, Hand, InkTabs};
+use state::drawing::typing::Writing;
+use state::drawing::{Doing, Found, Hand, InkTabs, PdfMode, Reading, TextSpan};
 use state::view::layout::PaneId;
 use state::view::tab::Tab;
 
@@ -212,7 +212,63 @@ impl Element for DrawingElement {
                 Some(Tab::Ink(InkTabs::Pdf(tab))) => {
                     let paged = state.pdfs[tab.file()].edited.drawing();
                     let frame = frame::paged(paged, &tab.view, viewport);
-                    paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, pictured, window)
+                    paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, pictured, window);
+                    let mut marked: SmallVec<[(TextSpan, Hsla); 8]> = SmallVec::new();
+                    match &tab.found {
+                        Found::Hits { hits, at, .. } => marked.extend(
+                            (hits.iter().enumerate())
+                                .filter(|(_, hit)| frame.on(hit.page).is_some())
+                                .map(|(index, hit)| {
+                                    let tint = match index == *at {
+                                        true => 0.45,
+                                        false => 0.2,
+                                    };
+                                    (
+                                        hit.clone(),
+                                        hsla(workspace.theme.chrome.picked).opacity(tint),
+                                    )
+                                }),
+                        ),
+                        Found::Nothing | Found::Searching { .. } => {}
+                    }
+                    match &tab.mode {
+                        PdfMode::Read(Reading::Selecting { page, anchor, head }) => marked.push((
+                            TextSpan {
+                                page: *page,
+                                chars: *anchor.min(head)..*anchor.max(head) + 1,
+                            },
+                            accent.opacity(0.3),
+                        )),
+                        PdfMode::Read(Reading::Selected(span)) => {
+                            marked.push((span.clone(), accent.opacity(0.3)))
+                        }
+                        PdfMode::Read(Reading::Idle) | PdfMode::Markup => {}
+                    }
+                    for (span, color) in marked {
+                        let text = match paged.underlay() {
+                            Underlay::Pdf(pdf) => pdf.document.text(span.page.0),
+                            Underlay::Blank => None,
+                        };
+                        let (Some(text), Some(shown)) = (text, frame.on(span.page)) else {
+                            continue;
+                        };
+                        let to_screen = shown.to_pane.then(&screen.to_screen);
+                        let mut path = PathBuilder::fill();
+                        for char in text.chars.get(span.chars).unwrap_or_default() {
+                            for (index, corner) in char.quad.into_iter().enumerate() {
+                                let at = to_screen.apply(corner);
+                                match index {
+                                    0 => path.move_to(point(px(at.x), px(at.y))),
+                                    _ => path.line_to(point(px(at.x), px(at.y))),
+                                }
+                            }
+                            path.close();
+                        }
+                        match path.build() {
+                            Ok(path) => window.paint_path(path, color),
+                            Err(error) => tracing::warn!(%error, "marked text"),
+                        }
+                    }
                 }
                 Some(Tab::Ink(InkTabs::Board(tab))) => {
                     let board = state.boards[tab.file()].edited.drawing();
@@ -384,22 +440,54 @@ pub fn paint_ink<D: Drawing>(
             }
             Paper::Plane(background) => (*view, background),
         };
-        paint_paper(background, area, frame.scale, window);
+        let (min, max) = (area.min(), area.max());
+        let rect = |left: f32, top: f32, width: f32, height: f32| {
+            Bounds::new(point(px(left), px(top)), size(px(width), px(height)))
+        };
+        let sheet = rect(min.x, min.y, max.x - min.x, max.y - min.y);
         match background {
             Background::Pdf { page } => {
                 match pictured.pages.iter().find(|shown| shown.page == page) {
-                    Some(shown) => {
-                        let (min, max) = (area.min(), area.max());
-                        let bounds = Bounds::from_corners(
-                            point(px(min.x), px(min.y)),
-                            point(px(max.x), px(max.y)),
-                        );
-                        paint_picture(bounds, shown.image.clone(), window)
-                    }
-                    None => {}
+                    Some(shown) => paint_picture(sheet, shown.image.clone(), window),
+                    None => window.paint_quad(fill(sheet, solid(Rgb::hex(0xffffff)))),
                 }
             }
-            Background::Plain(_) | Background::Pattern { .. } => {}
+            Background::Plain(paper) => window.paint_quad(fill(sheet, solid(paper))),
+            Background::Pattern {
+                paper,
+                ink,
+                pattern,
+                spacing,
+            } => {
+                window.paint_quad(fill(sheet, solid(paper)));
+                let step = spacing.get() * frame.scale;
+                let ink = solid(ink);
+                let (columns, rows) = (lines(min.x, max.x, step), lines(min.y, max.y, step));
+                // Too dense to read at this zoom, so the paper shows plain.
+                match (step < 4.0, pattern) {
+                    (true, _) => {}
+                    (false, Pattern::Lines) => {
+                        for y in rows {
+                            window.paint_quad(fill(rect(min.x, y, max.x - min.x, 1.0), ink));
+                        }
+                    }
+                    (false, Pattern::Grid) => {
+                        for y in rows {
+                            window.paint_quad(fill(rect(min.x, y, max.x - min.x, 1.0), ink));
+                        }
+                        for x in columns {
+                            window.paint_quad(fill(rect(x, min.y, 1.0, max.y - min.y), ink));
+                        }
+                    }
+                    (false, Pattern::Dots) => {
+                        for y in rows {
+                            for x in columns.clone() {
+                                window.paint_quad(fill(rect(x - 1.0, y - 1.0, 2.0, 2.0), ink));
+                            }
+                        }
+                    }
+                }
+            }
         }
         for ((index, layer), marks) in layers.iter().zip(shown.marks.iter()) {
             match layer.visibility {
@@ -528,7 +616,78 @@ pub fn paint_ink<D: Drawing>(
             None => {}
         },
         Doing::Typing(open) => match on_screen(open.target) {
-            Some((_, to_screen)) => paint_typed(&open.text, &to_screen, screen, window),
+            Some((_, to_screen)) => {
+                let text = &open.text;
+                let to_screen = &to_screen;
+                let transform = text.placement.forward().then(to_screen);
+                match &text.laid.inked {
+                    Inked::Ink(ink) => paint_mesh(
+                        MeshKey(ink.built.id.get()),
+                        MeshVersion(0),
+                        &ink.built.mesh,
+                        ink.built.bounds.mapped(&transform),
+                        &transform,
+                        text.paint.color,
+                        &screen.view,
+                        window,
+                    ),
+                    Inked::Blank => {}
+                }
+                let carets = &text.laid.carets;
+                let rope = text.doc.text.slice(..);
+                let quad = |corners: [Point<Local>; 4], color: Hsla, window: &mut Window| {
+                    let mut path = PathBuilder::fill();
+                    for (index, corner) in corners.into_iter().enumerate() {
+                        let at = transform.apply(corner);
+                        match index {
+                            0 => path.move_to(point(px(at.x), px(at.y))),
+                            _ => path.line_to(point(px(at.x), px(at.y))),
+                        }
+                    }
+                    path.close();
+                    match path.build() {
+                        Ok(path) => window.paint_path(path, color),
+                        Err(error) => tracing::warn!(%error, "text cursor"),
+                    }
+                };
+                // A bar a tenth of the line high is wide enough to see at any zoom.
+                let bar = |caret: Caret| caret.height * 0.1;
+                let tint = screen.accent.opacity(0.3);
+                for range in text.selection.iter() {
+                    for index in range.from()..range.to().min(carets.len() - 1) {
+                        let (here, next) = (carets[index], carets[index + 1]);
+                        // A character ending its line, such as a newline, is shown as wide as the bar.
+                        let right = match next.at.y == here.at.y {
+                            true => next.at.x,
+                            false => here.at.x + bar(here),
+                        };
+                        let (top, bottom) = (here.at.y, here.at.y + here.height);
+                        quad(
+                            [
+                                Point::new(here.at.x, top),
+                                Point::new(right, top),
+                                Point::new(right, bottom),
+                                Point::new(here.at.x, bottom),
+                            ],
+                            tint,
+                            window,
+                        );
+                    }
+                    let caret = carets[range.cursor(rope).min(carets.len() - 1)];
+                    let (left, right) = (caret.at.x, caret.at.x + bar(caret));
+                    let (top, bottom) = (caret.at.y, caret.at.y + caret.height);
+                    quad(
+                        [
+                            Point::new(left, top),
+                            Point::new(right, top),
+                            Point::new(right, bottom),
+                            Point::new(left, bottom),
+                        ],
+                        screen.accent,
+                        window,
+                    );
+                }
+            }
             None => {}
         },
         Doing::Ink {
@@ -682,66 +841,6 @@ pub fn paint_mesh(
     );
 }
 
-/// Paper and its pattern over `area`, a surface's part of the pane.
-pub fn paint_paper(background: Background, area: Rect<Screen>, zoom: f32, window: &mut Window) {
-    let rect = |left: f32, top: f32, width: f32, height: f32| {
-        Bounds::new(point(px(left), px(top)), size(px(width), px(height)))
-    };
-    let (min, max) = (area.min(), area.max());
-    match background {
-        // Under the page's raster, and alone until the raster arrives.
-        Background::Pdf { .. } => window.paint_quad(fill(
-            rect(min.x, min.y, max.x - min.x, max.y - min.y),
-            solid(model::color::Rgb::hex(0xffffff)),
-        )),
-        Background::Plain(paper) => window.paint_quad(fill(
-            rect(min.x, min.y, max.x - min.x, max.y - min.y),
-            solid(paper),
-        )),
-        Background::Pattern {
-            paper,
-            ink,
-            pattern,
-            spacing,
-        } => {
-            window.paint_quad(fill(
-                rect(min.x, min.y, max.x - min.x, max.y - min.y),
-                solid(paper),
-            ));
-            let step = spacing.get() * zoom;
-            // Too dense to read at this zoom, so the paper shows plain.
-            match step < 4.0 {
-                true => return,
-                false => {}
-            }
-            let ink = solid(ink);
-            let (columns, rows) = (lines(min.x, max.x, step), lines(min.y, max.y, step));
-            match pattern {
-                Pattern::Lines => {
-                    for y in rows {
-                        window.paint_quad(fill(rect(min.x, y, max.x - min.x, 1.0), ink));
-                    }
-                }
-                Pattern::Grid => {
-                    for y in rows {
-                        window.paint_quad(fill(rect(min.x, y, max.x - min.x, 1.0), ink));
-                    }
-                    for x in columns {
-                        window.paint_quad(fill(rect(x, min.y, 1.0, max.y - min.y), ink));
-                    }
-                }
-                Pattern::Dots => {
-                    for y in rows {
-                        for x in columns.clone() {
-                            window.paint_quad(fill(rect(x - 1.0, y - 1.0, 2.0, 2.0), ink));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Positions `step` apart after `from`, up to `to`.
 pub fn lines(from: f32, to: f32, step: f32) -> impl Iterator<Item = f32> + Clone {
     (1..)
@@ -830,82 +929,5 @@ pub fn stylus(tool: gpui::PenTool) -> Stylus {
         | gpui::PenTool::Finger
         | gpui::PenTool::Mouse
         | gpui::PenTool::Lens => Stylus::Tip,
-    }
-}
-
-/// Text being typed: its ink, a bar at each cursor and a tint over each selection.
-pub fn paint_typed(
-    text: &TextBox,
-    to_screen: &Affine<Surface, Screen>,
-    screen: &Onscreen,
-    window: &mut Window,
-) {
-    let transform = text.placement.forward().then(to_screen);
-    match &text.laid.inked {
-        Inked::Ink(ink) => paint_mesh(
-            MeshKey(ink.built.id.get()),
-            MeshVersion(0),
-            &ink.built.mesh,
-            ink.built.bounds.mapped(&transform),
-            &transform,
-            text.paint.color,
-            &screen.view,
-            window,
-        ),
-        Inked::Blank => {}
-    }
-    let carets = &text.laid.carets;
-    let rope = text.doc.text.slice(..);
-    let quad = |corners: [Point<Local>; 4], color: Hsla, window: &mut Window| {
-        let mut path = PathBuilder::fill();
-        for (index, corner) in corners.into_iter().enumerate() {
-            let at = transform.apply(corner);
-            match index {
-                0 => path.move_to(point(px(at.x), px(at.y))),
-                _ => path.line_to(point(px(at.x), px(at.y))),
-            }
-        }
-        path.close();
-        match path.build() {
-            Ok(path) => window.paint_path(path, color),
-            Err(error) => tracing::warn!(%error, "text cursor"),
-        }
-    };
-    // A bar a tenth of the line high is wide enough to see at any zoom.
-    let bar = |caret: Caret| caret.height * 0.1;
-    let tint = screen.accent.opacity(0.3);
-    for range in text.selection.iter() {
-        for index in range.from()..range.to().min(carets.len() - 1) {
-            let (here, next) = (carets[index], carets[index + 1]);
-            // A character ending its line, such as a newline, is shown as wide as the bar.
-            let right = match next.at.y == here.at.y {
-                true => next.at.x,
-                false => here.at.x + bar(here),
-            };
-            let (top, bottom) = (here.at.y, here.at.y + here.height);
-            quad(
-                [
-                    Point::new(here.at.x, top),
-                    Point::new(right, top),
-                    Point::new(right, bottom),
-                    Point::new(here.at.x, bottom),
-                ],
-                tint,
-                window,
-            );
-        }
-        let caret = carets[range.cursor(rope).min(carets.len() - 1)];
-        let (left, right) = (caret.at.x, caret.at.x + bar(caret));
-        let (top, bottom) = (caret.at.y, caret.at.y + caret.height);
-        quad(
-            [
-                Point::new(left, top),
-                Point::new(right, top),
-                Point::new(right, bottom),
-                Point::new(left, bottom),
-            ],
-            screen.accent,
-            window,
-        );
     }
 }

@@ -13,7 +13,10 @@ use model::sheet::Viewport;
 use model::window::{Axis, Side};
 use nucleo::Matcher;
 
+use ink::doc::{PageIndex, Underlay};
+
 use crate::apply::{Force, apply};
+use crate::drawing::InkTabs;
 use crate::input::picker::{
     self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource,
     Referrers, Search,
@@ -408,6 +411,23 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                     hits: Vec::new(),
                 }),
                 PickerKind::Commands => Items::Commands,
+                PickerKind::Outline => {
+                    let headings = match state.layout.focused().active() {
+                        Some(Tab::Ink(InkTabs::Pdf(tab))) => {
+                            match state.pdfs[tab.file()].edited.drawing().underlay() {
+                                Underlay::Pdf(pdf) => pdf.document.outline(),
+                                Underlay::Blank => Vec::new(),
+                            }
+                        }
+                        Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => {
+                            return state.notice = Some(Notice::NotAPdf);
+                        }
+                    };
+                    match headings.is_empty() {
+                        true => return state.notice = Some(Notice::NoOutline),
+                        false => Items::Outline(headings),
+                    }
+                }
                 PickerKind::Backlinks => {
                     let Some(buffer) = (state.layout.focused().active_text())
                         .map(|view| &state.buffers[view.buffer()])
@@ -535,6 +555,24 @@ fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
             focus_editor(state);
         }
         Items::Commands => apply(state, PALETTE[index].1.clone(), out),
+        Items::Outline(headings) => {
+            let State {
+                layout,
+                pdfs,
+                notice,
+                ..
+            } = state;
+            match (layout.focused_mut().active_mut(), headings[index].page) {
+                (Some(Tab::Ink(InkTabs::Pdf(tab))), Some(page)) => {
+                    let stack = pdfs[tab.file()].edited.drawing().stack();
+                    let viewport = tab.hand.last.map(|measure| measure.viewport);
+                    tab.view.go_to(stack, PageIndex(page), viewport);
+                }
+                (Some(Tab::Ink(InkTabs::Pdf(_))), None) => *notice = Some(Notice::NothingToFollow),
+                (Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None, _) => {}
+            }
+            focus_editor(state);
+        }
     }
 }
 
@@ -583,7 +621,8 @@ fn edit_query(
         | Items::Images(_)
         | Items::Buffers(_)
         | Items::Commands
-        | Items::Backlinks(_) => {
+        | Items::Backlinks(_)
+        | Items::Outline(_) => {
             let narrowing = Narrowing::between(&previous, &picker.query);
             picker::filter(picker, matcher, narrowing);
         }

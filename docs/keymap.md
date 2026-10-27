@@ -100,7 +100,7 @@ vault; `![[note]]` shows a box naming the resolved note that opens it when click
 The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
 Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
 Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
-PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg` / `ge` move through them. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
+PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg` / `ge` move through them. Dragging across text selects it, with a bar offering Copy and Search; `y` copies it and `esc` lets it go. `/` finds text in the whole PDF, `n` / `N` step through the hits, and `space t` lists the table of contents. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
 
 | Keys | Context | Action |
 | --- | --- | --- |
@@ -1343,6 +1343,12 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg`
 | --- | --- |
 | `:` | `CommandMode` |
 | `C-k C-s` | `WriteAll` |
+| `y` | `Drawing(Copy)` |
+| `/` | `Drawing(Find)` |
+| `space t` | `Picker(Open(Outline))` |
+| `n` | `Drawing(FindNext(Forward))` |
+| `N` | `Drawing(FindNext(Backward))` |
+| `esc` | `Drawing(Read)` |
 | `b` | `Drawing(Ink(Tool(Brush)))` |
 | `e` | `Drawing(Ink(Tool(Eraser)))` |
 | `s` | `Drawing(Ink(Tool(BoxSelect)))` |

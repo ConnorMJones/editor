@@ -245,7 +245,7 @@ pub fn preview_regex(state: &mut State) {
             ..
         }) => (*op, snapshot.clone(), line.clone()),
         Overlay::Prompt(Prompt {
-            kind: PromptKind::Command,
+            kind: PromptKind::Command | PromptKind::FindInPdf,
             ..
         })
         | Overlay::None

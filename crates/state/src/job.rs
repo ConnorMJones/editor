@@ -6,11 +6,12 @@ use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
 use git2::Oid;
+use helix_core::regex::RegexBuilder;
 use helix_core::regex::bytes::Regex;
 use helix_core::syntax::HighlighterError;
 use helix_core::syntax::Loader;
 use helix_core::{Language, Rope, Syntax};
-use ink::doc::{Board, PageSize, Paged};
+use ink::doc::{Board, PageIndex, PageSize, Paged};
 use ink::format::FormatError;
 use ink::text::Fonts;
 use model::command::Dirs;
@@ -18,7 +19,7 @@ use model::picture::Encoding;
 use model::sheet::Stack;
 
 use crate::drawing::embed::{self, Destination};
-use crate::drawing::{BoardId, PagedId, PdfId};
+use crate::drawing::{BoardId, PagedId, PdfId, TextSpan};
 use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
@@ -34,7 +35,7 @@ use crate::view::tab::Opened;
 use crate::viewer::{self, ImageId, ProbeError, Probed};
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 use ink::history::Revision;
-use reader::pdf::{Document, PdfError};
+use reader::pdf::{Document, PdfError, TextClaim};
 
 /// Blocking work run off the UI thread.
 pub enum Job {
@@ -58,6 +59,12 @@ pub enum Job {
         export: ::export::Export,
         fonts: Fonts,
         path: PathBuf,
+    },
+    PdfText(TextClaim),
+    PdfFind {
+        file: PdfId,
+        document: Arc<Document>,
+        query: String,
     },
 
     Index {
@@ -216,6 +223,15 @@ pub enum JobResult {
     Exported {
         path: PathBuf,
         result: Result<usize, ExportFailed>,
+    },
+    PdfText {
+        page: usize,
+        result: Result<(), PdfError>,
+    },
+    PdfFound {
+        file: PdfId,
+        query: String,
+        hits: Vec<TextSpan>,
     },
     Typeset(typeset::Done),
 
@@ -429,6 +445,8 @@ pub fn run(job: Job) -> JobResult {
         Job::Write { .. } => "write",
         Job::Export { .. } => "export",
         Job::ExportDrawing { .. } => "export drawing",
+        Job::PdfText(_) => "pdf text",
+        Job::PdfFind { .. } => "pdf find",
         Job::Index { .. } => "index",
         Job::ListDir { .. } => "list dir",
         Job::Rescan { .. } => "rescan",
@@ -497,6 +515,39 @@ pub fn run(job: Job) -> JobResult {
             result: (std::fs::write(&path, &bytes).map(|()| bytes.len()))
                 .map_err(ExportFailed::Write),
             path,
+        },
+        Job::PdfFind {
+            file,
+            document,
+            query,
+        } => {
+            let pattern = RegexBuilder::new(&helix_core::regex::escape(&query))
+                .case_insensitive(true)
+                .build()
+                .expect("an escaped query is a valid pattern");
+            let mut hits = Vec::new();
+            for page in 0..document.pages.sizes().len() {
+                let text = match document.read_text(page) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        tracing::warn!(page, %error, "searching a page");
+                        continue;
+                    }
+                };
+                for found in pattern.find_iter(&text.text) {
+                    let first = text.chars.partition_point(|char| char.at < found.start());
+                    let last = text.chars.partition_point(|char| char.at < found.end());
+                    hits.extend((first < last).then(|| TextSpan {
+                        page: PageIndex(page),
+                        chars: first..last,
+                    }));
+                }
+            }
+            JobResult::PdfFound { file, query, hits }
+        }
+        Job::PdfText(claim) => JobResult::PdfText {
+            page: claim.page,
+            result: claim.read().map(|_| ()),
         },
         Job::ExportDrawing {
             export,
@@ -724,6 +775,8 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Opened { .. } => "opened",
         JobResult::Written { .. } => "written",
         JobResult::Exported { .. } => "exported",
+        JobResult::PdfText { .. } => "pdf text",
+        JobResult::PdfFound { .. } => "pdf found",
         JobResult::Typeset(_) => "typeset",
         JobResult::Indexed(_) => "indexed",
         JobResult::Listed { .. } => "listed",
@@ -751,6 +804,18 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             result,
         } => apply::written(state, saving, path, result, out),
         JobResult::Exported { path, result } => crate::export::exported(state, path, result),
+        JobResult::PdfFound { file, query, hits } => {
+            crate::drawing::reading::found(state, file, query, hits)
+        }
+        JobResult::PdfText { page, result } => match result {
+            Ok(()) => {}
+            Err(error) => {
+                state.notice = Some(model::notice::Notice::PageTextFailed {
+                    page: page + 1,
+                    reason: error.to_string(),
+                })
+            }
+        },
         JobResult::Typeset(done) => typeset::finish(state, done, out),
         JobResult::Indexed(walked) => files::indexed(state, walked, out),
         JobResult::Listed { dir, result } => tree::listed(state, dir, result, out),

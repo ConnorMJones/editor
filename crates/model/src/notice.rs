@@ -41,6 +41,15 @@ pub enum Notice {
     },
     NotADrawing,
     NotAPdf,
+    NoHits {
+        query: String,
+    },
+    NoSearch,
+    NoOutline,
+    PageTextFailed {
+        page: usize,
+        reason: String,
+    },
     /// Images go into drawings and notes only.
     NoImagesHere,
     NoImageOnClipboard,
@@ -224,6 +233,12 @@ impl std::fmt::Display for Notice {
             Notice::NothingToSplit => f.write_str("an empty pane has nothing to split"),
             Notice::WrongExtension { path } => {
                 write!(f, "{} names another kind of file", path.display())
+            }
+            Notice::NoOutline => f.write_str("the PDF has no table of contents"),
+            Notice::NoSearch => f.write_str("nothing searched for yet"),
+            Notice::NoHits { query } => write!(f, "no {query:?} in the PDF"),
+            Notice::PageTextFailed { page, reason } => {
+                write!(f, "the text of page {page} could not be read: {reason}")
             }
             Notice::NotAPdf => f.write_str("only a PDF is read rather than drawn on"),
             Notice::NotADrawing => f.write_str("not a drawing"),

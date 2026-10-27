@@ -9,7 +9,7 @@ use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
 use crate::apply;
-use crate::drawing::{self, InkTabs, PdfMode};
+use crate::drawing::{self, InkTabs, PdfMode, ResumeIn};
 use crate::job::Job;
 use crate::project::path::{Folder, RelPath};
 use crate::render::Opening;
@@ -107,7 +107,7 @@ pub enum SessionView {
         y: f32,
         fit: Fit,
         zoom: f32,
-        mode: PdfMode,
+        mode: ResumeIn,
     },
     // `x` and `y` are the board point at the pane's centre.
     Board {
@@ -117,7 +117,12 @@ pub enum SessionView {
         zoom: f32,
     },
     // `x` and `y` are the point on the image at the pane's centre.
-    Image { x: f32, y: f32, fit: Fit, zoom: f32 },
+    Image {
+        x: f32,
+        y: f32,
+        fit: Fit,
+        zoom: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,12 +130,8 @@ pub enum SessionView {
 pub enum SessionMode {
     Source,
     Diff,
-    Render {
-        top: Opening,
-    },
-    Split {
-        top: Opening,
-    },
+    Render { top: Opening },
+    Split { top: Opening },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,7 +225,10 @@ pub fn snapshot(state: &State) -> Session {
                                 y: tab.view.centre.at.y,
                                 fit: tab.view.fit,
                                 zoom: tab.view.zoom.get(),
-                                mode: tab.mode,
+                                mode: match tab.mode {
+                                    PdfMode::Read(_) => ResumeIn::Read,
+                                    PdfMode::Markup => ResumeIn::Markup,
+                                },
                             },
                             Tab::Ink(InkTabs::Board(tab)) => SessionView::Board {
                                 layer: tab.hand.layer.0,

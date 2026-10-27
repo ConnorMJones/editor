@@ -308,17 +308,8 @@ pub fn cached(
 ) -> Arc<Glyph> {
     glyphs
         .entry(key)
-        .or_insert_with(|| Arc::new(fill_glyph(system, swash, tessellator, key)))
-        .clone()
-}
-
-/// `key`'s outline filled into triangles; a glyph without one, such as a space, has none.
-pub fn fill_glyph(
-    system: &mut FontSystem,
-    swash: &mut SwashCache,
-    tessellator: &mut FillTessellator,
-    key: GlyphKey,
-) -> Glyph {
+        .or_insert_with(|| {
+            Arc::new('fill: {
     let (cache, _, _) = CacheKey::new(
         key.font,
         key.glyph,
@@ -333,7 +324,7 @@ pub fn fill_glyph(
         triangles: Vec::new(),
     };
     let Some(commands) = swash.get_outline_commands_uncached(system, cache) else {
-        return empty();
+        break 'fill empty();
     };
     // Outlines are read y up; ems here run y down.
     let em = |x: f32, y: f32| point(x / OUTLINE_SIZE, -y / OUTLINE_SIZE);
@@ -394,6 +385,9 @@ pub fn fill_glyph(
             empty()
         }
     }
+            })
+        })
+        .clone()
 }
 
 impl std::fmt::Debug for Fonts {

@@ -93,7 +93,8 @@ fn backlinks(h: &Harness) -> Vec<(String, u32)> {
             | Items::Images(_)
             | Items::Buffers(_)
             | Items::Grep(_)
-            | Items::Commands => {
+            | Items::Commands
+            | Items::Outline(_) => {
                 panic!("wrong picker")
             }
         },
@@ -342,7 +343,8 @@ fn backlinks_asked_for_before_the_file_index_fill_once_it_arrives() {
             | Items::Images(_)
             | Items::Buffers(_)
             | Items::Grep(_)
-            | Items::Commands => {
+            | Items::Commands
+            | Items::Outline(_) => {
                 panic!("wrong picker")
             }
         },

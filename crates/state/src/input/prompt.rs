@@ -120,7 +120,7 @@ pub fn complete(prompt: &mut Prompt, index: &FileIndex) {
     completion.start = 0;
     match prompt.kind {
         PromptKind::Command => {}
-        PromptKind::Regex { .. } => return,
+        PromptKind::Regex { .. } | PromptKind::FindInPdf => return,
     }
     let line = prompt.line.as_str();
     let (name, arg) = match line.split_once(char::is_whitespace) {
@@ -463,7 +463,7 @@ pub fn cancel(state: &mut State) {
             ..
         }) => crate::apply::select(state, |_, _, _| snapshot),
         Overlay::Prompt(Prompt {
-            kind: PromptKind::Command,
+            kind: PromptKind::Command | PromptKind::FindInPdf,
             ..
         })
         | Overlay::None
@@ -506,6 +506,14 @@ pub fn submit(state: &mut State, out: &mut Vec<Effect>) {
                     line,
                     ..
                 }) => select::submit_regex(state, op, register, snapshot, line, out),
+                Overlay::Prompt(Prompt {
+                    kind: PromptKind::FindInPdf,
+                    line,
+                    ..
+                }) => match remember(state, Register::SEARCH, line, out) {
+                    Some(query) => crate::drawing::reading::find(state, query, out),
+                    None => {}
+                },
                 Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => {}
             }
         }

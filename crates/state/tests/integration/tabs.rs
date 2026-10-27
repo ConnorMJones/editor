@@ -276,7 +276,8 @@ fn buffer_picker_lists_most_recently_used_first() {
             | Items::Images(_)
             | Items::Grep(_)
             | Items::Commands
-            | Items::Backlinks(_) => {
+            | Items::Backlinks(_)
+            | Items::Outline(_) => {
                 panic!("wrong picker")
             }
         },
