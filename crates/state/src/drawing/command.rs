@@ -16,7 +16,7 @@ use model::sheet::StackEdit;
 
 use crate::State;
 use crate::drawing::typing::{self, Ended};
-use crate::drawing::{BoardTab, Hand, InkFile, InkTabs, PagedId, PagedTab};
+use crate::drawing::{BoardTab, Doing, Hand, InkFile, InkTabs, PagedId, PagedTab};
 use crate::view::layout::Layout;
 use crate::view::tab::Tab;
 
@@ -172,8 +172,8 @@ fn ink<D: Drawing>(
     match command {
         InkCommand::Tool(tool) => {
             // What the old tool was doing, a selection or text included, ends with it.
+            let ended = typing::finish(&mut hand.doing, file, fonts);
             hand.cancel_stroke();
-            let ended = typing::finish(&mut hand.typing, file, fonts);
             hand.tip = match tool {
                 InkTool::Brush => ToolKind::Brush,
                 InkTool::Eraser => ToolKind::Eraser,
@@ -187,7 +187,7 @@ fn ink<D: Drawing>(
             };
             ended.map(After::of)
         }
-        InkCommand::FinishText => match typing::finish(&mut hand.typing, file, fonts)? {
+        InkCommand::FinishText => match typing::finish(&mut hand.doing, file, fonts)? {
             Ended::Kept { target, picked } => {
                 hand.pick(target, picked);
                 Ok(After::Typed)
@@ -195,7 +195,11 @@ fn ink<D: Drawing>(
             ended @ (Ended::NothingOpen | Ended::Dropped) => Ok(After::of(ended)),
         },
         InkCommand::DeletePicked => {
-            let change = hand.tools.select.delete().ok_or(Notice::NothingPicked)?;
+            let change = match &mut hand.doing {
+                Doing::Ink { using, .. } => using.delete(),
+                Doing::Typing(_) => None,
+            };
+            let change = change.ok_or(Notice::NothingPicked)?;
             commit(file, change.into()).map(|()| After::Nothing)
         }
         InkCommand::Layer(direction) => {

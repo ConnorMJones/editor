@@ -61,73 +61,37 @@ pub enum Gather {
     Lasso,
 }
 
+/// The tools' settings, and buffers kept across strokes.
 #[derive(Debug)]
-pub struct Tools<T> {
-    pub brush: BrushTool<T>,
-    pub eraser: EraserTool<T>,
-    pub select: Selecting<T>,
-    pub shape: ShapeTool<T>,
-    pub text: Placing<T>,
-}
-
-impl<T: Copy + PartialEq> Tools<T> {
-    pub fn new(brush: Brush, paint: Paint, eraser: Size) -> Tools<T> {
-        Tools {
-            brush: BrushTool::new(brush, paint),
-            eraser: EraserTool::new(eraser),
-            select: Selecting::Idle,
-            shape: ShapeTool {
-                width: brush.size,
-                paint,
-                state: Shaping::Idle,
-            },
-            text: Placing::Idle,
-        }
-    }
-
-    pub fn input<D: Drawing<Target = T>>(
-        &mut self,
-        kind: ToolKind,
-        input: PenInput<T>,
-        drawing: &D,
-        reach: Size,
-    ) -> Outcome<T> {
-        match kind {
-            ToolKind::Brush => self.brush.input(input),
-            ToolKind::Eraser => self.eraser.input(input, drawing),
-            ToolKind::Select(gather) => self.select.input(gather, input, drawing, reach),
-            ToolKind::Shape(kind) => self.shape.input(kind, input),
-            ToolKind::Text => self.text.input(input, drawing, reach),
-        }
-    }
-
-    /// Drops any stroke in progress, as when the drawing under it is replaced.
-    pub fn cancel(&mut self) {
-        self.brush.state = Brushing::Idle;
-        self.eraser.state = Erasing::Idle;
-        self.select = Selecting::Idle;
-        self.shape.state = Shaping::Idle;
-        self.text = Placing::Idle;
-    }
-}
-
-#[derive(Debug)]
-pub struct BrushTool<T> {
+pub struct Tools {
     pub brush: Brush,
     pub paint: Paint,
-    pub state: Brushing<T>,
+    pub eraser: Size,
+    pub shape_width: Size,
     pub stroke: InProgress,
 }
 
 #[derive(Debug)]
-pub enum Brushing<T> {
+pub enum Using<T> {
     Idle,
     /// `brush` and `paint` are the settings at `Down`.
-    Drawing {
+    Brushing {
         target: T,
         brush: Brush,
         paint: Paint,
         modeler: Modeler,
+    },
+    /// `erased` holds the marks touched so far, which the host hides until `Up` removes them.
+    Erasing {
+        target: T,
+        erased: SmallVec<[MarkId; 8]>,
+    },
+    Selecting(Selecting<T>),
+    Shaping(Shaping<T>),
+    Placing {
+        target: T,
+        from: Point<Surface>,
+        to: Point<Surface>,
     },
 }
 
@@ -148,7 +112,6 @@ impl InProgress {
         self.mesh.clear();
     }
 
-    /// Adds `sample` and rebuilds what changed of the mesh.
     fn extend(&mut self, modeler: &mut Modeler, brush: &Brush, sample: Sample<Surface>) {
         let sample = Sample {
             at: Placement::ALIGNED.back().apply(sample.at),
@@ -163,23 +126,43 @@ impl InProgress {
     }
 }
 
-impl<T: Copy> BrushTool<T> {
-    pub fn new(brush: Brush, paint: Paint) -> BrushTool<T> {
-        BrushTool {
+impl Tools {
+    pub fn new(brush: Brush, paint: Paint, eraser: Size) -> Tools {
+        Tools {
             brush,
             paint,
-            state: Brushing::Idle,
+            eraser,
+            shape_width: brush.size,
             stroke: InProgress::default(),
         }
     }
 
-    pub fn input(&mut self, input: PenInput<T>) -> Outcome<T> {
-        match (std::mem::replace(&mut self.state, Brushing::Idle), input) {
-            (Brushing::Idle | Brushing::Drawing { .. }, PenInput::Down { target, sample }) => {
+    /// A pen-down replaces whatever another tool was doing.
+    pub fn input<T: Copy + PartialEq, D: Drawing<Target = T>>(
+        &mut self,
+        kind: ToolKind,
+        input: PenInput<T>,
+        using: &mut Using<T>,
+        drawing: &D,
+        reach: Size,
+    ) -> Outcome<T> {
+        let was = std::mem::replace(using, Using::Idle);
+        match kind {
+            ToolKind::Brush => self.brush(was, input, using),
+            ToolKind::Eraser => self.erase(was, input, using, drawing),
+            ToolKind::Select(gather) => select(was, gather, input, using, drawing, reach),
+            ToolKind::Shape(kind) => self.shape(was, kind, input, using),
+            ToolKind::Text => place(was, input, using, drawing, reach),
+        }
+    }
+
+    fn brush<T>(&mut self, was: Using<T>, input: PenInput<T>, using: &mut Using<T>) -> Outcome<T> {
+        match (was, input) {
+            (_, PenInput::Down { target, sample }) => {
                 let mut modeler = Modeler::new(self.brush.model, EPSILON);
                 self.stroke.clear();
                 self.stroke.extend(&mut modeler, &self.brush, sample);
-                self.state = Brushing::Drawing {
+                *using = Using::Brushing {
                     target,
                     brush: self.brush,
                     paint: self.paint,
@@ -188,7 +171,7 @@ impl<T: Copy> BrushTool<T> {
                 Outcome::Drawn
             }
             (
-                Brushing::Drawing {
+                Using::Brushing {
                     target,
                     brush,
                     paint,
@@ -197,7 +180,7 @@ impl<T: Copy> BrushTool<T> {
                 PenInput::Move(sample),
             ) => {
                 self.stroke.extend(&mut modeler, &brush, sample);
-                self.state = Brushing::Drawing {
+                *using = Using::Brushing {
                     target,
                     brush,
                     paint,
@@ -206,7 +189,7 @@ impl<T: Copy> BrushTool<T> {
                 Outcome::Drawn
             }
             (
-                Brushing::Drawing {
+                Using::Brushing {
                     target,
                     brush,
                     paint,
@@ -227,67 +210,47 @@ impl<T: Copy> BrushTool<T> {
                     Err(error) => Outcome::Failed(error),
                 }
             }
-            (Brushing::Drawing { .. }, PenInput::Cancel) => Outcome::Drawn,
-            (Brushing::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+            (Using::Brushing { .. }, PenInput::Cancel) => Outcome::Drawn,
+            (was, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+                *using = was;
                 Outcome::Ignored
             }
         }
     }
-}
-
-#[derive(Debug)]
-pub struct EraserTool<T> {
-    pub size: Size,
-    pub state: Erasing<T>,
-}
-
-#[derive(Debug)]
-pub enum Erasing<T> {
-    Idle,
-    /// `erased` holds the marks touched so far, which the host hides until `Up` removes them.
-    Erasing {
-        target: T,
-        erased: SmallVec<[MarkId; 8]>,
-    },
-}
-
-impl<T: Copy> EraserTool<T> {
-    pub fn new(size: Size) -> EraserTool<T> {
-        EraserTool {
-            size,
-            state: Erasing::Idle,
-        }
-    }
 
     /// A target that has left the drawing ends the stroke.
-    pub fn input<D: Drawing<Target = T>>(&mut self, input: PenInput<T>, drawing: &D) -> Outcome<T> {
-        let radius = self.size.get() * 0.5;
-        match (std::mem::replace(&mut self.state, Erasing::Idle), input) {
-            (Erasing::Idle | Erasing::Erasing { .. }, PenInput::Down { target, sample }) => {
-                match drawing.marks(target) {
-                    Some(marks) => {
-                        let mut erased = SmallVec::new();
-                        touch(marks, sample, radius, &mut erased);
-                        self.state = Erasing::Erasing { target, erased };
-                        Outcome::Drawn
-                    }
-                    None => Outcome::Ignored,
+    fn erase<T: Copy, D: Drawing<Target = T>>(
+        &mut self,
+        was: Using<T>,
+        input: PenInput<T>,
+        using: &mut Using<T>,
+        drawing: &D,
+    ) -> Outcome<T> {
+        let radius = self.eraser.get() * 0.5;
+        match (was, input) {
+            (_, PenInput::Down { target, sample }) => match drawing.marks(target) {
+                Some(marks) => {
+                    let mut erased = SmallVec::new();
+                    touch(marks, sample, radius, &mut erased);
+                    *using = Using::Erasing { target, erased };
+                    Outcome::Drawn
                 }
-            }
-            (Erasing::Erasing { target, mut erased }, PenInput::Move(sample)) => {
+                None => Outcome::Ignored,
+            },
+            (Using::Erasing { target, mut erased }, PenInput::Move(sample)) => {
                 match drawing.marks(target) {
                     Some(marks) => {
                         let outcome = match touch(marks, sample, radius, &mut erased) {
                             0 => Outcome::Ignored,
                             _ => Outcome::Drawn,
                         };
-                        self.state = Erasing::Erasing { target, erased };
+                        *using = Using::Erasing { target, erased };
                         outcome
                     }
                     None => Outcome::Drawn,
                 }
             }
-            (Erasing::Erasing { target, mut erased }, PenInput::Up(sample)) => {
+            (Using::Erasing { target, mut erased }, PenInput::Up(sample)) => {
                 match drawing.marks(target) {
                     Some(marks) => {
                         touch(marks, sample, radius, &mut erased);
@@ -299,9 +262,88 @@ impl<T: Copy> EraserTool<T> {
                     None => Outcome::Drawn,
                 }
             }
-            (Erasing::Erasing { .. }, PenInput::Cancel) => Outcome::Drawn,
-            (Erasing::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+            (Using::Erasing { .. }, PenInput::Cancel) => Outcome::Drawn,
+            (was, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+                *using = was;
                 Outcome::Ignored
+            }
+        }
+    }
+
+    fn shape<T>(
+        &mut self,
+        was: Using<T>,
+        kind: ShapeKind,
+        input: PenInput<T>,
+        using: &mut Using<T>,
+    ) -> Outcome<T> {
+        // A new shape's own space is aligned with its surface.
+        let local = |at: Point<Surface>| Placement::ALIGNED.back().apply(at);
+        match (was, input) {
+            (_, PenInput::Down { target, sample }) => {
+                *using = Using::Shaping(Shaping::Pressed {
+                    target,
+                    kind,
+                    from: local(sample.at),
+                });
+                Outcome::Drawn
+            }
+            (
+                Using::Shaping(
+                    Shaping::Pressed { target, kind, from }
+                    | Shaping::Dragging {
+                        target, kind, from, ..
+                    },
+                ),
+                PenInput::Move(sample),
+            ) => {
+                *using = Using::Shaping(Shaping::Dragging {
+                    target,
+                    kind,
+                    from,
+                    ink: ShapeInk::new(
+                        Shape::dragged(kind, from, local(sample.at)),
+                        self.shape_width,
+                    ),
+                });
+                Outcome::Drawn
+            }
+            (
+                Using::Shaping(Shaping::Dragging {
+                    target, kind, from, ..
+                }),
+                PenInput::Up(sample),
+            ) => {
+                let shape = Shape::dragged(kind, from, local(sample.at));
+                Outcome::Commit(MarkChange::Add(
+                    target,
+                    Mark {
+                        placement: Placement::ALIGNED,
+                        paint: self.paint,
+                        ink: Ink::Shape(Arc::new(ShapeInk::new(shape, self.shape_width))),
+                    },
+                ))
+            }
+            (Using::Shaping(Shaping::Pressed { .. }), PenInput::Up(_) | PenInput::Cancel)
+            | (Using::Shaping(Shaping::Dragging { .. }), PenInput::Cancel) => Outcome::Drawn,
+            (was, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+                *using = was;
+                Outcome::Ignored
+            }
+        }
+    }
+}
+
+impl<T> Using<T> {
+    /// Removes the picked marks, leaving nothing picked.
+    pub fn delete(&mut self) -> Option<MarkChange<T>> {
+        match std::mem::replace(self, Using::Idle) {
+            Using::Selecting(Selecting::Holding { target, picked, .. }) => Some(
+                MarkChange::Remove(target, SmallVec::from_slice(picked.ids())),
+            ),
+            was => {
+                *self = was;
+                None
             }
         }
     }
@@ -323,12 +365,8 @@ fn touch(
 
 #[derive(Debug)]
 pub enum Selecting<T> {
-    Idle,
     /// Down but not yet moved past the reach: lifting here is a tap.
-    Pressed {
-        target: T,
-        at: Point<Surface>,
-    },
+    Pressed { target: T, at: Point<Surface> },
     Boxing {
         target: T,
         from: Point<Surface>,
@@ -769,257 +807,269 @@ impl Grip {
     }
 }
 
-impl<T: Copy + PartialEq> Selecting<T> {
-    /// `reach` is how far a tap or handle reaches on the surface.
-    pub fn input<D: Drawing<Target = T>>(
-        &mut self,
-        gather: Gather,
-        input: PenInput<T>,
-        drawing: &D,
-        reach: Size,
-    ) -> Outcome<T> {
-        match (std::mem::replace(self, Selecting::Idle), input) {
-            (
-                Selecting::Holding {
-                    target: held,
-                    picked,
-                    grip: Grip::Still,
-                },
-                PenInput::Down { target, sample },
-            ) if held == target => {
-                let at = sample.at;
-                let frame = picked.frame();
-                let center = frame.centre();
-                let grip = (frame.handles(picked.sides(), reach))
-                    .map(|(handle, sits)| (handle, sits.distance(at)))
-                    .min_by(|(_, a), (_, b)| a.total_cmp(b))
-                    .filter(|(_, distance)| *distance <= reach.get())
-                    .map(|(handle, _)| match handle {
-                        Handle::Corner(corner) => Grip::Resizing {
-                            resize: Resize::Corner(corner),
-                            from: at,
-                            to: at,
-                        },
-                        Handle::Edge(edge) => Grip::Resizing {
-                            resize: Resize::Edge(edge),
-                            from: at,
-                            to: at,
-                        },
-                        Handle::Rotate => Grip::Rotating {
-                            center,
-                            from: at,
-                            to: at,
-                        },
-                    })
-                    .or_else(|| (frame.holds(at)).then_some(Grip::Moving { from: at, to: at }));
-                *self = match grip {
-                    Some(grip) => Selecting::Holding {
-                        target,
-                        picked,
-                        grip,
-                    },
-                    None => Selecting::Pressed { target, at },
-                };
-                Outcome::Drawn
-            }
-            (_, PenInput::Down { target, sample }) => {
-                *self = Selecting::Pressed {
-                    target,
-                    at: sample.at,
-                };
-                Outcome::Drawn
-            }
-            (Selecting::Pressed { target, at }, PenInput::Move(sample))
-                if at.distance(sample.at) > reach.get() =>
-            {
-                *self = match gather {
-                    Gather::Box => Selecting::Boxing {
-                        target,
+/// `reach` is how far a tap or handle reaches on the surface.
+fn select<T: Copy + PartialEq, D: Drawing<Target = T>>(
+    was: Using<T>,
+    gather: Gather,
+    input: PenInput<T>,
+    using: &mut Using<T>,
+    drawing: &D,
+    reach: Size,
+) -> Outcome<T> {
+    match (was, input) {
+        (
+            Using::Selecting(Selecting::Holding {
+                target: held,
+                picked,
+                grip: Grip::Still,
+            }),
+            PenInput::Down { target, sample },
+        ) if held == target => {
+            let at = sample.at;
+            let frame = picked.frame();
+            let center = frame.centre();
+            let grip = (frame.handles(picked.sides(), reach))
+                .map(|(handle, sits)| (handle, sits.distance(at)))
+                .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                .filter(|(_, distance)| *distance <= reach.get())
+                .map(|(handle, _)| match handle {
+                    Handle::Corner(corner) => Grip::Resizing {
+                        resize: Resize::Corner(corner),
                         from: at,
-                        to: sample.at,
+                        to: at,
                     },
-                    Gather::Lasso => Selecting::Lassoing {
-                        target,
-                        lasso: vec![at, sample.at],
+                    Handle::Edge(edge) => Grip::Resizing {
+                        resize: Resize::Edge(edge),
+                        from: at,
+                        to: at,
                     },
-                };
-                Outcome::Drawn
-            }
-            (pressed @ Selecting::Pressed { .. }, PenInput::Move(_)) => {
-                *self = pressed;
-                Outcome::Ignored
-            }
-            (Selecting::Pressed { target, at }, PenInput::Up(_)) => {
-                let picked = (drawing.marks(target)).and_then(|marks| {
-                    Picked::gather(
-                        marks
-                            .iter()
-                            .filter(|(_, mark)| mark.touches(at, reach.get()))
-                            .last()
-                            .into_iter(),
-                    )
-                });
-                *self = held(target, picked);
-                Outcome::Drawn
-            }
-            (Selecting::Boxing { target, from, .. }, PenInput::Move(sample)) => {
-                *self = Selecting::Boxing {
-                    target,
-                    from,
-                    to: sample.at,
-                };
-                Outcome::Drawn
-            }
-            (Selecting::Boxing { target, from, .. }, PenInput::Up(sample)) => {
-                let around = Rect::spanning(from, sample.at);
-                let picked = (drawing.marks(target)).and_then(|marks| {
-                    Picked::gather(marks.iter().filter(|(_, mark)| {
-                        let bounds = mark.bounds();
-                        around.contains(bounds.min()) && around.contains(bounds.max())
-                    }))
-                });
-                *self = held(target, picked);
-                Outcome::Drawn
-            }
-            (Selecting::Lassoing { target, mut lasso }, PenInput::Move(sample)) => {
-                lasso.push(sample.at);
-                *self = Selecting::Lassoing { target, lasso };
-                Outcome::Drawn
-            }
-            (Selecting::Lassoing { target, mut lasso }, PenInput::Up(sample)) => {
-                lasso.push(sample.at);
-                let around = (lasso.iter()).fold(Rect::spanning(lasso[0], lasso[0]), |rect, at| {
-                    rect.union(&Rect::spanning(*at, *at))
-                });
-                let picked = (drawing.marks(target)).and_then(|marks| {
-                    Picked::gather(marks.iter().filter(|(_, mark)| {
-                        mark.bounds().intersects(&around) && enclosed(mark, &lasso)
-                    }))
-                });
-                *self = held(target, picked);
-                Outcome::Drawn
-            }
-            (
-                Selecting::Holding {
+                    Handle::Rotate => Grip::Rotating {
+                        center,
+                        from: at,
+                        to: at,
+                    },
+                })
+                .or_else(|| (frame.holds(at)).then_some(Grip::Moving { from: at, to: at }));
+            *using = Using::Selecting(match grip {
+                Some(grip) => Selecting::Holding {
                     target,
                     picked,
                     grip,
                 },
-                PenInput::Move(sample),
-            ) => {
-                *self = Selecting::Holding {
-                    target,
-                    picked,
-                    grip: grip.to(sample.at),
-                };
-                Outcome::Drawn
-            }
-            (
-                Selecting::Holding {
-                    target,
-                    picked,
-                    grip,
-                },
-                PenInput::Up(sample),
-            ) => match (picked, grip.to(sample.at)) {
-                // A tap types in picked text, and leaves other marks as they were.
-                (Picked::Text(mark), grip) if grip.travel() <= reach.get() => {
-                    Outcome::Type(TypeAt::Mark { target, mark })
-                }
-                (picked, grip) if grip.travel() <= reach.get() => {
-                    *self = still(target, picked);
-                    Outcome::Ignored
-                }
-                (Picked::Text(mark), grip) => match grip.rewrapped(&mark) {
-                    Some(to) => {
-                        *self = still(target, Picked::Text(mark.clone()));
-                        Outcome::Rewrap { target, mark, to }
-                    }
-                    None => self.transformed(target, Picked::Text(mark), grip),
-                },
-                (picked, grip) => self.transformed(target, picked, grip),
-            },
-            (Selecting::Holding { target, picked, .. }, PenInput::Cancel) => {
-                *self = Selecting::Holding {
-                    target,
-                    picked,
-                    grip: Grip::Still,
-                };
-                Outcome::Drawn
-            }
-            (
-                Selecting::Pressed { .. } | Selecting::Boxing { .. } | Selecting::Lassoing { .. },
-                PenInput::Cancel,
-            ) => Outcome::Drawn,
-            (Selecting::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
-                Outcome::Ignored
-            }
+                None => Selecting::Pressed { target, at },
+            });
+            Outcome::Drawn
         }
-    }
-
-    pub fn transformed(&mut self, target: T, picked: Picked, grip: Grip) -> Outcome<T> {
-        let by = grip.transform(&picked);
-        let ids = SmallVec::from_slice(picked.ids());
-        *self = still(target, picked.moved(&by));
-        Outcome::Commit(MarkChange::Transform(target, ids, by))
-    }
-
-    /// Removes the picked marks, leaving nothing picked.
-    pub fn delete(&mut self) -> Option<MarkChange<T>> {
-        match std::mem::replace(self, Selecting::Idle) {
-            Selecting::Holding { target, picked, .. } => Some(MarkChange::Remove(
+        (_, PenInput::Down { target, sample }) => {
+            *using = Using::Selecting(Selecting::Pressed {
                 target,
-                SmallVec::from_slice(picked.ids()),
-            )),
-            Selecting::Idle
-            | Selecting::Pressed { .. }
-            | Selecting::Boxing { .. }
-            | Selecting::Lassoing { .. } => None,
+                at: sample.at,
+            });
+            Outcome::Drawn
+        }
+        (Using::Selecting(Selecting::Pressed { target, at }), PenInput::Move(sample))
+            if at.distance(sample.at) > reach.get() =>
+        {
+            *using = Using::Selecting(match gather {
+                Gather::Box => Selecting::Boxing {
+                    target,
+                    from: at,
+                    to: sample.at,
+                },
+                Gather::Lasso => Selecting::Lassoing {
+                    target,
+                    lasso: vec![at, sample.at],
+                },
+            });
+            Outcome::Drawn
+        }
+        (Using::Selecting(Selecting::Pressed { target, at }), PenInput::Up(_)) => {
+            let picked = (drawing.marks(target)).and_then(|marks| {
+                Picked::gather(
+                    marks
+                        .iter()
+                        .filter(|(_, mark)| mark.touches(at, reach.get()))
+                        .last()
+                        .into_iter(),
+                )
+            });
+            *using = held(target, picked);
+            Outcome::Drawn
+        }
+        (Using::Selecting(Selecting::Boxing { target, from, .. }), PenInput::Move(sample)) => {
+            *using = Using::Selecting(Selecting::Boxing {
+                target,
+                from,
+                to: sample.at,
+            });
+            Outcome::Drawn
+        }
+        (Using::Selecting(Selecting::Boxing { target, from, .. }), PenInput::Up(sample)) => {
+            let around = Rect::spanning(from, sample.at);
+            let picked = (drawing.marks(target)).and_then(|marks| {
+                Picked::gather(marks.iter().filter(|(_, mark)| {
+                    let bounds = mark.bounds();
+                    around.contains(bounds.min()) && around.contains(bounds.max())
+                }))
+            });
+            *using = held(target, picked);
+            Outcome::Drawn
+        }
+        (Using::Selecting(Selecting::Lassoing { target, mut lasso }), PenInput::Move(sample)) => {
+            lasso.push(sample.at);
+            *using = Using::Selecting(Selecting::Lassoing { target, lasso });
+            Outcome::Drawn
+        }
+        (Using::Selecting(Selecting::Lassoing { target, mut lasso }), PenInput::Up(sample)) => {
+            lasso.push(sample.at);
+            let around = (lasso.iter()).fold(Rect::spanning(lasso[0], lasso[0]), |rect, at| {
+                rect.union(&Rect::spanning(*at, *at))
+            });
+            let picked = (drawing.marks(target)).and_then(|marks| {
+                Picked::gather(marks.iter().filter(|(_, mark)| {
+                    mark.bounds().intersects(&around) && enclosed(mark, &lasso)
+                }))
+            });
+            *using = held(target, picked);
+            Outcome::Drawn
+        }
+        (
+            Using::Selecting(Selecting::Holding {
+                target,
+                picked,
+                grip,
+            }),
+            PenInput::Move(sample),
+        ) => {
+            *using = Using::Selecting(Selecting::Holding {
+                target,
+                picked,
+                grip: grip.to(sample.at),
+            });
+            Outcome::Drawn
+        }
+        (
+            Using::Selecting(Selecting::Holding {
+                target,
+                picked,
+                grip,
+            }),
+            PenInput::Up(sample),
+        ) => match (picked, grip.to(sample.at)) {
+            // A tap types in picked text, and leaves other marks as they were.
+            (Picked::Text(mark), grip) if grip.travel() <= reach.get() => {
+                Outcome::Type(TypeAt::Mark { target, mark })
+            }
+            (picked, grip) if grip.travel() <= reach.get() => {
+                *using = still(target, picked);
+                Outcome::Ignored
+            }
+            (Picked::Text(mark), grip) => match grip.rewrapped(&mark) {
+                Some(to) => {
+                    *using = still(target, Picked::Text(mark.clone()));
+                    Outcome::Rewrap { target, mark, to }
+                }
+                None => transformed(using, target, Picked::Text(mark), grip),
+            },
+            (picked, grip) => transformed(using, target, picked, grip),
+        },
+        (Using::Selecting(Selecting::Holding { target, picked, .. }), PenInput::Cancel) => {
+            *using = still(target, picked);
+            Outcome::Drawn
+        }
+        (
+            Using::Selecting(
+                Selecting::Pressed { .. } | Selecting::Boxing { .. } | Selecting::Lassoing { .. },
+            ),
+            PenInput::Cancel,
+        ) => Outcome::Drawn,
+        (was, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+            *using = was;
+            Outcome::Ignored
         }
     }
 }
 
-fn still<T>(target: T, picked: Picked) -> Selecting<T> {
-    Selecting::Holding {
+fn transformed<T: Copy>(using: &mut Using<T>, target: T, picked: Picked, grip: Grip) -> Outcome<T> {
+    let by = grip.transform(&picked);
+    let ids = SmallVec::from_slice(picked.ids());
+    *using = still(target, picked.moved(&by));
+    Outcome::Commit(MarkChange::Transform(target, ids, by))
+}
+
+pub fn still<T>(target: T, picked: Picked) -> Using<T> {
+    Using::Selecting(Selecting::Holding {
         target,
         picked,
         grip: Grip::Still,
-    }
+    })
 }
 
-fn held<T>(target: T, picked: Option<Picked>) -> Selecting<T> {
+fn held<T>(target: T, picked: Option<Picked>) -> Using<T> {
     match picked {
-        Some(picked) => Selecting::Holding {
-            target,
-            picked,
-            grip: Grip::Still,
-        },
-        None => Selecting::Idle,
+        Some(picked) => still(target, picked),
+        None => Using::Idle,
     }
 }
 
-/// Whether most of a mark's outline lies inside the lasso, judged from up to 32 of its vertices.
-fn enclosed(mark: &Mark, lasso: &[Point<Surface>]) -> bool {
-    let vertices = &mark.built().mesh.vertices;
-    let step = (vertices.len() / 32).max(1);
-    let forward = mark.placement.forward();
-    let inside = (vertices.iter().step_by(step))
-        .filter(|at| inside_polygon(forward.apply(**at), lasso))
-        .count();
-    inside * 2 >= vertices.len().div_ceil(step)
-}
-
-/// Draws a shape by dragging from one corner or end to the other.
-#[derive(Debug)]
-pub struct ShapeTool<T> {
-    pub width: Size,
-    pub paint: Paint,
-    pub state: Shaping<T>,
+/// A press on a text mark opens it; elsewhere a drag sets the width of new text.
+fn place<T: Copy, D: Drawing<Target = T>>(
+    was: Using<T>,
+    input: PenInput<T>,
+    using: &mut Using<T>,
+    drawing: &D,
+    reach: Size,
+) -> Outcome<T> {
+    match (was, input) {
+        (_, PenInput::Down { target, sample }) => {
+            let under = (drawing.marks(target).into_iter())
+                .flat_map(|marks| marks.iter())
+                .filter(|(_, mark)| mark.touches(sample.at, reach.get()))
+                .filter_map(|(id, mark)| TextMark::of(id, mark))
+                .map(|mark| TypeAt::Mark { target, mark })
+                .last();
+            match under {
+                Some(at) => Outcome::Type(at),
+                None => {
+                    *using = Using::Placing {
+                        target,
+                        from: sample.at,
+                        to: sample.at,
+                    };
+                    Outcome::Drawn
+                }
+            }
+        }
+        (Using::Placing { target, from, .. }, PenInput::Move(sample)) => {
+            *using = Using::Placing {
+                target,
+                from,
+                to: sample.at,
+            };
+            Outcome::Drawn
+        }
+        (Using::Placing { target, from, .. }, PenInput::Up(sample)) => {
+            let area = Rect::spanning(from, sample.at);
+            // A tap starts unwrapped text.
+            let wrap = (Size::new(area.max().x - area.min().x).ok())
+                .filter(|width| width.get() > reach.get())
+                .map_or(Wrap::Lines, Wrap::At);
+            Outcome::Type(TypeAt::New {
+                target,
+                at: area.min(),
+                wrap,
+            })
+        }
+        (Using::Placing { .. }, PenInput::Cancel) => Outcome::Drawn,
+        (was, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
+            *using = was;
+            Outcome::Ignored
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum Shaping<T> {
-    Idle,
     /// Down but not moved: lifting here draws nothing.
     Pressed {
         target: T,
@@ -1034,68 +1084,15 @@ pub enum Shaping<T> {
     },
 }
 
-impl<T: Copy> ShapeTool<T> {
-    pub fn input(&mut self, kind: ShapeKind, input: PenInput<T>) -> Outcome<T> {
-        // A new shape's own space is aligned with its surface.
-        let local = |at: Point<Surface>| Placement::ALIGNED.back().apply(at);
-        match (std::mem::replace(&mut self.state, Shaping::Idle), input) {
-            (_, PenInput::Down { target, sample }) => {
-                self.state = Shaping::Pressed {
-                    target,
-                    kind,
-                    from: local(sample.at),
-                };
-                Outcome::Drawn
-            }
-            (
-                Shaping::Pressed { target, kind, from }
-                | Shaping::Dragging {
-                    target, kind, from, ..
-                },
-                PenInput::Move(sample),
-            ) => {
-                self.state = Shaping::Dragging {
-                    target,
-                    kind,
-                    from,
-                    ink: ShapeInk::new(Shape::dragged(kind, from, local(sample.at)), self.width),
-                };
-                Outcome::Drawn
-            }
-            (
-                Shaping::Dragging {
-                    target, kind, from, ..
-                },
-                PenInput::Up(sample),
-            ) => {
-                let shape = Shape::dragged(kind, from, local(sample.at));
-                Outcome::Commit(MarkChange::Add(
-                    target,
-                    Mark {
-                        placement: Placement::ALIGNED,
-                        paint: self.paint,
-                        ink: Ink::Shape(Arc::new(ShapeInk::new(shape, self.width))),
-                    },
-                ))
-            }
-            (Shaping::Pressed { .. }, PenInput::Up(_) | PenInput::Cancel)
-            | (Shaping::Dragging { .. }, PenInput::Cancel) => Outcome::Drawn,
-            (Shaping::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
-                Outcome::Ignored
-            }
-        }
-    }
-}
-
-/// Places text: a press on a text mark opens it, elsewhere a drag sets the width of new text.
-#[derive(Debug)]
-pub enum Placing<T> {
-    Idle,
-    Dragging {
-        target: T,
-        from: Point<Surface>,
-        to: Point<Surface>,
-    },
+/// Whether most of a mark's outline lies inside the lasso, judged from up to 32 of its vertices.
+fn enclosed(mark: &Mark, lasso: &[Point<Surface>]) -> bool {
+    let vertices = &mark.built().mesh.vertices;
+    let step = (vertices.len() / 32).max(1);
+    let forward = mark.placement.forward();
+    let inside = (vertices.iter().step_by(step))
+        .filter(|at| inside_polygon(forward.apply(**at), lasso))
+        .count();
+    inside * 2 >= vertices.len().div_ceil(step)
 }
 
 /// Where the text tool asks for text.
@@ -1111,59 +1108,4 @@ pub enum TypeAt<T> {
         target: T,
         mark: TextMark,
     },
-}
-
-impl<T: Copy> Placing<T> {
-    pub fn input<D: Drawing<Target = T>>(
-        &mut self,
-        input: PenInput<T>,
-        drawing: &D,
-        reach: Size,
-    ) -> Outcome<T> {
-        match (std::mem::replace(self, Placing::Idle), input) {
-            (_, PenInput::Down { target, sample }) => {
-                let under = (drawing.marks(target).into_iter())
-                    .flat_map(|marks| marks.iter())
-                    .filter(|(_, mark)| mark.touches(sample.at, reach.get()))
-                    .filter_map(|(id, mark)| TextMark::of(id, mark))
-                    .map(|mark| TypeAt::Mark { target, mark })
-                    .last();
-                match under {
-                    Some(at) => Outcome::Type(at),
-                    None => {
-                        *self = Placing::Dragging {
-                            target,
-                            from: sample.at,
-                            to: sample.at,
-                        };
-                        Outcome::Drawn
-                    }
-                }
-            }
-            (Placing::Dragging { target, from, .. }, PenInput::Move(sample)) => {
-                *self = Placing::Dragging {
-                    target,
-                    from,
-                    to: sample.at,
-                };
-                Outcome::Drawn
-            }
-            (Placing::Dragging { target, from, .. }, PenInput::Up(sample)) => {
-                let area = Rect::spanning(from, sample.at);
-                // A tap starts unwrapped text.
-                let wrap = (Size::new(area.max().x - area.min().x).ok())
-                    .filter(|width| width.get() > reach.get())
-                    .map_or(Wrap::Lines, Wrap::At);
-                Outcome::Type(TypeAt::New {
-                    target,
-                    at: area.min(),
-                    wrap,
-                })
-            }
-            (Placing::Dragging { .. }, PenInput::Cancel) => Outcome::Drawn,
-            (Placing::Idle, PenInput::Move(_) | PenInput::Up(_) | PenInput::Cancel) => {
-                Outcome::Ignored
-            }
-        }
-    }
 }

@@ -3,15 +3,33 @@ use ink::doc::{Background, Board, Drawing, Ink, LayerIndex, MarkChange, Placemen
 use ink::geom::{Affine, Point, Rect, Surface};
 use ink::history::Edited;
 use ink::input::Sample;
-use ink::tool::{
-    Brushing, Erasing, Gather, Grip, Handle, Outcome, PenInput, Selecting, ToolKind, Tools,
-};
+use ink::tool::{Gather, Grip, Handle, Outcome, PenInput, Selecting, ToolKind, Tools, Using};
 use model::color::Rgb;
 
 use crate::{brush, paint, sample, wave, window};
 
-fn tools() -> Tools<LayerIndex> {
-    Tools::new(brush(window()), paint(), Size::new(6.0).unwrap())
+struct Hand {
+    tools: Tools,
+    using: Using<LayerIndex>,
+}
+
+impl Hand {
+    fn input(
+        &mut self,
+        kind: ToolKind,
+        input: PenInput<LayerIndex>,
+        board: &Board,
+        reach: Size,
+    ) -> Outcome<LayerIndex> {
+        self.tools.input(kind, input, &mut self.using, board, reach)
+    }
+}
+
+fn tools() -> Hand {
+    Hand {
+        tools: Tools::new(brush(window()), paint(), Size::new(6.0).unwrap()),
+        using: Using::Idle,
+    }
 }
 
 fn reach() -> Size {
@@ -40,7 +58,7 @@ fn path(points: &[(f32, f32)]) -> Vec<Sample<Surface>> {
 
 /// Works `kind` through `samples`, returning the outcome of lifting the pen.
 fn gesture(
-    tools: &mut Tools<LayerIndex>,
+    tools: &mut Hand,
     kind: ToolKind,
     board: &Board,
     samples: &[Sample<Surface>],
@@ -62,12 +80,7 @@ fn gesture(
 }
 
 /// Commits what `kind` proposes over `points`.
-fn commit(
-    edited: &mut Edited<Board>,
-    tools: &mut Tools<LayerIndex>,
-    kind: ToolKind,
-    points: &[(f32, f32)],
-) {
+fn commit(edited: &mut Edited<Board>, tools: &mut Hand, kind: ToolKind, points: &[(f32, f32)]) {
     match gesture(tools, kind, edited.drawing(), &path(points)) {
         Outcome::Commit(change) => {
             edited.commit(change.into()).unwrap();
@@ -77,7 +90,7 @@ fn commit(
 }
 
 /// Two short strokes, one near the origin and one at x 100.
-fn two_strokes(tools: &mut Tools<LayerIndex>) -> Edited<Board> {
+fn two_strokes(tools: &mut Hand) -> Edited<Board> {
     let mut edited = board();
     commit(
         &mut edited,
@@ -100,13 +113,10 @@ fn bounds(edited: &Edited<Board>) -> Vec<Rect<Surface>> {
         .collect()
 }
 
-fn picked(tools: &Tools<LayerIndex>) -> usize {
-    match &tools.select {
-        Selecting::Holding { picked, .. } => picked.ids().len(),
-        Selecting::Idle
-        | Selecting::Pressed { .. }
-        | Selecting::Boxing { .. }
-        | Selecting::Lassoing { .. } => 0,
+fn picked(tools: &Hand) -> usize {
+    match &tools.using {
+        Using::Selecting(Selecting::Holding { picked, .. }) => picked.ids().len(),
+        _ => 0,
     }
 }
 
@@ -125,10 +135,10 @@ fn lifting_the_brush_proposes_the_stroke() {
     for sample in &rest[..10] {
         tools.input(ToolKind::Brush, PenInput::Move(*sample), board, reach());
     }
-    assert!(matches!(tools.brush.state, Brushing::Drawing { .. }));
-    assert!(!tools.brush.stroke.mesh.mesh().triangles.is_empty());
+    assert!(matches!(tools.using, Using::Brushing { .. }));
+    assert!(!tools.tools.stroke.mesh.mesh().triangles.is_empty());
     tools.input(ToolKind::Brush, PenInput::Cancel, board, reach());
-    assert!(matches!(tools.brush.state, Brushing::Idle));
+    assert!(matches!(tools.using, Using::Idle));
     match gesture(&mut tools, ToolKind::Brush, board, &samples) {
         Outcome::Commit(MarkChange::Add(LayerIndex(0), mark)) => match &mark.ink {
             Ink::Stroke(geometry) => assert_eq!(geometry.samples.len(), 50),
@@ -136,7 +146,7 @@ fn lifting_the_brush_proposes_the_stroke() {
         },
         other => panic!("{other:?}"),
     }
-    assert!(matches!(tools.brush.state, Brushing::Idle));
+    assert!(matches!(tools.using, Using::Idle));
 }
 
 #[test]
@@ -194,11 +204,11 @@ fn erasing_removes_the_strokes_crossed_in_one_step() {
             reach(),
         );
     }
-    match &tools.eraser.state {
-        Erasing::Erasing { erased, .. } => {
+    match &tools.using {
+        Using::Erasing { erased, .. } => {
             assert_eq!(erased.len(), 1, "erased marks are shown hidden")
         }
-        Erasing::Idle => panic!("still erasing"),
+        other => panic!("still erasing: {other:?}"),
     }
     let Outcome::Commit(change) = tools.input(
         ToolKind::Eraser,
@@ -266,8 +276,8 @@ fn a_tap_picks_the_mark_under_it() {
         edited.drawing(),
         &path(&[(110.0, 0.0), (111.0, 1.0)]),
     );
-    match &tools.select {
-        Selecting::Holding { picked, .. } => {
+    match &tools.using {
+        Using::Selecting(Selecting::Holding { picked, .. }) => {
             let marks = edited.drawing().marks(LayerIndex(0)).unwrap();
             let (top, _) = marks.iter().last().unwrap();
             assert_eq!(picked.ids(), [top]);
@@ -326,12 +336,12 @@ fn the_handles_rotate_and_scale_the_selection() {
         edited.drawing(),
         &tap,
     );
-    let box_of = |tools: &Tools<LayerIndex>| match &tools.select {
-        Selecting::Holding {
+    let box_of = |tools: &Hand| match &tools.using {
+        Using::Selecting(Selecting::Holding {
             picked,
             grip: Grip::Still,
             ..
-        } => picked.frame(),
+        }) => picked.frame(),
         other => panic!("{other:?}"),
     };
     let held = box_of(&tools);
@@ -382,10 +392,10 @@ fn deleting_removes_the_picked_marks() {
         edited.drawing(),
         &path(&[(10.0, 0.0), (10.5, 0.0)]),
     );
-    let change = tools.select.delete().unwrap();
+    let change = tools.using.delete().unwrap();
     edited.commit(change.into()).unwrap();
     assert_eq!(edited.drawing().marks(LayerIndex(0)).unwrap().len(), 1);
-    assert!(tools.select.delete().is_none(), "nothing is left picked");
+    assert!(tools.using.delete().is_none(), "nothing is left picked");
 }
 
 #[test]
@@ -491,8 +501,8 @@ fn a_turned_mark_is_handled_on_its_own_corners_and_keeps_its_shape() {
         edited.drawing(),
         &tap,
     );
-    let frame = match &tools.select {
-        Selecting::Holding { picked, .. } => picked.frame(),
+    let frame = match &tools.using {
+        Using::Selecting(Selecting::Holding { picked, .. }) => picked.frame(),
         other => panic!("{other:?}"),
     };
     let corner = Handle::Corner(ink::tool::Corner::BottomRight).at(&frame, reach());

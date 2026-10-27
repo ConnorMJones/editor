@@ -11,7 +11,7 @@ use model::notice::Notice;
 
 use crate::State;
 use crate::drawing::command::{add, commit};
-use crate::drawing::{InkFile, InkTabs};
+use crate::drawing::{Doing, InkFile, InkTabs};
 use crate::text::buffer::TextDoc;
 use crate::view::tab::Tab;
 
@@ -109,12 +109,16 @@ pub fn open<T>(at: TypeAt<T>, style: &TextStyle, paint: Paint, fonts: &Fonts) ->
 /// Ends the text being typed, if any: blank text adds nothing and removes the mark it edited, and
 /// changed text becomes one step of the drawing's history.
 pub fn finish<D: Drawing>(
-    typing: &mut Option<Box<Open<D::Target>>>,
+    doing: &mut Doing<D::Target>,
     file: &mut InkFile<D>,
     fonts: &Fonts,
 ) -> Result<Ended<D::Target>, Notice> {
-    let Some(open) = typing.take() else {
-        return Ok(Ended::NothingOpen);
+    let open = match std::mem::replace(doing, Doing::IDLE) {
+        Doing::Typing(open) => open,
+        ink @ Doing::Ink { .. } => {
+            *doing = ink;
+            return Ok(Ended::NothingOpen);
+        }
     };
     let Open {
         target,
@@ -197,8 +201,8 @@ impl InkTabs {
     /// The text the tab is typing, if any.
     pub fn text_box(&mut self) -> Option<&mut TextBox> {
         match self {
-            InkTabs::Paged(tab) => tab.hand.typing.as_mut().map(|open| &mut open.text),
-            InkTabs::Board(tab) => tab.hand.typing.as_mut().map(|open| &mut open.text),
+            InkTabs::Paged(tab) => tab.hand.doing.text_box(),
+            InkTabs::Board(tab) => tab.hand.doing.text_box(),
         }
     }
 }
@@ -218,8 +222,24 @@ pub enum Ended<T> {
 impl InkTabs {
     pub fn typed(&self) -> Option<&TextBox> {
         match self {
-            InkTabs::Paged(tab) => tab.hand.typing.as_ref().map(|open| &open.text),
-            InkTabs::Board(tab) => tab.hand.typing.as_ref().map(|open| &open.text),
+            InkTabs::Paged(tab) => tab.hand.doing.typed(),
+            InkTabs::Board(tab) => tab.hand.doing.typed(),
+        }
+    }
+}
+
+impl<T> Doing<T> {
+    pub fn typed(&self) -> Option<&TextBox> {
+        match self {
+            Doing::Typing(open) => Some(&open.text),
+            Doing::Ink { .. } => None,
+        }
+    }
+
+    pub fn text_box(&mut self) -> Option<&mut TextBox> {
+        match self {
+            Doing::Typing(open) => Some(&mut open.text),
+            Doing::Ink { .. } => None,
         }
     }
 }

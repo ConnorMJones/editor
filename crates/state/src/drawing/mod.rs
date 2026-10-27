@@ -14,7 +14,7 @@ use ink::doc::{Background, Board, Drawing, GeometryId, LayerIndex, Layers, PageL
 use ink::history::{Edited, Revision};
 use ink::input::{Model, WindowParams};
 use ink::text::{FontFamily, TextStyle};
-use ink::tool::{Gather, Grip, Picked, Selecting, ToolKind, Tools};
+use ink::tool::{Gather, Picked, ToolKind, Tools, Using, still};
 
 use crate::drawing::typing::Open;
 use model::geom::{Affine, Pane, Surface};
@@ -82,16 +82,30 @@ pub struct BoardTab {
 pub struct Hand<T> {
     pub layer: LayerIndex,
     pub tip: ToolKind,
-    pub tools: Tools<T>,
-    /// The text being typed, which takes the keys.
-    pub typing: Option<Box<Open<T>>>,
+    pub tools: Tools,
+    pub doing: Doing<T>,
     /// How new text looks.
     pub style: TextStyle,
-    pub pen: Pen,
     /// Names the stroke in progress for the host, which keeps its mesh.
     pub live: GeometryId,
     /// The pane's size when last drawn, for keys that move by part of it.
     pub last: Option<Measure>,
+}
+
+pub enum Doing<T> {
+    Ink {
+        using: Using<T>,
+        pen: Pen,
+    },
+    /// The text takes the keys and the pen until it ends.
+    Typing(Box<Open<T>>),
+}
+
+impl<T> Doing<T> {
+    pub const IDLE: Doing<T> = Doing::Ink {
+        using: Using::Idle,
+        pen: Pen::Up,
+    };
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,9 +130,8 @@ impl<T: Copy + PartialEq> Hand<T> {
             layer,
             tip: ToolKind::Brush,
             tools: Tools::new(settings.brush, settings.paint, settings.eraser),
-            typing: None,
+            doing: Doing::IDLE,
             style: settings.text.clone(),
-            pen: Pen::Up,
             live: GeometryId::next(),
             last: None,
         }
@@ -126,18 +139,24 @@ impl<T: Copy + PartialEq> Hand<T> {
 
     /// Drops the stroke under way, as when the drawing under it changes by other means.
     pub fn cancel_stroke(&mut self) {
-        self.tools.cancel();
-        self.pen = Pen::Up;
+        match self.doing {
+            Doing::Ink { .. } => self.doing = Doing::IDLE,
+            Doing::Typing(_) => {}
+        }
     }
 
+    /// Text being typed keeps the keys, leaving `picked` unpicked.
     pub fn pick(&mut self, target: T, picked: Picked) {
-        self.cancel_stroke();
-        self.tip = ToolKind::Select(Gather::Box);
-        self.tools.select = Selecting::Holding {
-            target,
-            picked,
-            grip: Grip::Still,
-        };
+        match self.doing {
+            Doing::Ink { .. } => {
+                self.tip = ToolKind::Select(Gather::Box);
+                self.doing = Doing::Ink {
+                    using: still(target, picked),
+                    pen: Pen::Up,
+                };
+            }
+            Doing::Typing(_) => {}
+        }
     }
 
     /// A hand with the same settings and no stroke in progress.
@@ -146,11 +165,7 @@ impl<T: Copy + PartialEq> Hand<T> {
             tip: self.tip,
             style: self.style.clone(),
             last: self.last,
-            tools: Tools::new(
-                self.tools.brush.brush,
-                self.tools.brush.paint,
-                self.tools.eraser.size,
-            ),
+            tools: Tools::new(self.tools.brush, self.tools.paint, self.tools.eraser),
             ..Hand::new(&InkSettings::default(), self.layer)
         }
     }

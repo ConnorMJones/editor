@@ -15,7 +15,7 @@ use ink::doc::{Background, Board, Drawing, GeometryId, Ink, MarkId, Paged, Patte
 use ink::input::{Pressure, Tilt};
 use ink::mesh::Mesh;
 use ink::text::{Caret, Inked};
-use ink::tool::{Brushing, Corner, Erasing, Handle, Placing, Selecting, Shaping};
+use ink::tool::{Corner, Handle, Selecting, Shaping, Using};
 use model::color::Rgb;
 use model::geom::{Affine, Local, Pane, Point, Rect, Surface};
 use model::picture::{Picture, Source};
@@ -26,7 +26,7 @@ use slotmap::Key as _;
 use state::drawing::frame::{self, InkFrame, Paper, REACH};
 use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
 use state::drawing::typing::{TextBox, Writing};
-use state::drawing::{Hand, InkTabs};
+use state::drawing::{Doing, Hand, InkTabs};
 use state::view::layout::PaneId;
 use state::view::tab::Tab;
 
@@ -294,37 +294,40 @@ pub fn paint_ink<D: Drawing>(
                 Visibility::Hidden => continue,
             }
             let target = D::target(shown.surface, index);
-            // Marks being erased are hidden; picked ones under a grip are drawn where it takes them.
-            let hidden: &[MarkId] = match &hand.tools.eraser.state {
-                Erasing::Erasing { target: on, erased } if *on == target => erased,
-                Erasing::Erasing { .. } | Erasing::Idle => &[],
+            let held = match &hand.doing {
+                Doing::Ink {
+                    using: Using::Erasing { target: on, erased },
+                    ..
+                } if *on == target => Held::Hidden(erased),
+                Doing::Ink {
+                    using:
+                        Using::Selecting(Selecting::Holding {
+                            target: on,
+                            picked,
+                            grip,
+                        }),
+                    ..
+                } if *on == target => Held::Moved {
+                    ids: picked.ids(),
+                    by: grip.transform(picked),
+                },
+                // A text mark being edited is drawn from the text instead.
+                Doing::Typing(open) if open.target == target => match &open.writing {
+                    Writing::Replacing(was) => Held::Hidden(std::slice::from_ref(&was.id)),
+                    Writing::New => Held::Nothing,
+                },
+                Doing::Ink { .. } | Doing::Typing(_) => Held::Nothing,
             };
-            let (moved, by): (&[MarkId], _) = match &hand.tools.select {
-                Selecting::Holding {
-                    target: on,
-                    picked,
-                    grip,
-                } if *on == target => (picked.ids(), grip.transform(picked)),
-                Selecting::Holding { .. }
-                | Selecting::Idle
-                | Selecting::Pressed { .. }
-                | Selecting::Boxing { .. }
-                | Selecting::Lassoing { .. } => (&[], Affine::identity()),
-            };
-            // A text mark being edited is drawn from the text instead.
-            let editing = hand.typing.as_ref().and_then(|open| match &open.writing {
-                Writing::Replacing(was) if open.target == target => Some(was.id),
-                Writing::Replacing(_) | Writing::New => None,
-            });
-            let shown = marks
-                .iter()
-                .filter(|(id, _)| !hidden.contains(id) && editing != Some(*id));
-            for (id, mark) in shown {
-                let forward = (moved.contains(&id))
-                    .then_some(&by)
-                    .map_or(*mark.placement.forward(), |by| {
+            for (id, mark) in marks.iter() {
+                let forward = match &held {
+                    Held::Hidden(ids) if ids.contains(&id) => continue,
+                    Held::Moved { ids, by } if ids.contains(&id) => {
                         mark.placement.forward().then(by)
-                    });
+                    }
+                    Held::Nothing | Held::Hidden(_) | Held::Moved { .. } => {
+                        *mark.placement.forward()
+                    }
+                };
                 let transform = forward.then(&to_screen);
                 let built = mark.built();
                 match &mark.ink {
@@ -370,14 +373,17 @@ pub fn paint_ink<D: Drawing>(
         on_screen(target)
             .map(|(_, to_screen)| Affine::<Local, Surface>::identity().then(&to_screen))
     };
-    let brush = &hand.tools.brush;
-    match &brush.state {
-        Brushing::Drawing { target, paint, .. } => {
-            let mesh = brush.stroke.mesh.mesh();
+    match &hand.doing {
+        Doing::Ink {
+            using: Using::Brushing { target, paint, .. },
+            ..
+        } => {
+            let stroke = &hand.tools.stroke;
+            let mesh = stroke.mesh.mesh();
             match (aligned(*target), mesh.bounds()) {
                 (Some(transform), Some(local)) => paint_mesh(
                     MeshKey(hand.live.get()),
-                    MeshVersion(brush.stroke.revision),
+                    MeshVersion(stroke.revision),
                     mesh,
                     local.mapped(&transform),
                     &transform,
@@ -388,30 +394,35 @@ pub fn paint_ink<D: Drawing>(
                 (None, _) | (_, None) => {}
             }
         }
-        Brushing::Idle => {}
-    }
-    match &hand.tools.shape.state {
-        Shaping::Dragging { target, ink, .. } => match aligned(*target) {
+        Doing::Ink {
+            using: Using::Shaping(Shaping::Dragging { target, ink, .. }),
+            ..
+        } => match aligned(*target) {
             Some(transform) => paint_mesh(
                 MeshKey(ink.built.id.get()),
                 MeshVersion(0),
                 &ink.built.mesh,
                 ink.built.bounds.mapped(&transform),
                 &transform,
-                hand.tools.shape.paint.color,
+                hand.tools.paint.color,
                 view,
                 window,
             ),
             None => {}
         },
-        Shaping::Idle | Shaping::Pressed { .. } => {}
-    }
-    match hand.typing.as_ref() {
-        Some(open) => match on_screen(open.target) {
+        Doing::Typing(open) => match on_screen(open.target) {
             Some((_, to_screen)) => paint_typed(&open.text, &to_screen, screen, window),
             None => {}
         },
-        None => {}
+        Doing::Ink {
+            using:
+                Using::Idle
+                | Using::Erasing { .. }
+                | Using::Selecting(_)
+                | Using::Shaping(Shaping::Pressed { .. })
+                | Using::Placing { .. },
+            ..
+        } => {}
     }
     let line = |points: &mut dyn Iterator<Item = Point<Screen>>, closed: Closed| {
         let mut path = PathBuilder::stroke(px(1.0));
@@ -427,46 +438,52 @@ pub fn paint_ink<D: Drawing>(
         }
         path.build()
     };
-    let path = match &hand.tools.select {
-        Selecting::Boxing { target, from, to } => on_screen(*target).map(|(_, to_screen)| {
-            let around = Rect::spanning(*from, *to);
-            line(
-                &mut (Corner::AROUND.into_iter()).map(|corner| to_screen.apply(corner.of(&around))),
-                Closed::Yes,
-            )
-        }),
-        Selecting::Lassoing { target, lasso } => on_screen(*target).map(|(_, to_screen)| {
-            line(&mut lasso.iter().map(|at| to_screen.apply(*at)), Closed::No)
-        }),
-        Selecting::Holding {
-            target,
-            picked,
-            grip,
-        } => on_screen(*target).map(|(shown, to_screen)| {
-            let held = grip.held(picked);
-            let by = grip.transform(picked).then(&to_screen);
-            let reach = frame::reach(&shown.from_pane);
-            for (handle, sits) in held.handles(picked.sides(), reach) {
-                let at = by.apply(sits);
-                let side = REACH.0;
-                let square = Bounds::new(
-                    point(px(at.x - side * 0.5), px(at.y - side * 0.5)),
-                    size(px(side), px(side)),
-                );
-                let round = match handle {
-                    Handle::Corner(_) | Handle::Edge(_) => px(0.0),
-                    Handle::Rotate => px(side * 0.5),
-                };
-                window.paint_quad(fill(square, screen.accent).corner_radii(round));
+    let path = match &hand.doing {
+        Doing::Ink { using, .. } => match using {
+            Using::Selecting(Selecting::Boxing { target, from, to }) => {
+                on_screen(*target).map(|(_, to_screen)| {
+                    let around = Rect::spanning(*from, *to);
+                    line(
+                        &mut (Corner::AROUND.into_iter())
+                            .map(|corner| to_screen.apply(corner.of(&around))),
+                        Closed::Yes,
+                    )
+                })
             }
-            line(
-                &mut (Corner::AROUND.into_iter())
-                    .map(|corner| by.apply(held.placement.forward().apply(corner.of(&held.rect)))),
-                Closed::Yes,
-            )
-        }),
-        Selecting::Idle | Selecting::Pressed { .. } => match &hand.tools.text {
-            Placing::Dragging { target, from, to } => on_screen(*target).map(|(_, to_screen)| {
+            Using::Selecting(Selecting::Lassoing { target, lasso }) => {
+                on_screen(*target).map(|(_, to_screen)| {
+                    line(&mut lasso.iter().map(|at| to_screen.apply(*at)), Closed::No)
+                })
+            }
+            Using::Selecting(Selecting::Holding {
+                target,
+                picked,
+                grip,
+            }) => on_screen(*target).map(|(shown, to_screen)| {
+                let held = grip.held(picked);
+                let by = grip.transform(picked).then(&to_screen);
+                let reach = frame::reach(&shown.from_pane);
+                for (handle, sits) in held.handles(picked.sides(), reach) {
+                    let at = by.apply(sits);
+                    let side = REACH.0;
+                    let square = Bounds::new(
+                        point(px(at.x - side * 0.5), px(at.y - side * 0.5)),
+                        size(px(side), px(side)),
+                    );
+                    let round = match handle {
+                        Handle::Corner(_) | Handle::Edge(_) => px(0.0),
+                        Handle::Rotate => px(side * 0.5),
+                    };
+                    window.paint_quad(fill(square, screen.accent).corner_radii(round));
+                }
+                line(
+                    &mut (Corner::AROUND.into_iter()).map(|corner| {
+                        by.apply(held.placement.forward().apply(corner.of(&held.rect)))
+                    }),
+                    Closed::Yes,
+                )
+            }),
+            Using::Placing { target, from, to } => on_screen(*target).map(|(_, to_screen)| {
                 let around = Rect::spanning(*from, *to);
                 line(
                     &mut (Corner::AROUND.into_iter())
@@ -474,25 +491,38 @@ pub fn paint_ink<D: Drawing>(
                     Closed::Yes,
                 )
             }),
-            // Text being typed shows the box it wraps in.
-            Placing::Idle => hand.typing.as_ref().and_then(|open| {
-                on_screen(open.target).map(|(_, to_screen)| {
-                    let frame = open.text.frame();
-                    let to_screen = frame.placement.forward().then(&to_screen);
-                    line(
-                        &mut (Corner::AROUND.into_iter())
-                            .map(|corner| to_screen.apply(corner.of(&frame.rect))),
-                        Closed::Yes,
-                    )
-                })
-            }),
+            Using::Idle
+            | Using::Brushing { .. }
+            | Using::Erasing { .. }
+            | Using::Shaping(_)
+            | Using::Selecting(Selecting::Pressed { .. }) => None,
         },
+        // Text being typed shows the box it wraps in.
+        Doing::Typing(open) => on_screen(open.target).map(|(_, to_screen)| {
+            let frame = open.text.frame();
+            let to_screen = frame.placement.forward().then(&to_screen);
+            line(
+                &mut (Corner::AROUND.into_iter())
+                    .map(|corner| to_screen.apply(corner.of(&frame.rect))),
+                Closed::Yes,
+            )
+        }),
     };
     match path {
         Some(Ok(path)) => window.paint_path(path, screen.accent),
         Some(Err(error)) => tracing::warn!(%error, "selection outline"),
         None => {}
     }
+}
+
+/// What the hand does to the marks already on a layer.
+pub enum Held<'a> {
+    Nothing,
+    Hidden(&'a [MarkId]),
+    Moved {
+        ids: &'a [MarkId],
+        by: Affine<Surface, Surface>,
+    },
 }
 
 #[derive(Clone, Copy)]
