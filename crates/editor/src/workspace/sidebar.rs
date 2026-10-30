@@ -462,9 +462,11 @@ impl Workspace {
                                     Repo::Found { snapshot, .. } => snapshot.get(&row.path),
                                     Repo::None | Repo::Unknown => None,
                                 };
-                                let color = match status {
-                                    Some(status) => hsla(theme.chrome[status]),
-                                    None => hsla(theme.text),
+                                let marked_up = state.tree.marked_up.get(&row.path);
+                                let color = match (marked_up, status) {
+                                    (Some(_), _) => hsla(theme.chrome.unsaved),
+                                    (None, Some(status)) => hsla(theme.chrome[status]),
+                                    (None, None) => hsla(theme.text),
                                 };
                                 let chevron = match row.kind {
                                     RowKind::File => "",

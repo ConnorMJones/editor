@@ -35,7 +35,9 @@ use crate::view::tab::Opened;
 use crate::viewer::{self, ImageId, ProbeError, Probed};
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 use ink::history::Revision;
-use library::{Change, DocumentId, Identity, Library, LibraryError, SearchHit, SearchQuery};
+use library::{
+    Change, DocumentId, Identity, Library, LibraryError, Markup, SearchHit, SearchQuery,
+};
 use model::notice::Notice;
 use reader::pdf::{Document, PdfError, TextClaim};
 
@@ -84,6 +86,17 @@ pub enum Job {
         library: Library,
         document: DocumentId,
         page: PageIndex,
+    },
+    WritePdf(PdfWrite),
+    Rewritten {
+        library: Library,
+        document: DocumentId,
+        written: Arc<Document>,
+        markup: Markup,
+    },
+    MarkedUp {
+        library: Library,
+        root: PathBuf,
     },
 
     Index {
@@ -259,6 +272,12 @@ pub enum JobResult {
         result: Result<(), LibraryError>,
     },
     PlaceKept(Result<(), LibraryError>),
+    PdfWritten {
+        write: PdfWritten,
+        result: Result<(Arc<Document>, Written), PdfWriteError>,
+    },
+    Rewritten(Result<(), LibraryError>),
+    MarkedUp(Result<Vec<PathBuf>, LibraryError>),
     AnnotationsFound {
         typed: String,
         result: Result<Vec<SearchHit>, LibraryError>,
@@ -363,6 +382,39 @@ impl Saving {
 }
 
 /// What a write puts in the file.
+pub struct PdfWrite {
+    pub path: PathBuf,
+    pub file: PdfId,
+    pub revision: Revision,
+    pub on_disk: Arc<Document>,
+    pub ink: Paged,
+    pub fonts: Fonts,
+    pub how: PdfWriting,
+}
+
+pub struct PdfWritten {
+    pub path: PathBuf,
+    pub file: PdfId,
+    pub revision: Revision,
+    pub how: PdfWriting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfWriting {
+    Save,
+    Flatten,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PdfWriteError {
+    #[error(transparent)]
+    Markup(#[from] export::markup::MarkupError),
+    #[error(transparent)]
+    Write(#[from] io::Error),
+    #[error("the written PDF can't be read back: {0}")]
+    Reopen(#[from] PdfError),
+}
+
 pub enum Data {
     Text(Rope),
     Bytes(Vec<u8>),
@@ -405,6 +457,8 @@ pub enum Unreadable {
     Image(#[from] ProbeError),
     #[error(transparent)]
     Pdf(#[from] PdfError),
+    #[error(transparent)]
+    Markup(#[from] export::markup::MarkupError),
 }
 
 #[derive(Clone, Debug)]
@@ -412,7 +466,7 @@ pub enum Reload {
     Text(BufferId),
     Paged(PagedId, Fonts),
     Board(BoardId, Fonts),
-    Pdf(PdfId, Library),
+    Pdf(PdfId, Library, Fonts),
     Image(ImageId, Encoding),
 }
 
@@ -420,7 +474,7 @@ pub enum Reloaded {
     Text(BufferId, DiskRead<Rope, NotUtf8>),
     Paged(PagedId, DiskRead<Paged, FormatError>),
     Board(BoardId, DiskRead<Board, FormatError>),
-    Pdf(PdfId, DiskRead<PdfRead, PdfError>),
+    Pdf(PdfId, DiskRead<PdfRead, Unreadable>),
     Image(ImageId, DiskRead<PageSize, ProbeError>),
 }
 
@@ -480,6 +534,9 @@ pub fn run(job: Job) -> JobResult {
         Job::Annotate { .. } => "annotate",
         Job::SearchAnnotations { .. } => "search annotations",
         Job::KeepPlace { .. } => "keep place",
+        Job::WritePdf(_) => "write pdf",
+        Job::Rewritten { .. } => "rewritten",
+        Job::MarkedUp { .. } => "marked up",
         Job::Index { .. } => "index",
         Job::ListDir { .. } => "list dir",
         Job::Rescan { .. } => "rescan",
@@ -604,6 +661,51 @@ pub fn run(job: Job) -> JobResult {
             document,
             page,
         } => JobResult::PlaceKept(library.keep_place(document, page)),
+        Job::WritePdf(PdfWrite {
+            path,
+            file,
+            revision,
+            on_disk,
+            ink,
+            fonts,
+            how,
+        }) => {
+            let result = (|| {
+                let update = match how {
+                    PdfWriting::Save => export::markup::save(&on_disk, &ink, &fonts)?,
+                    PdfWriting::Flatten => export::markup::flatten(&on_disk, &ink, &fonts)?,
+                };
+                let mut bytes = on_disk.bytes.to_vec();
+                bytes.extend(update.0);
+                std::fs::write(&path, &bytes)?;
+                let written = Written {
+                    bytes: bytes.len(),
+                    mtime: modified(&path)?,
+                };
+                Ok((Arc::new(Document::open(bytes.into())?), written))
+            })();
+            JobResult::PdfWritten {
+                write: PdfWritten {
+                    path,
+                    file,
+                    revision,
+                    how,
+                },
+                result,
+            }
+        }
+        Job::Rewritten {
+            library,
+            document,
+            written,
+            markup,
+        } => JobResult::Rewritten(library.rewritten(document, &written, markup)),
+        Job::MarkedUp { library, root } => JobResult::MarkedUp(library.marked_up().map(|paths| {
+            (paths.iter())
+                .map(|path| library.path_of(path))
+                .filter(|path| path.starts_with(&root))
+                .collect()
+        })),
         Job::PdfText(claim) => JobResult::PdfText {
             page: claim.page,
             result: claim.read().map(|_| ()),
@@ -649,9 +751,11 @@ pub fn run(job: Job) -> JobResult {
                     id,
                     read_again(&path, when, |bytes| ink::format::read_board(&bytes, &fonts)),
                 ),
-                Reload::Pdf(id, library) => Reloaded::Pdf(
+                Reload::Pdf(id, library, fonts) => Reloaded::Pdf(
                     id,
-                    read_again(&path, when, |bytes| read_pdf(&path, bytes, &library)),
+                    read_again(&path, when, |bytes| {
+                        read_pdf(&path, bytes, &library, &fonts)
+                    }),
                 ),
                 Reload::Image(id, encoding) => Reloaded::Image(
                     id,
@@ -836,6 +940,9 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Annotated { .. } => "annotated",
         JobResult::AnnotationsFound { .. } => "annotations found",
         JobResult::PlaceKept(_) => "place kept",
+        JobResult::PdfWritten { .. } => "pdf written",
+        JobResult::Rewritten(_) => "rewritten",
+        JobResult::MarkedUp(_) => "marked up",
         JobResult::Typeset(_) => "typeset",
         JobResult::Indexed(_) => "indexed",
         JobResult::Listed { .. } => "listed",
@@ -872,6 +979,16 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             change,
             result,
         } => crate::drawing::reading::annotated(state, file, document, change, result),
+        JobResult::PdfWritten { write, result } => {
+            crate::drawing::markup::written(state, write, result, out)
+        }
+        JobResult::Rewritten(Ok(())) => {}
+        JobResult::MarkedUp(Ok(paths)) => crate::drawing::markup::marked_up(state, paths),
+        JobResult::Rewritten(Err(error)) | JobResult::MarkedUp(Err(error)) => {
+            state.notice = Some(Notice::LibraryFailed {
+                reason: error.to_string(),
+            })
+        }
         JobResult::PlaceKept(Ok(())) => {}
         JobResult::PlaceKept(Err(error)) => {
             state.notice = Some(Notice::LibraryFailed {
@@ -947,12 +1064,12 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts, library: &Libra
             |drawing, disk| OpenRead::Board { drawing, disk },
         ),
         FileKind::Pdf => match (std::fs::read(path), modified(path)) {
-            (Ok(bytes), Ok(mtime)) => match read_pdf(path, bytes, library) {
+            (Ok(bytes), Ok(mtime)) => match read_pdf(path, bytes, library, fonts) {
                 Ok(read) => OpenRead::Pdf {
                     read,
                     disk: Disk::Synced { mtime },
                 },
-                Err(error) => OpenRead::Unreadable(error.into()),
+                Err(error) => OpenRead::Unreadable(error),
             },
             (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
             (Err(error), _) | (Ok(_), Err(error)) => OpenRead::Failed(error),
@@ -969,8 +1086,25 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts, library: &Libra
     }
 }
 
-fn read_pdf(path: &Path, bytes: Vec<u8>, library: &Library) -> Result<PdfRead, PdfError> {
+fn read_pdf(
+    path: &Path,
+    bytes: Vec<u8>,
+    library: &Library,
+    fonts: &Fonts,
+) -> Result<PdfRead, Unreadable> {
     let document = Arc::new(Document::open(bytes.into())?);
+    let drawn = match export::markup::unmarked(&document)? {
+        Some(update) => {
+            let mut bytes = document.bytes.to_vec();
+            bytes.extend(update.0);
+            Arc::new(Document::open(bytes.into())?)
+        }
+        None => document.clone(),
+    };
+    let ink = match document.blob() {
+        Some(blob) => ink::format::read_markup(&blob, drawn.clone(), fonts)?,
+        None => Paged::over_pdf(drawn.clone()),
+    };
     let (notes, said) = match library
         .place(path)
         .map(|place| library.identify(&place, &document))
@@ -1003,7 +1137,9 @@ fn read_pdf(path: &Path, bytes: Vec<u8>, library: &Library) -> Result<PdfRead, P
         }
     };
     Ok(PdfRead {
-        document,
+        on_disk: document,
+        drawn,
+        ink,
         notes,
         said,
     })

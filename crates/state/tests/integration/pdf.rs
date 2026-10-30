@@ -122,13 +122,12 @@ fn tool_keys_wait_for_markup_and_esc_reads_again() {
     h.keys("<esc>");
     assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
     assert_eq!(h.state.input.mode, Mode::Normal);
-    h.keys(":w<ret>");
-    assert!(
-        matches!(h.state.notice, Some(Notice::ReadOnly)),
-        "markup is not written yet"
-    );
     h.keys(":export-pdf<ret>");
-    assert!(matches!(h.state.notice, Some(Notice::NotExportable { .. })));
+    assert!(
+        dir.path().join("paper-marked.pdf").is_file(),
+        "{:?}",
+        h.state.notice
+    );
 }
 
 #[test]
@@ -380,4 +379,76 @@ fn space_tab_and_space_d_switch_between_reading_and_markup() {
     assert_eq!(tab(&h).mode, PdfMode::Markup);
     h.keys("<space>d");
     assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
+}
+
+fn on_disk_blob(h: &Harness) -> Option<Vec<u8>> {
+    h.state.pdfs[tab(h).file()].on_disk().blob()
+}
+
+#[test]
+fn markup_written_into_the_pdf_comes_back_when_it_opens_again() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret><space>d");
+    draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
+    assert_eq!(marks(&h), 1);
+    h.keys(":w<ret>");
+    assert!(
+        matches!(h.state.notice, Some(Notice::Written { .. })),
+        "{:?}",
+        h.state.notice
+    );
+    assert!(
+        !h.state
+            .is_modified(state::view::tab::Opened::Pdf(tab(&h).file()))
+    );
+    assert!(on_disk_blob(&h).is_some());
+    let paper = state::project::path::RelPath::parse("paper.pdf").unwrap();
+    assert!(
+        h.state.tree.marked_up.contains(&paper),
+        "unflattened markup shows in the tree"
+    );
+
+    let mut again = Harness::new(dir.path());
+    assert!(
+        again.state.tree.marked_up.contains(&paper),
+        "the library remembers it"
+    );
+    again.keys(":o paper.pdf<ret>");
+    assert_eq!(marks(&again), 1, "the stroke reads back from the PDF");
+    assert_eq!(
+        again.state.pdfs[tab(&again).file()]
+            .document()
+            .read_text(0)
+            .unwrap()
+            .text,
+        h.state.pdfs[tab(&h).file()]
+            .document()
+            .read_text(0)
+            .unwrap()
+            .text,
+    );
+}
+
+#[test]
+fn flatten_draws_the_markup_into_the_pages_and_leaves_nothing_to_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret><space>d");
+    draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
+    h.keys(":w<ret>:flatten<ret>");
+    assert!(
+        matches!(h.state.notice, Some(Notice::Flattened { .. })),
+        "{:?}",
+        h.state.notice
+    );
+    assert_eq!(marks(&h), 0);
+    assert!(on_disk_blob(&h).is_none());
+    let paper = state::project::path::RelPath::parse("paper.pdf").unwrap();
+    assert!(!h.state.tree.marked_up.contains(&paper));
+    let mut again = Harness::new(dir.path());
+    again.keys(":o paper.pdf<ret>");
+    assert_eq!(marks(&again), 0);
 }

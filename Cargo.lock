@@ -1805,11 +1805,16 @@ name = "export"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "hayro-write",
  "ink",
  "krilla",
  "krilla-svg",
+ "kurbo",
  "lyon_tessellation",
+ "miniz_oxide 0.8.9",
  "model",
+ "pdf-writer",
+ "reader",
  "resvg",
  "smallvec",
  "thiserror 2.0.21",
@@ -5398,6 +5403,7 @@ dependencies = [
  "krilla",
  "kurbo",
  "model",
+ "pdf-writer",
  "thiserror 2.0.21",
  "tracing",
 ]

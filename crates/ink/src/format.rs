@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use model::color::Rgb;
 use model::theme::{Alpha, Color};
+use reader::pdf::Document;
 
 use crate::brush::{Brush, Curve, Fraction, InvalidFraction, InvalidSize, Paint, Size, WidthFrom};
 use crate::doc::{
@@ -21,6 +22,7 @@ use crate::text::{EmptyFamily, FontFamily, Fonts, Inked, TextInk, TextStyle, Wra
 
 const PAGED: [u8; 4] = *b"PDT\0";
 const BOARD: [u8; 4] = *b"BDT\0";
+const MARKUP: [u8; 4] = *b"EDT\0";
 /// The only version read or written until the first release.
 pub const VERSION: u16 = 1;
 
@@ -73,6 +75,8 @@ pub enum FormatError {
     Pressure(#[from] InvalidPressure),
     #[error(transparent)]
     Tilt(#[from] InvalidTilt),
+    #[error("the markup has {markup} pages and the PDF {pdf}")]
+    PageCount { markup: usize, pdf: usize },
     #[error(transparent)]
     Stroke(#[from] StrokeError),
 }
@@ -116,6 +120,39 @@ pub fn read_board(bytes: &[u8], fonts: &Fonts) -> Result<Board, FormatError> {
     let board = Board::build(background, layers, &mut read, Reader::layer_marks)?;
     read.end()?;
     Ok(board)
+}
+
+pub fn write_markup(paged: &Paged, out: &mut Vec<u8>) {
+    header(out, MARKUP);
+    layers(out, paged.layers());
+    out.extend((paged.pages().len() as u32).to_le_bytes());
+    for page in paged.pages() {
+        for marks in page.marks().iter() {
+            write_marks(out, marks);
+        }
+    }
+}
+
+pub fn read_markup(
+    bytes: &[u8],
+    document: Arc<Document>,
+    fonts: &Fonts,
+) -> Result<Paged, FormatError> {
+    let mut read = Reader::open(bytes, MARKUP, "markup", fonts)?;
+    let layers = read.layers()?;
+    let pages = document.pages.sizes().len();
+    match read.u32()? as usize {
+        count if count == pages => {}
+        count => {
+            return Err(FormatError::PageCount {
+                markup: count,
+                pdf: pages,
+            });
+        }
+    }
+    let paged = Paged::marked_over_pdf(document, layers, &mut read, Reader::layer_marks)?;
+    read.end()?;
+    Ok(paged)
 }
 
 pub fn header(out: &mut Vec<u8>, magic: [u8; 4]) {

@@ -3,6 +3,7 @@
 pub mod command;
 pub mod embed;
 pub mod frame;
+pub mod markup;
 pub mod pen;
 pub mod reading;
 pub mod typing;
@@ -48,12 +49,15 @@ pub type PdfFiles = SlotMap<PdfId, PdfFile>;
 
 pub struct PdfFile {
     pub ink: InkFile<Paged>,
-    document: Arc<Document>, // private: must stay the underlay of `ink`; only `new` and `replace` set both
+    document: Arc<Document>, // private: must stay the underlay of `ink`; only `new`, `replace` and `flattened` set both
+    on_disk: Arc<Document>,  // private: the bytes the file holds, which the next save appends to
     pub notes: Notes,
 }
 
 pub struct PdfRead {
-    pub document: Arc<Document>,
+    pub on_disk: Arc<Document>,
+    pub drawn: Arc<Document>,
+    pub ink: Paged,
     pub notes: Notes,
     pub said: Option<Notice>,
 }
@@ -126,10 +130,28 @@ impl<D: Drawing> InkFile<D> {
 impl PdfFile {
     pub fn new(path: PathBuf, read: PdfRead, disk: Disk) -> PdfFile {
         PdfFile {
-            ink: InkFile::new(path, Paged::over_pdf(read.document.clone()), disk),
-            document: read.document,
+            ink: InkFile::new(path, read.ink, disk),
+            document: read.drawn,
+            on_disk: read.on_disk,
             notes: read.notes,
         }
+    }
+
+    pub fn on_disk(&self) -> &Arc<Document> {
+        &self.on_disk
+    }
+
+    pub fn saved(&mut self, on_disk: Arc<Document>, revision: Revision, disk: Disk) {
+        self.on_disk = on_disk;
+        self.ink.saved = revision;
+        self.ink.disk = disk;
+    }
+
+    pub fn flattened(&mut self, on_disk: Arc<Document>, disk: Disk) {
+        self.document = on_disk.clone();
+        self.ink.saved = self.ink.edited.replace(Paged::over_pdf(on_disk.clone()));
+        self.on_disk = on_disk;
+        self.ink.disk = disk;
     }
 
     pub fn document(&self) -> &Arc<Document> {
@@ -137,9 +159,10 @@ impl PdfFile {
     }
 
     pub fn replace(&mut self, read: PdfRead) -> Revision {
-        self.document = read.document.clone();
+        self.document = read.drawn;
+        self.on_disk = read.on_disk;
         self.notes = read.notes;
-        self.ink.edited.replace(Paged::over_pdf(read.document))
+        self.ink.edited.replace(read.ink)
     }
 }
 

@@ -1,6 +1,8 @@
 //! What an export shows: a page, or a region of a board, as paper with the marks over it.
 
-use ink::doc::{Background, Board, Drawing, LayerIndex, Mark, MarkId, PageIndex, Paged, Pattern};
+use ink::doc::{
+    Background, Board, Drawing, LayerIndex, Mark, MarkId, PageIndex, Paged, Pattern, Underlay,
+};
 use std::cmp::Ordering;
 
 use ink::geom::{Local, Point, Rect, Surface};
@@ -14,9 +16,12 @@ pub const RULE: f32 = 0.5;
 /// The side of a dot on dotted paper, in points.
 pub const DOT: f32 = 1.5;
 
+pub static BLANK: Underlay = Underlay::Blank;
+
 pub struct Scene<'a> {
     pub area: Rect<Surface>,
     pub paper: Background,
+    pub underlay: &'a Underlay,
     /// Bottom first.
     pub marks: Vec<&'a Mark>,
 }
@@ -44,6 +49,7 @@ pub fn page(paged: &Paged, index: PageIndex) -> Scene<'_> {
             Point::new(placed.size.width.get(), placed.size.height.get()),
         ),
         paper: page.background,
+        underlay: paged.underlay(),
         marks: (page.marks().shown(paged.layers()))
             .flat_map(|marks| marks.iter().map(|(_, mark)| mark.as_ref()))
             .collect(),
@@ -71,6 +77,7 @@ pub fn region<'a>(board: &'a Board, region: &Region) -> Option<Scene<'a>> {
             Point::new(max.x + GAP, max.y + GAP),
         ),
         paper: board.background,
+        underlay: &BLANK,
         marks,
     })
 }

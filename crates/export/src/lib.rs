@@ -1,5 +1,6 @@
 //! Drawings written out as PDF, SVG or PNG.
 
+pub mod markup;
 pub mod pdf;
 pub mod scene;
 pub mod svg;
@@ -24,6 +25,8 @@ pub enum ExportError {
     Png(Box<dyn std::error::Error + Send + Sync>),
     #[error("there is nothing to export")]
     Empty,
+    #[error("the PDF under the drawing could not be read: {0}")]
+    Original(String),
 }
 
 /// What to write, from snapshots of the drawing taken when the export was asked for.

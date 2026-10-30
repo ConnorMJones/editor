@@ -11,6 +11,13 @@ pub enum Notice {
         path: PathBuf,
         bytes: usize,
     },
+    Flattened {
+        path: PathBuf,
+    },
+    MarkupFailed {
+        path: PathBuf,
+        reason: String,
+    },
     WriteFailed {
         path: PathBuf,
         error: io::Error,
@@ -228,6 +235,10 @@ impl std::fmt::Display for Notice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Notice::Written { path, bytes } => write!(f, "written {} ({bytes} B)", path.display()),
+            Notice::Flattened { path } => write!(f, "flattened the markup into {}", path.display()),
+            Notice::MarkupFailed { path, reason } => {
+                write!(f, "writing markup into {} failed: {reason}", path.display())
+            }
             Notice::WriteFailed { path, error } => {
                 write!(f, "failed to write {}: {error}", path.display())
             }

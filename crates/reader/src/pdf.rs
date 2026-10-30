@@ -19,9 +19,12 @@ use kurbo::{Affine, BezPath, Rect};
 use model::geom::{Point, Surface};
 use model::sheet::{PageSize, Stack};
 
+pub mod revise;
+
 pub const TILE: u16 = 512;
 pub const LEVELS_PER_DOUBLING: f32 = 4.0;
 pub const FINEST: Level = Level(40);
+pub const OUTLINE_ENTRIES: usize = 100_000;
 
 pub struct Document {
     pdf: Pdf, // private: parsed from `bytes`
@@ -430,10 +433,19 @@ pub struct Heading {
     pub page: Option<usize>,
 }
 
-/// Most entries read from an outline, so a cyclic one ends.
-pub const OUTLINE_ENTRIES: usize = 100_000;
-
 impl Document {
+    pub fn user_from_view(&self, page: usize) -> Option<Affine> {
+        let read = self.pdf.pages().get(page)?;
+        Some(read.initial_transform(true).to_kurbo().inverse())
+    }
+
+    pub fn blob(&self) -> Option<Vec<u8>> {
+        let xref = self.pdf.xref();
+        let catalog = xref.get::<Dict<'_>>(xref.root_id())?;
+        let stream = catalog.get::<hayro::hayro_syntax::object::Stream<'_>>(revise::BLOB)?;
+        stream.decoded().ok().map(|decoded| decoded.into_owned())
+    }
+
     pub fn outline(&self) -> Vec<Heading> {
         let xref = self.pdf.xref();
         let Some(catalog) = xref.get::<Dict<'_>>(xref.root_id()) else {

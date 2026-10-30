@@ -21,6 +21,7 @@ pub struct Tree {
     pub rows: Vec<Row>,
     pub cursor: usize,
     pub unsaved: Unsaved,
+    pub marked_up: HashSet<RelPath>,
 }
 
 pub struct Dir {

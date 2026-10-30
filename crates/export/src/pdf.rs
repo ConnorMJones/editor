@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+use hayro_write::hayro_syntax::Pdf;
 use ink::brush::Paint;
+use ink::doc::{Background, Underlay};
 use ink::doc::{Embedded, ImageInk, Ink, Mark};
 use ink::text::{FontId, Fonts, TextInk};
 use krilla::color::rgb;
@@ -12,11 +14,13 @@ use krilla::image::Image;
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule};
+use krilla::pdf::PdfDocument;
 use krilla::surface::Surface as Canvas;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::{Data, Document};
 use krilla_svg::{SurfaceExt, SvgSettings};
 use model::color::Rgb;
+use std::sync::Arc;
 
 use crate::ExportError;
 use crate::scene::{Scene, wound};
@@ -27,6 +31,7 @@ pub fn pdf<'a>(
 ) -> Result<Vec<u8>, ExportError> {
     let mut document = Document::new();
     let mut faces = HashMap::new();
+    let mut sources: HashMap<usize, PdfDocument> = HashMap::new();
     for scene in scenes {
         let (min, max) = (scene.area.min(), scene.area.max());
         let settings =
@@ -34,6 +39,22 @@ pub fn pdf<'a>(
         let mut page = document.start_page_with(settings);
         let mut surface = page.surface();
         surface.push_transform(&Transform::from_translate(-min.x, -min.y));
+        match (scene.paper, scene.underlay) {
+            (Background::Pdf { page }, Underlay::Pdf(source)) => {
+                let key = Arc::as_ptr(&source.document) as usize;
+                let original = match sources.entry(key) {
+                    Entry::Occupied(found) => found.into_mut(),
+                    Entry::Vacant(slot) => {
+                        let pdf = Pdf::new(Arc::new(source.document.bytes.clone()))
+                            .map_err(|error| ExportError::Original(format!("{error:?}")))?;
+                        slot.insert(PdfDocument::new(Arc::new(pdf)))
+                    }
+                };
+                let size = Size::from_wh(max.x - min.x, max.y - min.y).ok_or(ExportError::Empty)?;
+                surface.draw_pdf_page(original, size, page as usize);
+            }
+            (_, _) => {}
+        }
         for fill in scene.paper() {
             let mut path = PathBuilder::new();
             for rect in &fill.rects {

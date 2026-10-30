@@ -1,3 +1,4 @@
+mod markup;
 mod scene;
 mod writers;
 

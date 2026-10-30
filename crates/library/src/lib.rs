@@ -31,7 +31,8 @@ CREATE TABLE documents (
     hash BLOB NOT NULL,
     size INTEGER NOT NULL,
     pages INTEGER NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0
+    position INTEGER NOT NULL DEFAULT 0,
+    markup INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX documents_hash ON documents(hash);
 CREATE TABLE annotations (
@@ -108,6 +109,12 @@ impl std::fmt::Debug for Library {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Library({})", self.folder.display())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Markup {
+    None,
+    Unflattened,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -346,6 +353,47 @@ impl Library {
                 }
             }
             Ok(tx.commit()?)
+        })
+    }
+
+    pub fn rewritten(
+        &self,
+        document: DocumentId,
+        written: &Document,
+        markup: Markup,
+    ) -> Result<(), LibraryError> {
+        let hash = FastHash::of(&written.bytes);
+        let markup = match markup {
+            Markup::None => 0,
+            Markup::Unflattened => 1,
+        };
+        self.with(|connection| {
+            connection.execute(
+                "UPDATE documents SET hash = ?1, size = ?2, pages = ?3, markup = ?4 WHERE id = ?5",
+                params![
+                    &hash.0[..],
+                    written.bytes.len() as i64,
+                    written.pages.sizes().len() as i64,
+                    markup,
+                    document.0
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn marked_up(&self) -> Result<Vec<LibPath>, LibraryError> {
+        match std::fs::metadata(self.folder.join(FOLDER).join(FILE)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+        self.with(|connection| {
+            let mut rows = connection.prepare("SELECT path FROM documents WHERE markup = 1")?;
+            let paths = (rows.query_map([], |row| row.get::<_, String>(0))?)
+                .map(|path| path.map(LibPath))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(paths)
         })
     }
 

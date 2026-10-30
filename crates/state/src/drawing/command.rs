@@ -194,6 +194,17 @@ fn pdf(
             tab.mode = PdfMode::Markup;
             Ok(After::Nothing)
         }
+        DrawingCommand::Pdf(PdfCommand::Flatten) => {
+            let ended = typing::finish(&mut tab.hand.doing, &mut file.ink, fonts)?;
+            let how = crate::job::PdfWriting::Flatten;
+            out.push(Effect::Job(crate::drawing::markup::write(
+                tab.file(),
+                file,
+                fonts,
+                how,
+            )));
+            Ok(After::of(ended))
+        }
         DrawingCommand::Pdf(PdfCommand::Copy) => match &tab.mode {
             PdfMode::Read(Reading::Selected(span)) => {
                 let text = (file.document().text(span.page.0))

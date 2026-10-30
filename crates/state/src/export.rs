@@ -74,7 +74,17 @@ pub fn export(state: &mut State, to: ExportAs, out: &mut Vec<Effect>) {
                 path: file.path.with_extension(to.extension()),
             })
         }
-        (Some(Tab::Ink(InkTabs::Pdf(_))), _)
+        (Some(Tab::Ink(InkTabs::Pdf(tab))), ExportAs::Pdf) => {
+            let file = &state.pdfs[tab.file()].ink;
+            let mut name = OsString::from(file.path.file_stem().unwrap_or_default());
+            name.push("-marked.pdf");
+            Ok(Job::ExportDrawing {
+                export: Export::Pages(file.edited.drawing().clone()),
+                fonts,
+                path: file.path.with_file_name(name),
+            })
+        }
+        (Some(Tab::Ink(InkTabs::Pdf(_))), ExportAs::Svg | ExportAs::Png)
         | (Some(Tab::Text(_)), ExportAs::Svg | ExportAs::Png)
         | (Some(Tab::Image(_)) | None, _) => Err(Notice::NotExportable { to }),
     };

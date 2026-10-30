@@ -29,6 +29,10 @@ git2 = { version = "0.21.0", default-features = false }
 # PDF rendering, vendored to add `render_region`; typst-svg shares it through the patch below.
 hayro = { path = "vendor/hayro" }
 hayro-interpret = { version = "0.7.0", default-features = false }
+# Writing PDF objects: updates appended to PDFs, and markup copied into them. Both already in the build through krilla.
+pdf-writer = "0.15.0"
+hayro-write = "0.7.0"
+miniz_oxide = "0.8.9"
 pic-scale = { version = "0.7.9", default-features = false, features = ["neon", "rdm", "sse", "avx"] }
 vello_cpu = { version = "0.0.8", default-features = false, features = ["std", "png", "u8_pipeline"] }
 kurbo = "0.13.1"
@@ -39,7 +43,7 @@ ignore = "0.4.33"
 # Same version helix-core uses, so the tree keeps one copy.
 imara-diff = "0.2.0"
 # PDF output for drawings; the same version typst-pdf uses.
-krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
+krilla = { version = "0.8.2", default-features = false, features = ["raster-images", "pdf"] }
 krilla-svg = "0.8.1"
 notify = { version = "8.2.0", default-features = false }
 nucleo = "0.5.0"

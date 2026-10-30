@@ -582,6 +582,7 @@ pub enum DrawingCommand {
 pub enum PdfCommand {
     Read,
     Markup,
+    Flatten,
     Copy,
     Find,
     FindSelection,

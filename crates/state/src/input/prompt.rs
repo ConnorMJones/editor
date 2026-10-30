@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use helix_core::unicode::segmentation::GraphemeCursor;
 use model::command::{
-    Command, Cycle, Direction, Dirs, ExportAs, PromptCommand, PromptMotion, RegexOp, SortCase,
-    SortOrder, Take, WindowCommand,
+    Command, Cycle, Direction, Dirs, DrawingCommand, ExportAs, PdfCommand, PromptCommand,
+    PromptMotion, RegexOp, SortCase, SortOrder, Take, WindowCommand,
 };
 use model::notice::Notice;
 use model::register::Register;
@@ -63,7 +63,7 @@ pub enum Completes {
     Paths,
 }
 
-pub const COMMANDS: [(&[&str], Completes); 30] = [
+pub const COMMANDS: [(&[&str], Completes); 31] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
     (&["write-all", "wa"], Completes::Nothing),
@@ -92,6 +92,7 @@ pub const COMMANDS: [(&[&str], Completes); 30] = [
     (&["conflict-both"], Completes::Nothing),
     (&["conflict-base"], Completes::Nothing),
     (&["export-pdf"], Completes::Nothing),
+    (&["flatten"], Completes::Nothing),
     (&["export-svg"], Completes::Nothing),
     (&["export-png"], Completes::Nothing),
 ];
@@ -426,6 +427,10 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
         ("conflict-both", _) => bare(Command::Resolve(Take::Both), "conflict-both"),
         ("conflict-base", _) => bare(Command::Resolve(Take::Base), "conflict-base"),
         ("export-pdf", _) => bare(Command::Export(ExportAs::Pdf), "export-pdf"),
+        ("flatten", _) => bare(
+            Command::Drawing(DrawingCommand::Pdf(PdfCommand::Flatten)),
+            "flatten",
+        ),
         ("export-svg", _) => bare(Command::Export(ExportAs::Svg), "export-svg"),
         ("export-png", _) => bare(Command::Export(ExportAs::Png), "export-png"),
         // `:<n>` jumps to line n, like helix.

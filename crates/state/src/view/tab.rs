@@ -351,6 +351,7 @@ pub enum Writable {
     Text(BufferId),
     Paged(PagedId),
     Board(BoardId),
+    Pdf(PdfId),
 }
 
 impl Opened {
@@ -359,8 +360,7 @@ impl Opened {
             Opened::Text(buffer) => Some(Writable::Text(buffer)),
             Opened::Paged(id) => Some(Writable::Paged(id)),
             Opened::Board(id) => Some(Writable::Board(id)),
-            // Until markup is written into the PDF itself.
-            Opened::Pdf(_) => None,
+            Opened::Pdf(id) => Some(Writable::Pdf(id)),
             Opened::Image(_) => None,
         }
     }
@@ -372,6 +372,7 @@ impl From<Writable> for Opened {
             Writable::Text(buffer) => Opened::Text(buffer),
             Writable::Paged(id) => Opened::Paged(id),
             Writable::Board(id) => Opened::Board(id),
+            Writable::Pdf(id) => Opened::Pdf(id),
         }
     }
 }

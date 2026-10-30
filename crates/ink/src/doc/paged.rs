@@ -183,6 +183,28 @@ impl Paged {
         }
     }
 
+    pub fn marked_over_pdf<R, E>(
+        document: Arc<Document>,
+        layers: Layers,
+        source: &mut R,
+        marks: fn(&mut R, LayerIndex) -> Result<Marks, E>,
+    ) -> Result<Paged, E> {
+        let pages = (0..document.pages.sizes().len() as u32)
+            .map(|page| {
+                Ok(Page {
+                    background: Background::Pdf { page },
+                    marks: LayerMarks::build(&layers, |layer| marks(source, layer))?,
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?;
+        Ok(Paged {
+            layers,
+            pages,
+            stack: document.pages.clone(),
+            underlay: Underlay::Pdf(PdfSource { document }),
+        })
+    }
+
     pub fn underlay(&self) -> &Underlay {
         &self.underlay
     }

@@ -9,6 +9,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+hayro-write.workspace = true
+kurbo.workspace = true
+miniz_oxide.workspace = true
+pdf-writer.workspace = true
+reader.workspace = true
 base64.workspace = true
 ink.workspace = true
 krilla.workspace = true

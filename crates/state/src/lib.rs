@@ -324,7 +324,7 @@ impl State {
             Opened::Text(buffer) => job::Reload::Text(buffer),
             Opened::Paged(id) => job::Reload::Paged(id, self.fonts.clone()),
             Opened::Board(id) => job::Reload::Board(id, self.fonts.clone()),
-            Opened::Pdf(id) => job::Reload::Pdf(id, self.library.clone()),
+            Opened::Pdf(id) => job::Reload::Pdf(id, self.library.clone(), self.fonts.clone()),
             Opened::Image(id) => job::Reload::Image(id, self.images[id].encoding),
         }
     }
@@ -349,6 +349,10 @@ pub fn boot(state: &mut State, out: &mut Vec<Effect>) {
         },
     );
     out.push(Effect::Job(Job::Index { root: root.clone() }));
+    out.push(Effect::Job(Job::MarkedUp {
+        library: state.library.clone(),
+        root: root.clone(),
+    }));
     out.push(Effect::Job(Job::ListDir {
         root,
         dir: Folder::Root,

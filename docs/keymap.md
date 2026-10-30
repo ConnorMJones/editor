@@ -156,6 +156,7 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | `:conflict-both` |
 | `:conflict-base` |
 | `:export-pdf` |
+| `:flatten` |
 | `:export-svg` |
 | `:export-png` |
 

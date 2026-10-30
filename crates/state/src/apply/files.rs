@@ -74,12 +74,18 @@ pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
     }
     state.layout.keep(file.into());
     let path = state.path_of(file.into()).to_owned();
-    let (saving, data) = match file {
+    let write = |saving, data| Job::Write {
+        path,
+        saving,
+        data,
+        dirs,
+    };
+    match file {
         Writable::Text(buffer) => {
             let entry = &mut state.buffers[buffer];
             entry.doc.commit(&state.layout.selection_of(buffer));
             let revision = entry.doc.history.current_revision();
-            (
+            write(
                 Saving::Text { buffer, revision },
                 Data::Text(entry.doc.text.clone()),
             )
@@ -89,21 +95,19 @@ pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
             let mut bytes = Vec::new();
             ink::format::write_paged(edited.drawing(), &mut bytes);
             let revision = edited.revision();
-            (Saving::Paged { file, revision }, Data::Bytes(bytes))
+            write(Saving::Paged { file, revision }, Data::Bytes(bytes))
         }
         Writable::Board(file) => {
             let edited = &state.boards[file].edited;
             let mut bytes = Vec::new();
             ink::format::write_board(edited.drawing(), &mut bytes);
             let revision = edited.revision();
-            (Saving::Board { file, revision }, Data::Bytes(bytes))
+            write(Saving::Board { file, revision }, Data::Bytes(bytes))
         }
-    };
-    Job::Write {
-        path,
-        saving,
-        data,
-        dirs,
+        Writable::Pdf(id) => {
+            let how = crate::job::PdfWriting::Save;
+            crate::drawing::markup::write(id, &state.pdfs[id], &state.fonts, how)
+        }
     }
 }
 
@@ -666,6 +670,11 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
             entry.path = path;
             entry.disk = Disk::New;
         }
+        (Writable::Pdf(id), FileKind::Pdf) => {
+            let entry = &mut state.pdfs[id].ink;
+            entry.path = path;
+            entry.disk = Disk::New;
+        }
         (
             Writable::Text(_),
             FileKind::Paged | FileKind::Board | FileKind::Pdf | FileKind::Image(_),
@@ -677,6 +686,10 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
         | (
             Writable::Board(_),
             FileKind::Text(_) | FileKind::Paged | FileKind::Pdf | FileKind::Image(_),
+        )
+        | (
+            Writable::Pdf(_),
+            FileKind::Text(_) | FileKind::Paged | FileKind::Board | FileKind::Image(_),
         ) => {
             return Err(Notice::WrongExtension { path });
         }
