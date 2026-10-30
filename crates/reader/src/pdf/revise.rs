@@ -10,6 +10,8 @@ pub const STARTXREF_SEARCH: usize = 4096;
 pub const PARENT_DEPTH: usize = 64;
 pub const OURS: &[u8] = b"EdtMark";
 pub const BLOB: &[u8] = b"EdtInk";
+pub const OUR_BASE: &[u8] = b"EdtBase";
+pub const OUR_SIZE: &[u8] = b"EdtSize";
 
 pub struct Revision<'a> {
     pub document: &'a Document,
@@ -18,7 +20,24 @@ pub struct Revision<'a> {
     objects: Vec<Written>, // private: each object once, as its bytes start at its header
 }
 
-pub struct Update(pub Vec<u8>);
+pub struct Update {
+    pub keep: usize,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Replaceable,
+    Permanent,
+}
+
+impl Update {
+    pub fn onto(self, original: &[u8]) -> Vec<u8> {
+        let mut bytes = original[..self.keep].to_vec();
+        bytes.extend(self.bytes);
+        bytes
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
@@ -27,6 +46,7 @@ pub enum Owner {
 }
 
 struct Trailer {
+    keep: usize,
     size: i32,
     root: ObjRef,
     info: Option<ObjRef>,
@@ -92,8 +112,26 @@ impl Document {
             Some(_) => return Err(ReviseError::Encrypted),
             None => {}
         }
-        let size = dict.get::<i32>(b"Size").ok_or(ReviseError::NoTrailer)?;
+        let ours = (dict.get::<i64>(OUR_BASE))
+            .zip(dict.get::<i32>(OUR_SIZE))
+            .zip(dict.get::<i64>(b"Prev"))
+            .and_then(|((base, size), previous)| {
+                let base = usize::try_from(base).ok().filter(|base| *base <= start)?;
+                let previous = usize::try_from(previous)
+                    .ok()
+                    .filter(|previous| *previous < base)?;
+                Some((base, size, previous))
+            });
+        let (keep, size, start) = match ours {
+            Some(replaced) => replaced,
+            None => (
+                bytes.len(),
+                dict.get::<i32>(b"Size").ok_or(ReviseError::NoTrailer)?,
+                start,
+            ),
+        };
         let trailer = Trailer {
+            keep,
             size,
             root: dict.get_ref(b"Root").ok_or(ReviseError::NoTrailer)?,
             info: dict.get_ref(b"Info"),
@@ -222,15 +260,15 @@ impl<'a> Revision<'a> {
         });
     }
 
-    pub fn finish(self) -> Update {
+    pub fn finish(self, ending: Ending) -> Update {
         let Revision {
-            document,
             trailer,
             next,
             objects,
+            ..
         } = self;
         let mut out = vec![b'\n'];
-        let base = document.bytes.len();
+        let base = trailer.keep;
         let mut offsets: Vec<(i32, i32, usize)> = Vec::with_capacity(objects.len() + 1);
         for object in &objects {
             offsets.push((object.number, object.generation, base + out.len()));
@@ -261,6 +299,12 @@ impl<'a> Revision<'a> {
             None => {}
         }
         let _ = write!(tail, " /Prev {}", trailer.start);
+        match ending {
+            Ending::Replaceable => {
+                let _ = write!(tail, " /EdtBase {base} /EdtSize {}", trailer.size);
+            }
+            Ending::Permanent => {}
+        }
         let start = base + out.len();
         match trailer.section {
             Section::Table => {
@@ -303,7 +347,10 @@ impl<'a> Revision<'a> {
                 let _ = write!(out, "\nendstream\nendobj\nstartxref\n{start}\n%%EOF\n");
             }
         }
-        Update(out)
+        Update {
+            keep: base,
+            bytes: out,
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use ink::text::Fonts;
 use kurbo::Affine;
 use pdf_writer::{Chunk, Filter, Finish, Name, Ref, Str};
 use reader::pdf::Document;
-use reader::pdf::revise::{BLOB, OURS, Owner, ReviseError, Revision, Update, inline_dict};
+use reader::pdf::revise::{BLOB, Ending, OURS, Owner, ReviseError, Revision, Update, inline_dict};
 
 use crate::{ExportError, scene};
 
@@ -77,7 +77,7 @@ pub fn save(document: &Document, paged: &Paged, fonts: &Fonts) -> Result<Update,
     let catalog = revision.catalog().ok_or(ReviseError::NoTrailer)?;
     let blob_entry = format!("{} 0 R", blob_ref.get()).into_bytes();
     revision.replace_dict(revision.root(), &catalog, &[], &[(BLOB, blob_entry)]);
-    Ok(revision.finish())
+    Ok(revision.finish(Ending::Replaceable))
 }
 
 pub fn unmarked(document: &Document) -> Result<Option<Update>, MarkupError> {
@@ -95,7 +95,7 @@ pub fn unmarked(document: &Document) -> Result<Option<Update>, MarkupError> {
             None => {}
         }
     }
-    Ok(Some(revision.finish()))
+    Ok(Some(revision.finish(Ending::Permanent)))
 }
 
 pub fn flatten(document: &Document, paged: &Paged, fonts: &Fonts) -> Result<Update, MarkupError> {
@@ -163,7 +163,7 @@ pub fn flatten(document: &Document, paged: &Paged, fonts: &Fonts) -> Result<Upda
     }
     let catalog = revision.catalog().ok_or(ReviseError::NoTrailer)?;
     revision.replace_dict(revision.root(), &catalog, &[BLOB], &[]);
-    Ok(revision.finish())
+    Ok(revision.finish(Ending::Permanent))
 }
 
 fn appearances(

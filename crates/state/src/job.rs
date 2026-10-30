@@ -675,8 +675,7 @@ pub fn run(job: Job) -> JobResult {
                     PdfWriting::Save => export::markup::save(&on_disk, &ink, &fonts)?,
                     PdfWriting::Flatten => export::markup::flatten(&on_disk, &ink, &fonts)?,
                 };
-                let mut bytes = on_disk.bytes.to_vec();
-                bytes.extend(update.0);
+                let bytes = update.onto(&on_disk.bytes);
                 std::fs::write(&path, &bytes)?;
                 let written = Written {
                     bytes: bytes.len(),
@@ -1094,11 +1093,7 @@ fn read_pdf(
 ) -> Result<PdfRead, Unreadable> {
     let document = Arc::new(Document::open(bytes.into())?);
     let drawn = match export::markup::unmarked(&document)? {
-        Some(update) => {
-            let mut bytes = document.bytes.to_vec();
-            bytes.extend(update.0);
-            Arc::new(Document::open(bytes.into())?)
-        }
+        Some(update) => Arc::new(Document::open(update.onto(&document.bytes).into())?),
         None => document.clone(),
     };
     let ink = match document.blob() {

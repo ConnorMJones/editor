@@ -37,9 +37,7 @@ fn base() -> Arc<Document> {
 }
 
 fn applied(document: &Document, update: Update) -> Arc<Document> {
-    let mut bytes = document.bytes.to_vec();
-    bytes.extend(update.0);
-    Arc::new(Document::open(bytes.into()).unwrap())
+    Arc::new(Document::open(update.onto(&document.bytes).into()).unwrap())
 }
 
 fn ours_on(document: &Document, page: usize) -> usize {
@@ -151,4 +149,82 @@ fn flattening_draws_the_markup_into_the_pages() {
         rows: 0..1,
     });
     assert!(page.is_ok());
+}
+
+fn sections(document: &Document) -> usize {
+    document
+        .bytes
+        .windows(9)
+        .filter(|window| window == b"startxref")
+        .count()
+}
+
+#[test]
+fn saving_again_replaces_our_section_instead_of_adding_one() {
+    let fonts = fonts();
+    let document = base();
+    let paged = marked(&document);
+    let first = applied(&document, save(&document, &paged, &fonts).unwrap());
+    let second = applied(&first, save(&first, &paged, &fonts).unwrap());
+    let third = applied(&second, save(&second, &paged, &fonts).unwrap());
+    assert_eq!(sections(&first), sections(&document) + 1);
+    assert_eq!(
+        sections(&third),
+        sections(&first),
+        "one section of ours at the end"
+    );
+    assert_eq!(
+        third.bytes.len(),
+        first.bytes.len(),
+        "the same markup takes the same room"
+    );
+    assert_eq!(
+        &third.bytes[..document.bytes.len()],
+        &*document.bytes,
+        "the original bytes stay"
+    );
+    assert_eq!((ours_on(&third, 0), ours_on(&third, 1)), (1, 1));
+}
+
+#[test]
+fn a_section_written_after_ours_is_kept() {
+    let fonts = fonts();
+    let document = base();
+    let paged = marked(&document);
+    let ours = applied(&document, save(&document, &paged, &fonts).unwrap());
+    let mut foreign = ours.bytes.to_vec();
+    let theirs = ours
+        .revise()
+        .unwrap()
+        .finish(reader::pdf::revise::Ending::Permanent);
+    foreign.truncate(theirs.keep);
+    foreign.extend(theirs.bytes);
+    let foreign = Arc::new(Document::open(foreign.into()).unwrap());
+    let again = applied(&foreign, save(&foreign, &paged, &fonts).unwrap());
+    assert_eq!(
+        &again.bytes[..foreign.bytes.len()],
+        &*foreign.bytes,
+        "nothing written after ours is cut"
+    );
+    assert_eq!(sections(&again), sections(&foreign) + 1);
+}
+
+#[test]
+fn flattening_replaces_our_section_for_good() {
+    let fonts = fonts();
+    let document = base();
+    let paged = marked(&document);
+    let saved = applied(&document, save(&document, &paged, &fonts).unwrap());
+    let flat = applied(&saved, flatten(&saved, &paged, &fonts).unwrap());
+    assert_eq!(
+        sections(&flat),
+        sections(&document) + 1,
+        "the saved section is gone"
+    );
+    let after = applied(&flat, save(&flat, &marked(&flat), &fonts).unwrap());
+    assert_eq!(
+        &after.bytes[..flat.bytes.len()],
+        &*flat.bytes,
+        "a save never cuts a flatten"
+    );
 }
