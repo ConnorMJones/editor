@@ -7,7 +7,7 @@ use model::command::Shown;
 use model::mode::Mode;
 use model::sheet::{Fit, Zoom};
 use state::State;
-use state::drawing::{Found, InkTabs, PdfMode, PdfTab};
+use state::drawing::{Found, InkTabs, Notes, PdfMode, PdfTab};
 use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
 use state::text::buffer::{Disk, Highlight};
@@ -81,11 +81,19 @@ impl Workspace {
                         (tab.hand.tip, tab.hand.layer, layers, file.disk, place)
                     }
                     InkTabs::Pdf(tab) => {
-                        let file = &state.pdfs[tab.file()].ink;
+                        let pdf = &state.pdfs[tab.file()];
+                        let file = &pdf.ink;
                         let pages = file.edited.drawing().stack().sizes().len();
+                        let focus = tab.view.centre.page;
+                        let marked = match &pdf.notes {
+                            Notes::Listed(listed) => (listed.notebook.bookmarks.iter())
+                                .find(|bookmark| bookmark.page == focus)
+                                .map_or("", |_| " \u{25cf}"),
+                            Notes::Unlisted(_) => "",
+                        };
                         let place = format!(
-                            "page {}/{pages}  {}",
-                            tab.view.centre.page.0 + 1,
+                            "page {}/{pages}{marked}  {}",
+                            focus.0 + 1,
                             scale(tab.view.fit, tab.view.zoom)
                         );
                         let layers = file.edited.drawing().layers();
