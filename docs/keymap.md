@@ -100,7 +100,7 @@ vault; `![[note]]` shows a box naming the resolved note that opens it when click
 The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
 Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
 Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
-PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg` / `ge` move through them. Dragging across text selects it, with a bar offering Highlight, Comment, Copy and Search; `v` highlights it, `i` highlights it with a comment, `y` copies it and `esc` lets it go. Tapping a highlight shows its comment; `i` edits the comment and `d` removes the highlight. `m` bookmarks the page in view, `space a` lists the PDF's highlights and bookmarks, and `space A` searches every annotation in the library. Annotations live in `.edt/library.db`, in the nearest folder above the project that has one, else the git repository's top, else the project. `/` finds text in the whole PDF, `n` / `N` step through the hits, and `space t` lists the table of contents. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
+PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg` / `ge` move through them. Dragging across text selects it, with a bar offering Highlight, Comment, Copy and Search; `v` highlights it, `i` highlights it with a comment, `y` copies it and `esc` lets it go. Tapping a highlight shows its comment; `i` edits the comment and `d` removes the highlight. `m` bookmarks the page in view, `space a` lists the PDF's highlights and bookmarks, and `space A` searches every annotation in the library. Annotations live in `.edt/library.db`, in the nearest folder above the project that has one, else the git repository's top, else the project. `/` finds text in the whole PDF, `n` / `N` step through the hits, and `space t` lists the table of contents. `space tab` or `space d` switches to marking the PDF up, where the tool keys (`b`, `e`, `s`, `S`, `t…`) pick tools; `space tab`, `space d` or `esc` go back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
 
 | Keys | Context | Action |
 | --- | --- | --- |
@@ -1342,6 +1342,8 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | Keys | Command |
 | --- | --- |
 | `:` | `CommandMode` |
+| `space tab` | `Drawing(Pdf(Markup))` |
+| `space d` | `Drawing(Pdf(Markup))` |
 | `C-k C-s` | `WriteAll` |
 | `y` | `Drawing(Pdf(Copy))` |
 | `/` | `Drawing(Pdf(Find))` |
@@ -1355,15 +1357,6 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | `n` | `Drawing(Pdf(FindNext(Forward)))` |
 | `N` | `Drawing(Pdf(FindNext(Backward)))` |
 | `esc` | `Drawing(Pdf(Read))` |
-| `b` | `Drawing(Ink(Tool(Brush)))` |
-| `e` | `Drawing(Ink(Tool(Eraser)))` |
-| `s` | `Drawing(Ink(Tool(BoxSelect)))` |
-| `S` | `Drawing(Ink(Tool(LassoSelect)))` |
-| `t l` | `Drawing(Ink(Tool(Line)))` |
-| `t a` | `Drawing(Ink(Tool(Arrow)))` |
-| `t r` | `Drawing(Ink(Tool(Rectangle)))` |
-| `t o` | `Drawing(Ink(Tool(Ellipse)))` |
-| `t t` | `Drawing(Ink(Tool(Text)))` |
 | `p n` | `Drawing(Page(Go(Next)))` |
 | `p b` | `Drawing(Page(Go(Previous)))` |
 | `g g` | `Drawing(Page(Go(First)))` |
@@ -1421,6 +1414,8 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | Keys | Command |
 | --- | --- |
 | `esc` | `Drawing(Pdf(Read))` |
+| `space tab` | `Drawing(Pdf(Read))` |
+| `space d` | `Drawing(Pdf(Read))` |
 | `b` | `Drawing(Ink(Tool(Brush)))` |
 | `e` | `Drawing(Ink(Tool(Eraser)))` |
 | `s` | `Drawing(Ink(Tool(BoxSelect)))` |

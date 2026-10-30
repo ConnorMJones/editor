@@ -186,9 +186,13 @@ fn pdf(
                 reason: ChangeError::PdfPages.to_string(),
             })
         }
-        DrawingCommand::Ink(command) => {
+        DrawingCommand::Ink(command) => match tab.mode {
+            PdfMode::Markup => ink(&mut tab.hand, &mut file.ink, command, fonts),
+            PdfMode::Read(_) => Err(Notice::NotMarkingUp),
+        },
+        DrawingCommand::Pdf(PdfCommand::Markup) => {
             tab.mode = PdfMode::Markup;
-            ink(&mut tab.hand, &mut file.ink, command, fonts)
+            Ok(After::Nothing)
         }
         DrawingCommand::Pdf(PdfCommand::Copy) => match &tab.mode {
             PdfMode::Read(Reading::Selected(span)) => {

@@ -95,11 +95,17 @@ fn a_pdf_opens_to_be_read_over_its_pages() {
 }
 
 #[test]
-fn a_tool_key_marks_up_the_pdf_and_esc_reads_again() {
+fn tool_keys_wait_for_markup_and_esc_reads_again() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut h = Harness::new(dir.path());
     h.keys(":o paper.pdf<ret>b");
+    assert_eq!(
+        tab(&h).mode,
+        PdfMode::Read(Reading::Idle),
+        "tool keys pick tools only in markup"
+    );
+    h.keys("<space>db");
     assert_eq!(tab(&h).mode, PdfMode::Markup);
     assert_eq!(input::context(&h.state), Context::PdfMarkup);
     draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
@@ -130,7 +136,7 @@ fn a_session_keeps_the_page_and_whether_the_pdf_was_marked_up() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut before = Harness::new(dir.path());
-    before.keys(":o paper.pdf<ret>pnb");
+    before.keys(":o paper.pdf<ret>pn<space>d");
     let text = toml::to_string(&session::snapshot(&before.state)).unwrap();
     let mut after = Harness::new(dir.path());
     let saved: session::Session = toml::from_str(&text).unwrap();
@@ -357,4 +363,21 @@ fn a_pdf_outside_the_library_is_read_without_annotations() {
     h.keys("m");
     assert!(matches!(h.state.notice, Some(Notice::NotInLibrary)));
     assert!(!dir.path().join(".edt").exists());
+}
+
+#[test]
+fn space_tab_and_space_d_switch_between_reading_and_markup() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret><space><tab>");
+    assert_eq!(tab(&h).mode, PdfMode::Markup);
+    h.keys("e");
+    assert_eq!(input::context(&h.state), Context::PdfMarkup);
+    h.keys("<space><tab>");
+    assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
+    h.keys("<space>d");
+    assert_eq!(tab(&h).mode, PdfMode::Markup);
+    h.keys("<space>d");
+    assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
 }

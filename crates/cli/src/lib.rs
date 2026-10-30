@@ -12,11 +12,7 @@ pub struct Args {
         help = "Config file: defaults to $XDG_CONFIG_HOME/edt/config.toml."
     )]
     pub config: Option<PathBuf>,
-    #[arg(
-        long,
-        short,
-        help = "Output logs to the terminal here."
-    )]
+    #[arg(long, short, help = "Output logs to the terminal here.")]
     pub log: bool,
     #[arg(long, hide = true, conflicts_with = "log")]
     pub background: bool,

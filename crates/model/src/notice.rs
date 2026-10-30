@@ -41,6 +41,7 @@ pub enum Notice {
     },
     NotADrawing,
     NotAPdf,
+    NotMarkingUp,
     NoHits {
         query: String,
     },
@@ -264,6 +265,7 @@ impl std::fmt::Display for Notice {
                 write!(f, "the text of page {page} could not be read: {reason}")
             }
             Notice::NotAPdf => f.write_str("only a PDF is read rather than drawn on"),
+            Notice::NotMarkingUp => f.write_str("space tab or space d marks the PDF up"),
             Notice::NotADrawing => f.write_str("not a drawing"),
             Notice::NoImagesHere => f.write_str("images go into drawings and notes"),
             Notice::OffThePages => f.write_str("drop images onto a page"),

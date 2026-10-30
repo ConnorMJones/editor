@@ -1154,6 +1154,14 @@ const PAGE_EDIT: Bindings = &[
 /// A PDF being read; a tool key starts marking it up.
 const PDF_READ: Bindings = &[
     (&[Key::char(':')], Command::CommandMode),
+    (
+        &[SPACE, Key::code(KeyCode::Tab)],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Markup)),
+    ),
+    (
+        &[SPACE, Key::char('d')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Markup)),
+    ),
     (&SAVE_ALL, Command::WriteAll),
     (
         &[Key::char('y')],
@@ -1213,10 +1221,20 @@ const PDF_READ: Bindings = &[
     ),
 ];
 
-const PDF_MARKUP: Bindings = &[(
-    &[Key::code(KeyCode::Esc)],
-    Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
-)];
+const PDF_MARKUP: Bindings = &[
+    (
+        &[Key::code(KeyCode::Esc)],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
+    ),
+    (
+        &[SPACE, Key::code(KeyCode::Tab)],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
+    ),
+    (
+        &[SPACE, Key::char('d')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
+    ),
+];
 
 pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
@@ -1305,7 +1323,6 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     ],
     &[
         PDF_READ,
-        INK_TOOLS,
         PAGE_GO,
         SHEET,
         SHEET_VERTICAL,

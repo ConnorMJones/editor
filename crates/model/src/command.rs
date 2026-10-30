@@ -581,6 +581,7 @@ pub enum DrawingCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdfCommand {
     Read,
+    Markup,
     Copy,
     Find,
     FindSelection,
