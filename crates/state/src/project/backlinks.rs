@@ -317,7 +317,9 @@ pub fn linked(state: &mut State, stamp: u64, reads: Vec<(RelPath, Read)>, out: &
         | Items::Buffers(_)
         | Items::Commands
         | Items::Grep(_)
-        | Items::Outline(_) => return,
+        | Items::Outline(_)
+        | Items::Notebook(_)
+        | Items::Annotations(_) => return,
     }
     crate::input::picker::filter(picker, matcher, Narrowing::All);
     crate::view::panes::request_preview(state, out);

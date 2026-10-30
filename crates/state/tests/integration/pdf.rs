@@ -5,14 +5,17 @@ use ink::brush::{Paint, Size};
 use ink::doc::{Background, Drawing, PageIndex, PageLayer, PageSize, Paged, PagedChange};
 use ink::doc::{Ink, Mark, Placement};
 use ink::text::{FontFamily, Fonts, Inked, TextStyle, Wrap};
+use library::{Highlight, Notebook};
 use model::color::Rgb;
 use model::geom::Point;
 use model::mode::Mode;
 use model::notice::Notice;
 use model::sheet::PageIndex as Page;
 use model::theme::Color;
+use state::Overlay;
 use state::drawing::pen::Stylus;
-use state::drawing::{Found, InkTabs, PdfMode, PdfTab, Reading};
+use state::drawing::{Found, InkTabs, Notes, PdfMode, PdfTab, Reading, Unlisted};
+use state::input::picker::Items;
 use state::input::{self, keymap::Context};
 use state::project::session;
 use state::view::tab::Tab;
@@ -65,7 +68,7 @@ fn tab(h: &Harness) -> &PdfTab {
 }
 
 fn marks(h: &Harness) -> usize {
-    let paged = h.state.pdfs[tab(h).file()].edited.drawing();
+    let paged = h.state.pdfs[tab(h).file()].ink.edited.drawing();
     let first = PageLayer {
         page: PageIndex(0),
         layer: ink::doc::LayerIndex(0),
@@ -81,7 +84,7 @@ fn a_pdf_opens_to_be_read_over_its_pages() {
     h.keys(":o paper.pdf<ret>");
     assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
     assert_eq!(input::context(&h.state), Context::PdfRead);
-    let paged = h.state.pdfs[tab(&h).file()].edited.drawing();
+    let paged = h.state.pdfs[tab(&h).file()].ink.edited.drawing();
     assert_eq!(paged.stack().sizes().len(), 3);
     h.keys("pnpn");
     assert_eq!(tab(&h).view.centre.page, Page(2));
@@ -103,6 +106,7 @@ fn a_tool_key_marks_up_the_pdf_and_esc_reads_again() {
     assert_eq!(marks(&h), 1);
     h.keys("po");
     let pages = h.state.pdfs[tab(&h).file()]
+        .ink
         .edited
         .drawing()
         .stack()
@@ -203,4 +207,154 @@ fn a_pdf_without_a_table_of_contents_says_so() {
     let mut h = Harness::new(dir.path());
     h.keys(":o paper.pdf<ret><space>t");
     assert!(matches!(h.state.notice, Some(Notice::NoOutline)));
+}
+
+fn notebook(h: &Harness) -> Notebook {
+    match &h.state.pdfs[tab(h).file()].notes {
+        Notes::Listed(listed) => listed.notebook.clone(),
+        Notes::Unlisted(unlisted) => panic!("{unlisted:?}"),
+    }
+}
+
+fn select_hello(h: &mut Harness) {
+    draw(h, Stylus::Tip, &line((101.0, 208.0), (128.0, 208.0)));
+}
+
+fn tap_hello(h: &mut Harness) {
+    draw(h, Stylus::Tip, &line((105.0, 208.0), (105.2, 208.0)));
+}
+
+fn picked(h: &Harness) -> Highlight {
+    match &tab(h).mode {
+        PdfMode::Read(Reading::OnHighlight(highlight)) => highlight.clone(),
+        other => panic!("a highlight is picked, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_highlight_takes_a_comment_and_is_kept_in_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret>");
+    select_hello(&mut h);
+    h.keys("v");
+    let [highlight] = &notebook(&h).highlights[..] else {
+        panic!("{:?}", notebook(&h));
+    };
+    assert_eq!(highlight.quote.exact(), "Hello");
+    assert_eq!(highlight.comment, None);
+    assert_eq!(&picked(&h), highlight, "the selection became the highlight");
+    assert!(dir.path().join(".edt/library.db").is_file());
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".edt/.gitignore")).unwrap(),
+        "*\n"
+    );
+
+    h.keys("<esc>");
+    tap_hello(&mut h);
+    assert_eq!(picked(&h).id, highlight.id);
+    h.keys("ifirst word<ret>");
+    let commented = picked(&h)
+        .comment
+        .map(|comment| comment.as_str().to_owned());
+    assert_eq!(commented.as_deref(), Some("first word"));
+    assert_eq!(notebook(&h).highlights, [picked(&h)]);
+
+    let mut again = Harness::new(dir.path());
+    again.keys(":o paper.pdf<ret>");
+    assert_eq!(notebook(&again), notebook(&h), "read back from the library");
+
+    h.keys("d");
+    assert!(notebook(&h).highlights.is_empty());
+    assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
+    h.keys("d");
+    assert!(matches!(h.state.notice, Some(Notice::NoHighlightPicked)));
+}
+
+#[test]
+fn a_comment_on_a_selection_makes_a_highlight() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret>");
+    select_hello(&mut h);
+    h.keys("isaid hello<ret>");
+    let [highlight] = &notebook(&h).highlights[..] else {
+        panic!("{:?}", notebook(&h));
+    };
+    assert_eq!(
+        highlight.comment.as_ref().map(|comment| comment.as_str()),
+        Some("said hello")
+    );
+    assert_eq!(&picked(&h), highlight);
+}
+
+#[test]
+fn m_bookmarks_the_page_and_the_notebook_goes_back_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret><space>a");
+    assert!(matches!(h.state.notice, Some(Notice::NoAnnotations)));
+    h.keys("pnmgg");
+    let pages: Vec<_> = (notebook(&h).bookmarks.iter())
+        .map(|bookmark| bookmark.page)
+        .collect();
+    assert_eq!(pages, [PageIndex(1)]);
+    h.keys("<space>a<ret>");
+    assert_eq!(tab(&h).view.centre.page, Page(1));
+    h.keys("m");
+    assert!(
+        notebook(&h).bookmarks.is_empty(),
+        "m again takes the bookmark off"
+    );
+}
+
+#[test]
+fn the_page_read_last_is_where_the_pdf_opens_next() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret>pnpn");
+    let mut again = Harness::new(dir.path());
+    again.keys(":o paper.pdf<ret>");
+    assert_eq!(tab(&again).view.centre.page, Page(2));
+}
+
+#[test]
+fn space_shift_a_searches_every_annotation_and_opens_the_one_picked() {
+    let dir = tempfile::tempdir().unwrap();
+    write_pdf(&dir.path().join("paper.pdf"));
+    let mut h = Harness::new(dir.path());
+    h.keys(":o paper.pdf<ret>");
+    select_hello(&mut h);
+    h.keys("izebra crossing<ret><esc>pn<space>Azeb");
+    match &h.state.overlay {
+        Overlay::Picker(picker) => match &picker.items {
+            Items::Annotations(found) => assert_eq!(found.hits.len(), 1),
+            _ => panic!("the annotation search"),
+        },
+        _ => panic!("a picker"),
+    }
+    h.keys("<ret>");
+    assert_eq!(tab(&h).view.centre.page, Page(0));
+    assert_eq!(picked(&h).quote.exact(), "Hello");
+}
+
+#[test]
+fn a_pdf_outside_the_library_is_read_without_annotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let path = elsewhere.path().join("paper.pdf");
+    write_pdf(&path);
+    let mut h = Harness::new(dir.path());
+    h.keys(&format!(":o {}<ret>", path.display()));
+    assert!(matches!(
+        h.state.pdfs[tab(&h).file()].notes,
+        Notes::Unlisted(Unlisted::Outside)
+    ));
+    h.keys("m");
+    assert!(matches!(h.state.notice, Some(Notice::NotInLibrary)));
+    assert!(!dir.path().join(".edt").exists());
 }

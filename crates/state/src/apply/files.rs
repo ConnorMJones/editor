@@ -12,7 +12,7 @@ use model::notice::Notice;
 use ink::doc::Drawing;
 
 use super::map_views;
-use crate::drawing::{InkFile, InkTabs};
+use crate::drawing::{InkFile, InkTabs, PdfFile};
 use crate::git::diff::Diff;
 use crate::git::navigate::{self, Landing};
 use crate::git::track;
@@ -179,7 +179,7 @@ fn open_file(state: &State, path: &Path) -> Option<Opened> {
             .find(|(_, file)| file.path == path)
             .map(|(id, _)| Opened::Board(id)),
         FileKind::Pdf => (state.pdfs.iter())
-            .find(|(_, file)| file.path == path)
+            .find(|(_, file)| file.ink.path == path)
             .map(|(id, _)| Opened::Pdf(id)),
         FileKind::Image(_) => (state.images.iter())
             .find(|(_, file)| *file.path == *path)
@@ -212,9 +212,12 @@ fn insert(
         OpenRead::Board { drawing, disk } => Ok(Opened::Board(
             state.boards.insert(InkFile::new(path, drawing, disk)),
         )),
-        OpenRead::Pdf { drawing, disk } => Ok(Opened::Pdf(
-            state.pdfs.insert(InkFile::new(path, drawing, disk)),
-        )),
+        OpenRead::Pdf { mut read, disk } => {
+            state.notice = read.said.take().or(state.notice.take());
+            Ok(Opened::Pdf(
+                state.pdfs.insert(PdfFile::new(path, read, disk)),
+            ))
+        }
         OpenRead::Image {
             encoding,
             stack,
@@ -253,6 +256,7 @@ pub fn load(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result<Fou
                 path,
                 languages: state.languages.clone(),
                 fonts: state.fonts.clone(),
+                library: state.library.clone(),
             }));
             Ok(Found::Reading(read))
         }
@@ -265,7 +269,7 @@ pub fn read_now(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result
     match open_file(state, &path) {
         Some(opened) => Ok(opened),
         None => {
-            let read = read_file(&path, &state.languages, &state.fonts);
+            let read = read_file(&path, &state.languages, &state.fonts, &state.library);
             insert(state, path, read, out)
         }
     }
@@ -307,6 +311,9 @@ fn show(state: &mut State, opened: Opened, waiter: Waiter) {
     };
     panes::show(state, pane, opened, arrive, open);
     match (to, opened) {
+        (Some(Target::Annotation(id)), Opened::Pdf(file)) => {
+            crate::drawing::reading::arrive(state, pane, file, id)
+        }
         (Some(to), Opened::Text(buffer)) => place(state, pane, buffer, to),
         (Some(_), Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_))
         | (None, _) => {}
@@ -324,6 +331,7 @@ pub fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Target) {
     } = state;
     let Buffer { doc, diff, .. } = &mut buffers[buffer];
     let (at, line) = match to {
+        Target::Annotation(_) => return,
         Target::Hunk(edge) => {
             navigate::expect_landing(diff, Landing { pane, edge });
             return navigate::land(state, buffer);
@@ -486,29 +494,50 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
             Some(file) => match drawing_reloaded(file, read, policy, notice) {
                 Drawn::Replaced => {
                     for tab in drawing_tabs(layout, Opened::Paged(id)) {
-                        tab.cancel_strokes()
+                        tab.reloaded()
                     }
                 }
                 Drawn::Kept => {}
             },
             None => {}
         },
-        Reloaded::Pdf(id, read) => match pdfs.get_mut(id) {
-            Some(file) => match drawing_reloaded(file, read, policy, notice) {
-                Drawn::Replaced => {
-                    for tab in drawing_tabs(layout, Opened::Pdf(id)) {
-                        tab.cancel_strokes()
+        Reloaded::Pdf(id, read) => match (pdfs.get_mut(id), read) {
+            (Some(file), DiskRead::Changed { mut content, mtime }) => {
+                match policy.on_change(file.ink.is_modified()) {
+                    OnChange::Flag => {
+                        file.ink.disk = Disk::ChangedExternally { mtime };
+                        *notice = Some(Notice::ChangedOnDisk {
+                            path: file.ink.path.clone(),
+                        });
+                    }
+                    OnChange::Replace => {
+                        *notice = content.said.take().or(notice.take());
+                        file.ink.saved = file.replace(content);
+                        file.ink.disk = Disk::Synced { mtime };
+                        for tab in drawing_tabs(layout, Opened::Pdf(id)) {
+                            tab.reloaded()
+                        }
                     }
                 }
-                Drawn::Kept => {}
-            },
-            None => {}
+            }
+            (Some(file), DiskRead::Unreadable(error)) => {
+                drawing_reloaded(&mut file.ink, DiskRead::Unreadable(error), policy, notice);
+            }
+            (Some(file), DiskRead::Missed(read)) => {
+                drawing_reloaded(
+                    &mut file.ink,
+                    DiskRead::<ink::doc::Paged, reader::pdf::PdfError>::Missed(read),
+                    policy,
+                    notice,
+                );
+            }
+            (None, _) => {}
         },
         Reloaded::Board(id, read) => match boards.get_mut(id) {
             Some(file) => match drawing_reloaded(file, read, policy, notice) {
                 Drawn::Replaced => {
                     for tab in drawing_tabs(layout, Opened::Board(id)) {
-                        tab.cancel_strokes()
+                        tab.reloaded()
                     }
                 }
                 Drawn::Kept => {}

@@ -14,11 +14,18 @@ use model::window::{Axis, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 
+use library::{Annotation, Comment, Highlight, LibraryError, Lost, Quote, SearchHit};
+use model::notice::Notice;
 use reader::pdf::Heading;
+
+use crate::drawing::PdfId;
 
 use crate::project::path::RelPath;
 use crate::text::buffer::{BufferId, TextDoc};
 use crate::{Effect, Overlay, State};
+
+pub const MAX_HITS: usize = 10_000;
+const MAX_LINE: usize = 240;
 
 pub struct Picker {
     pub query: String,
@@ -41,19 +48,28 @@ pub enum Items {
     Grep(Grep),
     Backlinks(Referrers),
     Outline(Vec<Heading>),
+    Notebook(Notebook),
+    Annotations(AnnotationSearch),
+}
+
+pub struct Notebook {
+    pub file: PdfId,
+    pub entries: Vec<(Annotation, String)>,
+}
+
+pub struct AnnotationSearch {
+    pub search: Search,
+    pub hits: Vec<(SearchHit, String)>,
 }
 
 pub struct Grep {
-    /// Matches the job generation in `State::grep`; stale results are dropped.
     pub generation: u64,
     pub search: Search,
     pub hits: Vec<Hit>,
 }
 
-/// Notes linking to `note`, filled once the backlinks index has its first read.
 pub struct Referrers {
     pub note: RelPath,
-    /// `Running` until the first read of every note finishes.
     pub search: Search,
     pub hits: Vec<Hit>,
 }
@@ -63,7 +79,6 @@ pub enum Search {
     Idle,
     Running,
     Done,
-    /// The hit cap was reached; later files were not searched.
     Truncated,
 }
 
@@ -87,6 +102,8 @@ impl Items {
             Items::Grep(_) => PickerKind::Grep,
             Items::Backlinks(_) => PickerKind::Backlinks,
             Items::Outline(_) => PickerKind::Outline,
+            Items::Notebook(_) => PickerKind::Notebook,
+            Items::Annotations(_) => PickerKind::Annotations,
         }
     }
 
@@ -99,6 +116,8 @@ impl Items {
             Items::Grep(grep) => grep.hits.len(),
             Items::Backlinks(referrers) => referrers.hits.len(),
             Items::Outline(headings) => headings.len(),
+            Items::Notebook(notebook) => notebook.entries.len(),
+            Items::Annotations(found) => found.hits.len(),
         }
     }
 
@@ -106,7 +125,6 @@ impl Items {
         self.len() == 0
     }
 
-    /// Text matched against and shown for item `index`.
     pub fn label(&self, index: u32) -> &str {
         let index = index as usize;
         match self {
@@ -117,6 +135,8 @@ impl Items {
             Items::Grep(grep) => &grep.hits[index].text,
             Items::Backlinks(referrers) => referrers.hits[index].path.as_str(),
             Items::Outline(headings) => &headings[index].title,
+            Items::Notebook(notebook) => &notebook.entries[index].1,
+            Items::Annotations(found) => &found.hits[index].1,
         }
     }
 }
@@ -135,14 +155,18 @@ impl Picker {
     }
 }
 
-/// Narrows from the current matches when the query only grew and has no negations.
 pub fn filter(picker: &mut Picker, matcher: &mut Matcher, narrowing: Narrowing) {
     matcher.config = nucleo::Config::DEFAULT;
     match picker.items.kind() {
         PickerKind::Files | PickerKind::Images | PickerKind::Backlinks => {
             matcher.config.set_match_paths()
         }
-        PickerKind::Buffers | PickerKind::Commands | PickerKind::Grep | PickerKind::Outline => {}
+        PickerKind::Buffers
+        | PickerKind::Commands
+        | PickerKind::Grep
+        | PickerKind::Outline
+        | PickerKind::Notebook
+        | PickerKind::Annotations => {}
     }
     picker.cursor = 0;
     match picker.query.is_empty() {
@@ -192,7 +216,6 @@ impl Narrowing {
     }
 }
 
-/// Smart case, falling back to a literal search when `query` is not a valid regex.
 pub fn grep_regex(query: &str) -> Regex {
     let insensitive = !query.chars().any(char::is_uppercase);
     RegexBuilder::new(query)
@@ -206,10 +229,6 @@ pub fn grep_regex(query: &str) -> Regex {
         .expect("escaped pattern is valid")
 }
 
-pub const MAX_HITS: usize = 10_000;
-const MAX_LINE: usize = 240;
-
-/// Searches `files` in order, stopping early once `current` moves past `generation`.
 pub fn grep(
     root: &Path,
     files: &[RelPath],
@@ -394,7 +413,6 @@ impl Previews {
     }
 }
 
-/// Contents of a file that is not open, read for the picker preview.
 pub enum Preview {
     Loading,
     Text(TextDoc),
@@ -403,7 +421,6 @@ pub enum Preview {
     Failed(io::Error),
 }
 
-/// What the picker's highlighted item previews.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewSource<'a> {
     Buffer(BufferId),
@@ -427,11 +444,10 @@ pub fn preview_source(picker: &Picker) -> Option<PreviewSource<'_>> {
                 line: hit.line as usize,
             })
         }
-        Items::Commands | Items::Outline(_) => None,
+        Items::Commands | Items::Outline(_) | Items::Notebook(_) | Items::Annotations(_) => None,
     }
 }
 
-/// Fills the preview slot still waiting for `path`.
 pub fn previewed(state: &mut State, path: RelPath, preview: Preview) {
     match &mut state.overlay {
         Overlay::Picker(picker) => {
@@ -448,7 +464,6 @@ pub fn previewed(state: &mut State, path: RelPath, preview: Preview) {
     }
 }
 
-/// Takes the hits of the current grep; older searches are dropped.
 pub fn grepped(
     state: &mut State,
     generation: u64,
@@ -471,14 +486,78 @@ pub fn grepped(
             | Items::Buffers(_)
             | Items::Commands
             | Items::Backlinks(_)
-            | Items::Outline(_) => {}
+            | Items::Outline(_)
+            | Items::Notebook(_)
+            | Items::Annotations(_) => {}
         },
         Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
     }
     crate::view::panes::request_preview(state, out);
 }
 
-/// The files whose names are an image encoding.
+pub fn annotations_found(
+    state: &mut State,
+    typed: String,
+    result: Result<Vec<SearchHit>, LibraryError>,
+) {
+    let hits = match result {
+        Ok(hits) => hits,
+        Err(error) => {
+            return state.notice = Some(Notice::LibraryFailed {
+                reason: error.to_string(),
+            });
+        }
+    };
+    match &mut state.overlay {
+        Overlay::Picker(picker) if picker.query == typed => match &mut picker.items {
+            Items::Annotations(found) => {
+                found.search = match hits.len() {
+                    library::MOST_HITS.. => Search::Truncated,
+                    _ => Search::Done,
+                };
+                found.hits = (hits.into_iter())
+                    .map(|hit| {
+                        let label = format!("{}  {}", hit.path.as_str(), label(&hit.annotation));
+                        (hit, label)
+                    })
+                    .collect();
+                picker.matches.clear();
+                picker.matches.extend(0..found.hits.len() as u32);
+                picker.cursor = 0;
+            }
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Buffers(_)
+            | Items::Commands
+            | Items::Grep(_)
+            | Items::Backlinks(_)
+            | Items::Outline(_)
+            | Items::Notebook(_) => {}
+        },
+        Overlay::Picker(_) | Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
+    }
+}
+
+pub fn label(annotation: &Annotation) -> String {
+    let page = annotation.place().0.0 + 1;
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let quoted = |quote: &Quote, comment: &Option<Comment>| {
+        let comment = comment.as_ref().map_or(String::new(), |comment| {
+            format!("  \u{2014} {}", one_line(comment.as_str()))
+        });
+        format!("\u{201c}{}\u{201d}{comment}", one_line(quote.exact()))
+    };
+    match annotation {
+        Annotation::Highlight(Highlight { quote, comment, .. }) => {
+            format!("p. {page}  {}", quoted(quote, comment))
+        }
+        Annotation::Lost(Lost { quote, comment, .. }) => {
+            format!("p. {page} (lost)  {}", quoted(quote, comment))
+        }
+        Annotation::Bookmark(_) => format!("p. {page}  bookmark"),
+    }
+}
+
 pub fn images(files: &[RelPath]) -> Vec<RelPath> {
     (files.iter())
         .filter(|file| Encoding::of_path(std::path::Path::new(file.as_str())).is_some())

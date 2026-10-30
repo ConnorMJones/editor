@@ -25,9 +25,10 @@ new_key_type! {
     pub struct ReadId;
 }
 
-/// A file's text; a buffer exists only once its file has been read.
+const DEFAULT_TAB_WIDTH: usize = 4;
+const DEFAULT_TEXT_WIDTH: usize = 80;
+
 pub struct Buffer {
-    /// Canonical when the file exists; root-joined and normalized for new files.
     pub path: PathBuf,
     pub kind: TextKind,
     pub doc: TextDoc,
@@ -35,13 +36,11 @@ pub struct Buffer {
     pub diff: Diff,
 }
 
-/// A file being read for its first buffer, and the opens waiting for it.
 pub struct Read {
     pub path: PathBuf,
     pub waiting: SmallVec<[Waiter; 1]>,
 }
 
-/// An open of a file still being read: shown in `pane` once its text arrives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Waiter {
     pub pane: PaneId,
@@ -53,14 +52,12 @@ pub struct Waiter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Position(Position),
-    /// Waits further, for the buffer's first diff.
     Hunk(Edge),
-    /// A markdown heading, by its text as a link names it.
     Heading(String),
     Saved(Saved),
+    Annotation(library::AnnotationId),
 }
 
-/// A session's saved selection: at least one range, and a primary among them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Saved {
     ranges: SmallVec<[Range; 1]>, // private: checked by `new`
@@ -80,7 +77,6 @@ impl Saved {
         })
     }
 
-    /// The selection within `len` chars; the file may have changed since it was saved.
     pub fn selection(&self, len: usize) -> Selection {
         let ranges = (self.ranges.iter())
             .map(|range| Range::new(range.anchor.min(len), range.head.min(len)))
@@ -89,7 +85,7 @@ impl Saved {
     }
 }
 
-/// Zero-based line and character column.
+// Zero-based line and character column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
     pub line: usize,
@@ -98,25 +94,14 @@ pub struct Position {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disk {
-    /// The text matches the file as modified at `mtime`.
-    Synced {
-        mtime: SystemTime,
-    },
-    /// The path does not exist yet; the first write creates it.
+    Synced { mtime: SystemTime },
     New,
-    /// The file as modified at `mtime` differs from the text, which kept its unsaved edits.
-    ChangedExternally {
-        mtime: SystemTime,
-    },
+    ChangedExternally { mtime: SystemTime },
     Deleted,
 }
 
-const DEFAULT_TAB_WIDTH: usize = 4;
-const DEFAULT_TEXT_WIDTH: usize = 80;
-
 pub struct TextDoc {
     pub text: Rope,
-    /// Bumped by every change to `text`; diffs are stamped with it.
     pub version: u64,
     pub history: History,
     pub uncommitted: Uncommitted,
@@ -126,30 +111,22 @@ pub struct TextDoc {
     pub indent_style: IndentStyle,
     pub tab_width: usize,
     pub text_width: usize,
-    /// Parsed with the text, then again after edits by `conflict::sync`.
     pub conflicts: Conflicts,
 }
 
-/// Whether a parse runs for a buffer waiting on its tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseJob {
-    /// The next sync starts one.
     Wanted,
-    Running {
-        version: u64,
-    },
+    Running { version: u64 },
 }
 
 pub enum Highlight {
-    /// No grammar matches the file.
     Plain,
-    /// Waiting on a parse off the UI thread; drawn plain until it lands.
     Parsing {
         language: Language,
         job: ParseJob,
     },
     Parsed(Syntax),
-    /// The grammar failed on this text; the next edit parses again from scratch.
     Failed {
         language: Language,
         error: HighlighterError,
@@ -157,7 +134,6 @@ pub enum Highlight {
 }
 
 impl Highlight {
-    /// The tree, or the notice for a command that needs one.
     pub fn tree(&self) -> Result<&Syntax, Notice> {
         match self {
             Highlight::Parsed(syntax) => Ok(syntax),
@@ -181,7 +157,6 @@ impl Highlight {
         }
     }
 
-    /// The tree, for readers that fall back to plain text without one.
     pub fn syntax(&self) -> Option<&Syntax> {
         match self {
             Highlight::Parsed(syntax) => Some(syntax),
@@ -200,7 +175,6 @@ impl Highlight {
     }
 }
 
-/// Edits applied to `text` but not yet grouped into an undo revision.
 pub enum Uncommitted {
     Clean,
     Pending {
@@ -210,7 +184,6 @@ pub enum Uncommitted {
 }
 
 impl TextDoc {
-    /// Parses at once, for callers already off the UI thread that want the tree with the text.
     pub fn new(text: Rope, path: &std::path::Path, loader: &Loader) -> TextDoc {
         TextDoc::build(text, path, loader, |text, language| {
             tracing::info_span!("syntax parse")
@@ -218,7 +191,6 @@ impl TextDoc {
         })
     }
 
-    /// Leaves a file with a grammar for `highlight::sync` to parse in the background.
     pub fn unparsed(text: Rope, path: &std::path::Path, loader: &Loader) -> TextDoc {
         TextDoc::build(text, path, loader, |_, language| Highlight::Parsing {
             language,
@@ -226,7 +198,6 @@ impl TextDoc {
         })
     }
 
-    /// Text with no file or language, as a drawing's text mark is typed.
     pub fn plain(text: Rope) -> TextDoc {
         TextDoc {
             line_ending: LineEnding::LF,
@@ -296,7 +267,6 @@ impl TextDoc {
         self.indent_style.indent_width(self.tab_width)
     }
 
-    /// Config of the injection layer at `byte`, else of the buffer's language.
     pub fn language_config_at<'a>(
         &self,
         loader: &'a Loader,
@@ -313,7 +283,6 @@ impl TextDoc {
         }
     }
 
-    /// Applies `tx` to the text and stages it for the next undo revision.
     pub fn apply(&mut self, tx: &Transaction, selection_before: &Selection, loader: &Loader) {
         let old = self.text.clone();
         if !tx.apply(&mut self.text) || tx.changes().is_empty() {
@@ -346,7 +315,6 @@ impl TextDoc {
         }
     }
 
-    /// Returns the applied transactions in order, for mapping selections.
     pub fn step_history(&mut self, step: HistoryStep, loader: &Loader) -> Vec<Transaction> {
         let txs = match step {
             HistoryStep::Undo => self.history.undo().cloned().into_iter().collect(),
@@ -363,7 +331,6 @@ impl TextDoc {
         txs
     }
 
-    /// After a failed incremental update the tree parses again in the background.
     pub fn update_highlight(&mut self, old: &Rope, changes: &ChangeSet, loader: &Loader) {
         let text = self.text.slice(..);
         self.highlight = match std::mem::replace(&mut self.highlight, Highlight::Plain) {

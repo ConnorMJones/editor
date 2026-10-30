@@ -15,7 +15,6 @@ use crate::project::Project;
 use crate::project::files::{FileIndex, Indexed};
 use crate::{Effect, Overlay, Prompt, PromptKind, State, text::registers, text::select};
 
-/// Where up/down browsing of the prompt's history register stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum History {
     Editing,
@@ -58,14 +57,12 @@ impl Candidate {
     }
 }
 
-/// What a typed command's argument completes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Completes {
     Nothing,
     Paths,
 }
 
-/// Typed command names, canonical first, as `parse` accepts them.
 pub const COMMANDS: [(&[&str], Completes); 30] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
@@ -120,7 +117,7 @@ pub fn complete(prompt: &mut Prompt, index: &FileIndex) {
     completion.start = 0;
     match prompt.kind {
         PromptKind::Command => {}
-        PromptKind::Regex { .. } | PromptKind::FindInPdf => return,
+        PromptKind::Regex { .. } | PromptKind::FindInPdf | PromptKind::Comment(_) => return,
     }
     let line = prompt.line.as_str();
     let (name, arg) = match line.split_once(char::is_whitespace) {
@@ -264,9 +261,8 @@ pub fn command(state: &mut State, command: PromptCommand, out: &mut Vec<Effect>)
             Change::Typed
         }
         PromptCommand::History(direction) => {
-            let entries = registers
-                .values
-                .get(&prompt.kind.history())
+            let entries = (prompt.kind.history())
+                .and_then(|register| registers.values.get(&register))
                 .map_or(&[][..], Vec::as_slice);
             let history = std::mem::replace(&mut prompt.history, History::Editing);
             let (index, draft) = match (history, direction, entries.len()) {
@@ -463,7 +459,7 @@ pub fn cancel(state: &mut State) {
             ..
         }) => crate::apply::select(state, |_, _, _| snapshot),
         Overlay::Prompt(Prompt {
-            kind: PromptKind::Command | PromptKind::FindInPdf,
+            kind: PromptKind::Command | PromptKind::FindInPdf | PromptKind::Comment(_),
             ..
         })
         | Overlay::None
@@ -514,6 +510,11 @@ pub fn submit(state: &mut State, out: &mut Vec<Effect>) {
                     Some(query) => crate::drawing::reading::find(state, query, out),
                     None => {}
                 },
+                Overlay::Prompt(Prompt {
+                    kind: PromptKind::Comment(commenting),
+                    line,
+                    ..
+                }) => crate::drawing::reading::comment(state, commenting, line, out),
                 Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => {}
             }
         }

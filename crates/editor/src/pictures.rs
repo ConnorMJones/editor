@@ -1,6 +1,3 @@
-//! Decoded pictures at the device size they are drawn at, shared by every pane: typeset SVGs,
-//! image files, and pictures drawings hold. A picture not drawn in the frame before is freed.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -15,16 +12,14 @@ use gpui::{
 };
 use helix_core::SmallVec;
 use model::picture::{Bitmap, Encoding, Picture, Source};
-use reader::pdf::Document;
 
 use crate::workspace::Workspace;
 
-/// The most pixels a PDF page is rendered at; a page drawn larger is stretched.
-pub const PAGE_PIXELS: f32 = 16.0e6;
+pub const PICTURE_BYTES_KEPT: usize = 256 << 20;
+pub const STEPS_PER_DOUBLING: f32 = 4.0;
 
 #[derive(Default)]
 pub struct Pictures {
-    /// Bumped every frame; entries not drawn in the frame before are dropped.
     pub frame: u64,
     pub entries: HashMap<PictureKey, Entry>,
 }
@@ -40,10 +35,6 @@ pub struct PictureKey {
 #[derive(Clone)]
 pub enum Drawn {
     Picture(Picture),
-    PdfPage {
-        document: Arc<Document>,
-        page: usize,
-    },
 }
 
 /// A file by its path and the time it was read at, or bytes and documents by their address.
@@ -51,7 +42,6 @@ pub enum Drawn {
 pub enum SourceKey {
     File(Arc<Path>, SystemTime),
     Bytes(usize),
-    PdfPage(usize, usize),
 }
 
 pub struct Entry {
@@ -78,9 +68,6 @@ impl SourceKey {
                 source: Source::Bytes(bytes),
                 ..
             }) => SourceKey::Bytes(Arc::as_ptr(bytes) as *const u8 as usize),
-            Drawn::PdfPage { document, page } => {
-                SourceKey::PdfPage(Arc::as_ptr(document) as usize, *page)
-            }
         }
     }
 }
@@ -133,6 +120,16 @@ pub fn decoded(
             height: DevicePixels(1..),
         } => size,
         Size { .. } => return None,
+    };
+    let size = {
+        let width = size.width.0 as f32;
+        let snapped = ((width.log2() * STEPS_PER_DOUBLING).ceil() / STEPS_PER_DOUBLING).exp2();
+        let grow =
+            |side: i32| DevicePixels(((side as f32) * snapped / width).round().max(1.0) as i32);
+        Size {
+            width: grow(size.width.0),
+            height: grow(size.height.0),
+        }
     };
     let source = SourceKey::of(what);
     let key = PictureKey {
@@ -202,34 +199,12 @@ pub fn decoded(
         })
 }
 
-/// Vectors and PDF pages are drawn at `size`, a page at no more than `PAGE_PIXELS`; bitmaps are
-/// decoded whole and scaled down to `size` when larger.
 pub fn decode(
     what: &Drawn,
     size: Size<DevicePixels>,
     renderer: &SvgRenderer,
 ) -> anyhow::Result<Arc<RenderImage>> {
-    let picture = match what {
-        Drawn::Picture(picture) => picture,
-        Drawn::PdfPage { document, page } => {
-            let (width, height) = (size.width.0 as f32, size.height.0 as f32);
-            let shrink = (PAGE_PIXELS / (width * height)).sqrt().min(1.0);
-            let side = |side: f32| (side * shrink).clamp(1.0, f32::from(u16::MAX)) as u16;
-            let mut rendered = document.render(*page, side(width), side(height))?;
-            for pixel in rendered.pixels.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            let pixels = image::RgbaImage::from_raw(
-                u32::from(rendered.width),
-                u32::from(rendered.height),
-                rendered.pixels,
-            )
-            .ok_or_else(|| anyhow::anyhow!("a page raster of the wrong length"))?;
-            let frames: SmallVec<[image::Frame; 1]> =
-                SmallVec::from_elem(image::Frame::new(pixels), 1);
-            return Ok(Arc::new(RenderImage::new(frames)));
-        }
-    };
+    let Drawn::Picture(picture) = what;
     let read;
     let bytes: &[u8] = match &picture.source {
         Source::File { path, .. } => {
@@ -270,4 +245,39 @@ pub fn decode(
             Ok(Arc::new(RenderImage::new(frames)))
         }
     }
+}
+
+pub fn evict(pictures: &mut Pictures, window: &mut Window, cx: &mut App) {
+    let frame = pictures.frame;
+    pictures
+        .entries
+        .retain(|_, entry| match (&entry.image, entry.drawn == frame) {
+            (Decoded::Failed, false) => false,
+            (Decoded::Failed, true) | (Decoded::Pending | Decoded::Ready(_), _) => true,
+        });
+    let bytes = |image: &RenderImage| {
+        let size = image.size(0);
+        size.width.0 as usize * size.height.0 as usize * 4
+    };
+    let mut ready: Vec<(u64, PictureKey, usize)> = (pictures.entries.iter())
+        .filter_map(|(key, entry)| match &entry.image {
+            Decoded::Ready(image) => Some((entry.drawn, key.clone(), bytes(image))),
+            Decoded::Pending | Decoded::Failed => None,
+        })
+        .collect();
+    let mut kept: usize = ready.iter().map(|(_, _, bytes)| bytes).sum();
+    ready.sort_by_key(|(drawn, ..)| *drawn);
+    for (_, key, bytes) in ready.into_iter().filter(|(drawn, ..)| *drawn < frame) {
+        match kept.checked_sub(PICTURE_BYTES_KEPT) {
+            Some(1..) => {}
+            Some(0) | None => break,
+        }
+        match pictures.entries.remove(&key).map(|entry| entry.image) {
+            Some(Decoded::Ready(image)) => cx.drop_image(image, Some(window)),
+            Some(Decoded::Pending | Decoded::Failed) | None => {}
+        }
+        kept -= bytes;
+    }
+    let _span = tracing::trace_span!("pictures kept", bytes = kept).entered();
+    pictures.frame += 1;
 }

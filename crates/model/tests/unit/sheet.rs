@@ -172,3 +172,23 @@ fn stepping_the_fit_never_shows_the_same_scale_twice() {
     view.step_fit(&stack, None);
     assert_eq!(view.fit, Fit::Width, "unmeasured, the width");
 }
+
+#[test]
+fn the_thumb_follows_the_view_and_seeking_moves_it() {
+    let stack = stack(10);
+    let viewport = viewport(800.0, 600.0);
+    let mut view = SheetView::start(&stack);
+    let thumb = view.frame(&stack, viewport).thumb(&stack, viewport);
+    assert_eq!(thumb.top, 0.0);
+    assert!(thumb.length > 0.0 && thumb.length < 0.2, "{thumb:?}");
+    view.seek(&stack, viewport, 0.5);
+    let moved = view.frame(&stack, viewport).thumb(&stack, viewport);
+    assert!((moved.top - 0.5).abs() < 1e-3, "{moved:?}");
+    assert_eq!(view.centre.page.0, 5);
+    view.seek(&stack, viewport, 2.0);
+    let end = view.frame(&stack, viewport).thumb(&stack, viewport);
+    assert!(
+        (end.top + end.length - 1.0).abs() < 1e-3,
+        "kept on the pages: {end:?}"
+    );
+}

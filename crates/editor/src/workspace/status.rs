@@ -81,7 +81,7 @@ impl Workspace {
                         (tab.hand.tip, tab.hand.layer, layers, file.disk, place)
                     }
                     InkTabs::Pdf(tab) => {
-                        let file = &state.pdfs[tab.file()];
+                        let file = &state.pdfs[tab.file()].ink;
                         let pages = file.edited.drawing().stack().sizes().len();
                         let place = format!(
                             "page {}/{pages}  {}",

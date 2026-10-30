@@ -13,13 +13,13 @@ use model::sheet::Viewport;
 use model::window::{Axis, Side};
 use nucleo::Matcher;
 
-use ink::doc::{PageIndex, Underlay};
+use ink::doc::PageIndex;
 
 use crate::apply::{Force, apply};
 use crate::drawing::InkTabs;
 use crate::input::picker::{
-    self, Grep, Items, Narrowing, PALETTE, PREVIEW_SLOTS, Picker, Preview, PreviewSource,
-    Referrers, Search,
+    self, AnnotationSearch, Grep, Items, Narrowing, Notebook, PALETTE, PREVIEW_SLOTS, Picker,
+    Preview, PreviewSource, Referrers, Search,
 };
 use crate::insert::{self, ImageFrom};
 use crate::job::{FsOp, Job};
@@ -38,19 +38,14 @@ use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Place, 
 use crate::view::tab::{NoMode, Opened, Tab, TextTabs};
 use crate::{Effect, Files, Focus, Overlay, Sidebar, State};
 
-/// How far from an edge a drop splits, as a part of the pane along that axis.
 const EDGE: f32 = 0.25;
 
-/// The mode a shown tab arrives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrive {
-    /// As it was; a new tab opens in its kind's first mode.
     AsIs,
-    /// In this mode when the file's kind has it, else as it was.
     In(Shown),
 }
 
-/// Zed's preview rules; a modified file opens permanently and a modified preview stays.
 pub fn show(
     state: &mut State,
     pane: PaneId,
@@ -86,7 +81,6 @@ pub fn show(
             None
         }
     };
-    // The replaced preview's file goes once no pane shows it.
     match displaced.map(|item| item.tab.opened()) {
         Some(displaced) => match state.is_modified(displaced) {
             false => state.release(displaced),
@@ -111,7 +105,6 @@ pub fn show(
     tab
 }
 
-/// Drops the file with its last tab, unless unsaved changes refuse it.
 pub fn close_tab(state: &mut State, pane: PaneId, index: usize, force: Force) {
     let Some(opened) = (state.layout.panes().get(pane))
         .and_then(|target| target.items().get(index))
@@ -143,7 +136,6 @@ fn touch(layout: &mut Layout) {
 pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) {
     let layout = &mut state.layout;
     match command {
-        // Like zed, the new pane holds only the active item; see `Tabs::split_copy`.
         WindowCommand::Split(axis) => {
             let side = match axis {
                 Axis::Row => Side::Right,
@@ -363,17 +355,16 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
         matcher,
         grep,
         project,
+        library,
         ..
     } = state;
     match (command, overlay) {
         (PickerCommand::Open(kind), _) => {
             let items = match kind {
-                // An open file picker fills when the first walk finishes.
                 PickerKind::Files => Items::Files(match &state.project.index {
                     FileIndex::Ready(Indexed { files, .. }) => files.clone(),
                     FileIndex::Loading { .. } => Arc::new(Vec::new()),
                 }),
-                // Most recently activated first; buffers no pane shows come last.
                 PickerKind::Buffers => {
                     let mut recent: Vec<(Tick, BufferId)> = state
                         .buffers
@@ -414,10 +405,7 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                 PickerKind::Outline => {
                     let headings = match state.layout.focused().active() {
                         Some(Tab::Ink(InkTabs::Pdf(tab))) => {
-                            match state.pdfs[tab.file()].edited.drawing().underlay() {
-                                Underlay::Pdf(pdf) => pdf.document.outline(),
-                                Underlay::Blank => Vec::new(),
-                            }
+                            state.pdfs[tab.file()].document().outline()
                         }
                         Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => {
                             return state.notice = Some(Notice::NotAPdf);
@@ -428,6 +416,32 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                         false => Items::Outline(headings),
                     }
                 }
+                PickerKind::Notebook => {
+                    let Some(Tab::Ink(InkTabs::Pdf(tab))) = state.layout.focused().active() else {
+                        return state.notice = Some(Notice::NotAPdf);
+                    };
+                    let listed = match state.pdfs[tab.file()].notes.listed() {
+                        Ok(listed) => listed,
+                        Err(refused) => return state.notice = Some(refused),
+                    };
+                    let entries: Vec<_> = (listed.notebook.in_reading_order().into_iter())
+                        .map(|annotation| {
+                            let label = picker::label(&annotation);
+                            (annotation, label)
+                        })
+                        .collect();
+                    match entries.as_slice() {
+                        [] => return state.notice = Some(Notice::NoAnnotations),
+                        [_, ..] => Items::Notebook(Notebook {
+                            file: tab.file(),
+                            entries,
+                        }),
+                    }
+                }
+                PickerKind::Annotations => Items::Annotations(AnnotationSearch {
+                    search: Search::Idle,
+                    hits: Vec::new(),
+                }),
                 PickerKind::Backlinks => {
                     let Some(buffer) = (state.layout.focused().active_text())
                         .map(|view| &state.buffers[view.buffer()])
@@ -478,14 +492,21 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                 state.overlay = overlay
             }
         },
-        (PickerCommand::Insert(c), Overlay::Picker(picker)) => {
-            edit_query(picker, matcher, grep, project, |query| query.push(c), out)
-        }
+        (PickerCommand::Insert(c), Overlay::Picker(picker)) => edit_query(
+            picker,
+            matcher,
+            grep,
+            project,
+            library,
+            |query| query.push(c),
+            out,
+        ),
         (PickerCommand::Backspace, Overlay::Picker(picker)) => edit_query(
             picker,
             matcher,
             grep,
             project,
+            library,
             |query| {
                 query.pop();
             },
@@ -493,7 +514,6 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
         ),
         (PickerCommand::Next, Overlay::Picker(picker)) => move_cursor(picker, Cycle::Next),
         (PickerCommand::Previous, Overlay::Picker(picker)) => move_cursor(picker, Cycle::Previous),
-        // The picker closed before a queued key arrived.
         (
             PickerCommand::Insert(_)
             | PickerCommand::Backspace
@@ -505,7 +525,6 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
     request_preview(state, out);
 }
 
-/// Opens the item under the picker's cursor; an empty list opens nothing.
 fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
     let Some(&index) = picker.matches.get(picker.cursor) else {
         return;
@@ -564,13 +583,32 @@ fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
             } = state;
             match (layout.focused_mut().active_mut(), headings[index].page) {
                 (Some(Tab::Ink(InkTabs::Pdf(tab))), Some(page)) => {
-                    let stack = pdfs[tab.file()].edited.drawing().stack();
+                    let stack = pdfs[tab.file()].ink.edited.drawing().stack();
                     let viewport = tab.hand.last.map(|measure| measure.viewport);
                     tab.view.go_to(stack, PageIndex(page), viewport);
                 }
                 (Some(Tab::Ink(InkTabs::Pdf(_))), None) => *notice = Some(Notice::NothingToFollow),
                 (Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None, _) => {}
             }
+            focus_editor(state);
+        }
+        Items::Notebook(mut notebook) => {
+            let State { layout, pdfs, .. } = state;
+            match (layout.focused_mut().active_mut(), pdfs.get(notebook.file)) {
+                (Some(Tab::Ink(InkTabs::Pdf(tab))), Some(pdf)) if tab.file() == notebook.file => {
+                    let (annotation, _) = notebook.entries.swap_remove(index);
+                    tab.show(&pdf.document().pages, annotation)
+                }
+                (Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None, _) => {}
+            }
+            focus_editor(state);
+        }
+        Items::Annotations(found) => {
+            let (hit, _) = &found.hits[index];
+            let path = state.library.path_of(&hit.path);
+            let open = state.tab_config.open_from_picker;
+            let to = Some(Target::Annotation(hit.annotation.id()));
+            crate::apply::open(state, path, Arrive::AsIs, to, open, out);
             focus_editor(state);
         }
     }
@@ -589,6 +627,7 @@ fn edit_query(
     matcher: &mut Matcher,
     current: &Arc<AtomicU64>,
     project: &Project,
+    library: &library::Library,
     edit: impl FnOnce(&mut String),
     out: &mut Vec<Effect>,
 ) {
@@ -617,19 +656,35 @@ fn edit_query(
                 current: current.clone(),
             }));
         }
+        Items::Annotations(found) => {
+            found.hits.clear();
+            picker.matches.clear();
+            picker.cursor = 0;
+            found.search = match library::SearchQuery::new(&picker.query) {
+                Some(query) => {
+                    out.push(Effect::Job(Job::SearchAnnotations {
+                        library: library.clone(),
+                        query,
+                        typed: picker.query.clone(),
+                    }));
+                    Search::Running
+                }
+                None => Search::Idle,
+            };
+        }
         Items::Files(_)
         | Items::Images(_)
         | Items::Buffers(_)
         | Items::Commands
         | Items::Backlinks(_)
-        | Items::Outline(_) => {
+        | Items::Outline(_)
+        | Items::Notebook(_) => {
             let narrowing = Narrowing::between(&previous, &picker.query);
             picker::filter(picker, matcher, narrowing);
         }
     }
 }
 
-/// Starts loading the highlighted picker item's file unless it is open or cached.
 pub fn request_preview(state: &mut State, out: &mut Vec<Effect>) {
     let Overlay::Picker(open) = &mut state.overlay else {
         return;
@@ -661,7 +716,6 @@ pub enum Close {
     Refused,
 }
 
-/// Refused while buffers have unsaved edits, with a notice.
 pub fn request_close(state: &mut State) -> Close {
     let unsaved = (state.buffers.values())
         .filter(|b| b.doc.is_modified())
@@ -693,7 +747,6 @@ pub enum Click {
 }
 
 impl Click {
-    /// From the host's count of quick clicks; a second click or later is a double.
     pub fn of(count: usize) -> Click {
         match count {
             0 | 1 => Click::Single,
@@ -702,7 +755,6 @@ impl Click {
     }
 }
 
-/// Tab click: activates tab `index` and focuses its pane; a double click keeps a preview.
 pub fn click_tab(state: &mut State, pane: PaneId, index: usize, click: Click) {
     let now = state.layout.tick();
     let Some(tabs) = (state.layout.find_pane(pane)).and_then(|target| target.tabs.as_mut()) else {
@@ -720,7 +772,6 @@ pub fn click_tab(state: &mut State, pane: PaneId, index: usize, click: Click) {
     focus_editor(state);
 }
 
-/// Mouse focus of a pane, including empty panes and statuslines.
 pub fn focus_pane(state: &mut State, pane: PaneId) {
     match state.layout.set_focus(pane) {
         Ok(()) => {}
@@ -730,14 +781,12 @@ pub fn focus_pane(state: &mut State, pane: PaneId) {
     focus_editor(state);
 }
 
-/// A directory toggles, a file opens, and a double click keeps the file's tab.
 pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<Effect>) {
     let Some(kind) = state.tree.rows.get(index).map(|row| row.kind) else {
         return;
     };
     state.tree.cursor = index;
     state.sidebar = Sidebar::Files(Files::Tree);
-    // A folder toggles on every click, however quickly they follow each other.
     match (click, kind) {
         (_, RowKind::Dir(_)) | (Click::Single, RowKind::File) => {
             tree(state, TreeCommand::Open, out)
@@ -753,7 +802,6 @@ pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<E
 }
 
 pub fn click_picker(state: &mut State, index: usize, out: &mut Vec<Effect>) {
-    // The picker closed, or its matches changed, since the frame drew the row.
     match std::mem::replace(&mut state.overlay, Overlay::None) {
         Overlay::Picker(mut picker) if index < picker.matches.len() => {
             picker.cursor = index;
@@ -766,7 +814,6 @@ pub fn click_picker(state: &mut State, index: usize, out: &mut Vec<Effect>) {
     }
 }
 
-/// A header toggles its group, an entry opens like `l`; a double click keeps its tab.
 pub fn click_changes(state: &mut State, row: usize, click: Click, out: &mut Vec<Effect>) {
     let changes = state.project.git.changes();
     state.sidebar = Sidebar::Changes(Focus::Sidebar);
@@ -786,7 +833,6 @@ pub fn click_changes(state: &mut State, row: usize, click: Click, out: &mut Vec<
     }
 }
 
-/// A Changes sidebar row button: runs `command` (stage, unstage, discard) on that row.
 pub fn changes_action(
     state: &mut State,
     row: usize,
@@ -798,7 +844,6 @@ pub fn changes_action(
     changes::list(state, command, out);
 }
 
-/// The folder a create or drop on `row` targets: the row itself, a file's folder, or the root.
 fn row_dir(row: Option<&tree::Row>) -> Folder {
     match row {
         Some(row) => match row.kind {
@@ -839,7 +884,6 @@ pub fn tree_action(
     }
 }
 
-/// Moves `from` into the directory of `onto` (a file's parent, or the root).
 pub fn move_entry(state: &mut State, from: RelPath, onto: TreeTarget, out: &mut Vec<Effect>) {
     let row = match onto {
         TreeTarget::Row(index) => state.tree.rows.get(index),
@@ -857,35 +901,25 @@ pub fn move_entry(state: &mut State, from: RelPath, onto: TreeTarget, out: &mut 
     }
 }
 
-/// Something dragged over the panes: a file from the tree or the Changes list, or a tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Dragged {
-    /// A file in the project, from the tree or the Changes list.
     File(RelPath),
-    /// A file dropped from outside the editor, such as a file manager.
     Outside(PathBuf),
-    Tab {
-        pane: PaneId,
-        index: usize,
-    },
+    Tab { pane: PaneId, index: usize },
 }
 
-/// Where a drag is dropped: on a pane's body, or on its tab bar before tab `at`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DropOn {
     Pane { pane: PaneId, zone: Zone },
     Tabs { pane: PaneId, at: usize },
 }
 
-/// A point on a pane drawn at `viewport`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanePoint {
     pub at: Point<geom::Pane>,
     pub viewport: Viewport,
 }
 
-/// The part of a pane's body a drop lands in: the middle, where a drop knows its point, or near
-/// an edge, which splits that way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Zone {
     Centre(PanePoint),
@@ -893,7 +927,6 @@ pub enum Zone {
 }
 
 impl Zone {
-    /// The zone `point` falls in: the nearest edge within its band, else the centre.
     pub fn at(point: PanePoint) -> Zone {
         let PanePoint { at, viewport } = point;
         let (x, y) = (at.x / viewport.width.get(), at.y / viewport.height.get());
@@ -910,7 +943,6 @@ impl Zone {
     }
 }
 
-/// Opens a dropped file or moves a dropped tab; a pane closed since the drag began takes nothing.
 pub fn dropped(state: &mut State, dragged: Dragged, on: DropOn, out: &mut Vec<Effect>) {
     match dragged {
         Dragged::Tab { pane: from, index } => {
@@ -941,10 +973,8 @@ pub fn dropped(state: &mut State, dragged: Dragged, on: DropOn, out: &mut Vec<Ef
     }
 }
 
-/// A file dropped on a pane: an image on a drawing or a note goes into it; anything else opens.
 fn dropped_file(state: &mut State, path: PathBuf, on: DropOn, out: &mut Vec<Effect>) {
     let (into, point) = match on {
-        // A pane with nothing to copy beside it takes the file itself.
         DropOn::Pane {
             pane,
             zone: Zone::Edge(side),
@@ -960,7 +990,6 @@ fn dropped_file(state: &mut State, path: PathBuf, on: DropOn, out: &mut Vec<Effe
         Err(NotInLayout(_)) => return,
     }
     focus_editor(state);
-    // An image dropped on a drawing or a note goes into it; anything else opens.
     let image = (point.zip(ImageFrom::file(path.clone()).ok()))
         .map(|(point, image)| insert::into_focused(state, Some(point)).map(|into| (into, image)));
     match image {

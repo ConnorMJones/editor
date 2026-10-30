@@ -42,8 +42,10 @@ pub use drops::DraggedTab;
 pub use sidebar::{DragPreview, DraggedEntry, TreeMenu};
 
 use crate::fonts::{Fonts, hsla};
-use crate::pictures::{Decoded, Pictures};
+use crate::page_tiles::PageTiles;
+use crate::pictures::Pictures;
 use crate::rendered::RenderedPane;
+use crate::sheet_bar::OnTrack;
 use chrome::{corners, round};
 use pane_tree::{DIVIDER, SPLIT_MIN_COLUMNS};
 use sidebar::SIDEBAR_HIDE;
@@ -79,6 +81,7 @@ pub struct Workspace {
     pub typeset: mpsc::Sender<Request>,
     /// Pictures decoded for the last frame.
     pub pictures: Rc<RefCell<Pictures>>,
+    pub page_tiles: Rc<RefCell<PageTiles>>,
     /// Content height as last drawn; rendered lists lay out this far past their viewport.
     pub window_height: Pixels,
 }
@@ -105,6 +108,10 @@ pub enum Drag {
     Split {
         pane: PaneId,
     },
+    SheetThumb {
+        pane: PaneId,
+        grab: f32,
+    },
 }
 
 #[derive(Default)]
@@ -115,6 +122,7 @@ pub struct Areas {
     pub splits: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
     /// Each drawing's body, which pen and mouse positions are measured from.
     pub drawings: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
+    pub sheet_bars: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
 }
 
 impl Workspace {
@@ -242,6 +250,21 @@ impl Workspace {
                 self.state.layout.drag_divider(path, *divider, at);
                 cx.notify();
             }
+            (Drag::SheetThumb { pane, grab }, Some(MouseButton::Left)) => {
+                let Some(track) = self.areas.sheet_bars.borrow().get(*pane).copied() else {
+                    return;
+                };
+                let along = (event.position.y - track.origin.y) / track.size.height;
+                let thumb = state::view::sheet::thumb(&self.state, *pane);
+                match thumb.and_then(|thumb| OnTrack::of(thumb, track.size.height)) {
+                    Some(on_track) => {
+                        let top = on_track.top_at(along - grab);
+                        state::view::sheet::seek(&mut self.state, *pane, top);
+                        cx.notify();
+                    }
+                    None => self.drag = Drag::Idle,
+                }
+            }
             (Drag::Split { pane }, Some(MouseButton::Left)) => {
                 let Some(area) = self.areas.splits.borrow().get(*pane).copied() else {
                     return;
@@ -350,20 +373,8 @@ impl Render for Workspace {
         self.window_height = window.viewport_size().height;
         // Split bodies record their bounds again as this frame lays them out.
         self.areas.splits.borrow_mut().clear();
-        let mut pictures = self.pictures.borrow_mut();
-        let frame = pictures.frame;
-        pictures
-            .entries
-            .retain(|_, entry| match (entry.drawn == frame, &entry.image) {
-                (true, _) => true,
-                (false, Decoded::Ready(image)) => {
-                    cx.drop_image(image.clone(), Some(window));
-                    false
-                }
-                (false, Decoded::Pending | Decoded::Failed) => false,
-            });
-        pictures.frame += 1;
-        drop(pictures);
+        crate::pictures::evict(&mut self.pictures.borrow_mut(), window, cx);
+        crate::page_tiles::evict(&mut self.page_tiles.borrow_mut(), window, cx);
         let State {
             tree,
             project,

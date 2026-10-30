@@ -1,10 +1,9 @@
-//! PDFs parsed and rendered by hayro; pages are measured in points with their rotation applied.
-
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use hayro::RenderCache;
 use hayro::hayro_interpret::font::Glyph;
 use hayro::hayro_interpret::hayro_cmap::BfString;
 use hayro::hayro_interpret::util::TransformExt;
@@ -16,10 +15,13 @@ use hayro::hayro_syntax::Pdf;
 use hayro::hayro_syntax::object::dict::keys::OUTLINES;
 use hayro::hayro_syntax::object::{Array, Dict, Object, ObjectIdentifier, String as PdfString};
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{RenderCache, RenderSettings};
 use kurbo::{Affine, BezPath, Rect};
 use model::geom::{Point, Surface};
 use model::sheet::{PageSize, Stack};
+
+pub const TILE: u16 = 512;
+pub const LEVELS_PER_DOUBLING: f32 = 4.0;
+pub const FINEST: Level = Level(40);
 
 pub struct Document {
     pdf: Pdf, // private: parsed from `bytes`
@@ -55,10 +57,10 @@ pub enum PdfError {
     Empty { page: usize },
     #[error("there is no page {0}")]
     NoPage(usize),
+    #[error("{0:?} is outside its page")]
+    NoBlock(TileBlock),
 }
 
-/// A page's text in the order it is drawn; spaces and line breaks the PDF only implies are in
-/// `text` without a `PdfChar`.
 #[derive(Debug)]
 pub struct PageText {
     pub text: String,
@@ -66,7 +68,6 @@ pub struct PageText {
 }
 
 impl PageText {
-    /// Distance off a line counts four times distance along it.
     pub fn nearest(&self, at: Point<Surface>) -> Option<usize> {
         let off = |char: &PdfChar| {
             let xs = char.quad.map(|corner| corner.x);
@@ -85,24 +86,24 @@ impl PageText {
             .map(|(index, _)| index)
     }
 
+    pub fn byte(&self, char: usize) -> usize {
+        self.chars.get(char).map_or(self.text.len(), |char| char.at)
+    }
+
+    pub fn chars_in(&self, bytes: Range<usize>) -> Range<usize> {
+        let first = |at: usize| self.chars.partition_point(|char| char.at < at);
+        first(bytes.start)..first(bytes.end)
+    }
+
     pub fn slice(&self, chars: Range<usize>) -> &str {
-        let start = self
-            .chars
-            .get(chars.start)
-            .map_or(self.text.len(), |char| char.at);
-        let end = self
-            .chars
-            .get(chars.end)
-            .map_or(self.text.len(), |char| char.at);
-        self.text[start..end.max(start)].trim_end()
+        let start = self.byte(chars.start);
+        self.text[start..self.byte(chars.end).max(start)].trim_end()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PdfChar {
-    /// Where the character starts in `PageText::text`.
     pub at: usize,
-    /// Bottom left, bottom right, top right, top left.
     pub quad: [Point<Surface>; 4],
 }
 
@@ -172,15 +173,73 @@ impl AsRef<[u8]> for Shared {
     }
 }
 
-/// Premultiplied RGBA, opaque: pages are drawn on white.
-pub struct Rgba {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Level(pub i8);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tile {
+    pub page: usize,
+    pub level: Level,
+    pub column: u16,
+    pub row: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TileBlock {
+    pub page: usize,
+    pub level: Level,
+    pub columns: Range<u16>,
+    pub rows: Range<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grid {
+    pub width: u32,
+    pub height: u32,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+pub struct Bgra {
     pub width: u16,
     pub height: u16,
     pub pixels: Vec<u8>,
 }
 
+impl Level {
+    pub fn covering(pixels_per_point: f32) -> Level {
+        let level = (pixels_per_point.log2() * LEVELS_PER_DOUBLING).ceil();
+        Level(level.clamp(f32::from(i8::MIN), f32::from(FINEST.0)) as i8)
+    }
+
+    pub fn whole_page(size: PageSize) -> Level {
+        let longest = size.width.get().max(size.height.get());
+        let level = ((f32::from(TILE) / longest).log2() * LEVELS_PER_DOUBLING).floor();
+        Level(level.clamp(f32::from(i8::MIN), f32::from(FINEST.0)) as i8)
+    }
+
+    pub fn pixels_per_point(self) -> f32 {
+        (f32::from(self.0) / LEVELS_PER_DOUBLING).exp2()
+    }
+}
+
+impl Grid {
+    pub fn of(size: PageSize, level: Level) -> Grid {
+        let side = |points: f32| ((points * level.pixels_per_point()).ceil() as u32).max(1);
+        let (width, height) = (side(size.width.get()), side(size.height.get()));
+        let cells = |pixels: u32| pixels.div_ceil(u32::from(TILE)) as u16;
+        Grid {
+            width,
+            height,
+            columns: cells(width),
+            rows: cells(height),
+        }
+    }
+}
+
 impl Document {
     pub fn open(bytes: Arc<[u8]>) -> Result<Document, PdfError> {
+        let _span = tracing::info_span!("pdf open", bytes = bytes.len()).entered();
         let pdf = Pdf::new(Arc::new(Shared(bytes.clone()))).map_err(PdfError::Load)?;
         let sizes = (pdf.pages().iter().enumerate())
             .map(|(page, read)| {
@@ -226,6 +285,7 @@ impl Document {
     }
 
     fn extract(&self, page: usize) -> Result<PageText, PdfError> {
+        let _span = tracing::info_span!("pdf text", page).entered();
         let (read, size) = (self.pdf.pages().get(page))
             .zip(self.pages.sizes().get(page))
             .ok_or(PdfError::NoPage(page))?;
@@ -274,28 +334,76 @@ impl Document {
     }
 
     /// `page` filling `width` by `height` pixels.
-    pub fn render(&self, page: usize, width: u16, height: u16) -> Result<Rgba, PdfError> {
-        let (read, size) = (self.pdf.pages().get(page))
-            .zip(self.pages.sizes().get(page))
-            .ok_or(PdfError::NoPage(page))?;
-        let settings = RenderSettings {
-            x_scale: f32::from(width) / size.width.get(),
-            y_scale: f32::from(height) / size.height.get(),
-            width: Some(width),
-            height: Some(height),
-            bg_color: WHITE,
+    pub fn render_tiles(&self, block: TileBlock) -> Result<Vec<(Tile, Bgra)>, PdfError> {
+        let _span = tracing::info_span!(
+            "pdf tiles render",
+            page = block.page,
+            level = block.level.0,
+            columns = ?block.columns,
+            rows = ?block.rows
+        )
+        .entered();
+        let (read, size) = (self.pdf.pages().get(block.page))
+            .zip(self.pages.sizes().get(block.page))
+            .ok_or(PdfError::NoPage(block.page))?;
+        let grid = Grid::of(*size, block.level);
+        let edge = u32::from(TILE);
+        let (left, top) = (
+            u32::from(block.columns.start) * edge,
+            u32::from(block.rows.start) * edge,
+        );
+        let (right, bottom) = (
+            (u32::from(block.columns.end) * edge).min(grid.width),
+            (u32::from(block.rows.end) * edge).min(grid.height),
+        );
+        let side = |from: u32, to: u32| match to.checked_sub(from).map(u16::try_from) {
+            Some(Ok(pixels @ 1..)) => Ok(pixels),
+            Some(Ok(0) | Err(_)) | None => Err(PdfError::NoBlock(block.clone())),
         };
-        let pixmap = hayro::render(
+        let (width, height) = (side(left, right)?, side(top, bottom)?);
+        let scale = f64::from(block.level.pixels_per_point());
+        let transform =
+            Affine::translate((-f64::from(left), -f64::from(top))) * Affine::scale(scale);
+        let mut pixmap = hayro::render_region(
             read,
             &RenderCache::new(),
             &InterpreterSettings::default(),
-            &settings,
-        );
-        Ok(Rgba {
+            transform,
             width,
             height,
-            pixels: pixmap.data_as_u8_slice().to_vec(),
-        })
+            WHITE,
+        );
+        for pixel in pixmap.data_as_u8_slice_mut().chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let region = pixmap.data_as_u8_slice();
+        let stride = usize::from(width) * 4;
+        let tiles = (block.rows.clone())
+            .flat_map(|row| block.columns.clone().map(move |column| (column, row)))
+            .map(|(column, row)| {
+                let (x, y) = (u32::from(column) * edge - left, u32::from(row) * edge - top);
+                let tile_width = (u32::from(width) - x).min(edge) as usize;
+                let tile_height = (u32::from(height) - y).min(edge) as usize;
+                let mut pixels = Vec::with_capacity(tile_width * tile_height * 4);
+                for line in 0..tile_height {
+                    let start = (y as usize + line) * stride + x as usize * 4;
+                    pixels.extend_from_slice(&region[start..start + tile_width * 4]);
+                }
+                let tile = Tile {
+                    page: block.page,
+                    level: block.level,
+                    column,
+                    row,
+                };
+                let bgra = Bgra {
+                    width: tile_width as u16,
+                    height: tile_height as u16,
+                    pixels,
+                };
+                (tile, bgra)
+            })
+            .collect();
+        Ok(tiles)
     }
 }
 

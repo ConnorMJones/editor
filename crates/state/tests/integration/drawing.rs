@@ -55,7 +55,7 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
                 .apply(Point::new(x, y))
         }
         Some(Tab::Ink(InkTabs::Pdf(tab))) => {
-            let stack = h.state.pdfs[tab.file()].edited.drawing().stack();
+            let stack = h.state.pdfs[tab.file()].ink.edited.drawing().stack();
             tab.view
                 .frame(stack, viewport())
                 .to_pane
@@ -68,7 +68,6 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
     }
 }
 
-/// One stroke through `points` on the focused pane, in sheet coordinates.
 pub fn draw(h: &mut Harness, stylus: Stylus, points: &[(f32, f32)]) {
     let pane = h.state.layout.focus();
     h.run(|state, _| sheet::measured(state, pane, measure()));
@@ -93,7 +92,6 @@ pub fn line(from: (f32, f32), to: (f32, f32)) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// The focused paged document's marks on the first page's first layer.
 fn marks(h: &Harness) -> usize {
     match h.state.layout.focused().active() {
         Some(Tab::Ink(InkTabs::Paged(tab))) => {
@@ -105,7 +103,7 @@ fn marks(h: &Harness) -> usize {
             drawing.marks(LayerIndex(0)).unwrap().len()
         }
         Some(Tab::Ink(InkTabs::Pdf(tab))) => {
-            let drawing = h.state.pdfs[tab.file()].edited.drawing();
+            let drawing = h.state.pdfs[tab.file()].ink.edited.drawing();
             drawing.marks(FIRST).unwrap().len()
         }
         Some(Tab::Text(_) | Tab::Image(_)) | None => panic!("no drawing is focused"),
@@ -311,7 +309,7 @@ fn pages_are_added_removed_and_jumped_between() {
     assert_eq!(marks(&h), 1, "the first page keeps its stroke");
     h.keys("ge");
     assert_eq!(view(&h).centre.page, Page(2));
-    h.keys("pp");
+    h.keys("pb");
     assert_eq!(view(&h).centre.page, Page(1));
     h.keys("pd");
     assert_eq!(pages(&h), 2);

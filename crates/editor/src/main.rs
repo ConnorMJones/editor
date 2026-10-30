@@ -1,11 +1,13 @@
 mod drawing;
 mod fonts;
 mod input;
+mod page_tiles;
 mod pictures;
 mod preview;
 mod prompt;
 mod rendered;
 mod sheet;
+mod sheet_bar;
 mod tabs;
 mod text;
 mod workspace;
@@ -47,19 +49,23 @@ fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
     let attach = args.attach();
     #[cfg(any(debug_assertions, feature = "tracy"))]
-    match attach {
-        Attach::Launch | Attach::Wait => {
-            use tracing_subscriber::EnvFilter;
-            use tracing_subscriber::layer::SubscriberExt as _;
-            use tracing_subscriber::util::SubscriberInitExt as _;
-            let registry = tracing_subscriber::registry()
-                .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
-                .with(tracing_subscriber::fmt::layer());
-            #[cfg(feature = "tracy")]
-            let registry = registry.with(tracing_tracy::TracyLayer::default());
-            registry.init();
-        }
-        Attach::Detached => {}
+    {
+        use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        let terminal = match attach {
+            Attach::Relaunch | Attach::Logging => Some(tracing_subscriber::fmt::layer()),
+            Attach::Background => None,
+        };
+        let registry = tracing_subscriber::registry()
+            .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(terminal);
+        #[cfg(feature = "tracy")]
+        let registry = registry.with(match attach {
+            Attach::Logging | Attach::Background => Some(tracing_tracy::TracyLayer::default()),
+            Attach::Relaunch => None,
+        });
+        registry.init();
     }
 
     let (root, file) = match Launch::resolve(&args.path)? {
@@ -82,10 +88,10 @@ fn main() -> anyhow::Result<()> {
         )),
     };
     match attach {
-        Attach::Launch => {
+        Attach::Relaunch => {
             std::process::Command::new(std::env::current_exe().context("finding edt's binary")?)
                 .args(std::env::args_os().skip(1))
-                .arg("--detached")
+                .arg("--background")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -94,7 +100,7 @@ fn main() -> anyhow::Result<()> {
                 .context("starting edt in the background")?;
             return Ok(());
         }
-        Attach::Wait | Attach::Detached => {}
+        Attach::Logging | Attach::Background => {}
     }
     let title = root.path().display().to_string();
     let prose = config.font.prose().family.clone();
@@ -228,6 +234,7 @@ fn main() -> anyhow::Result<()> {
                         rendered: Default::default(),
                         typeset: typeset_tx,
                         pictures: Default::default(),
+                        page_tiles: Default::default(),
                         window_height: window.viewport_size().height,
                     }
                 });

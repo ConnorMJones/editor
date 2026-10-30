@@ -547,6 +547,8 @@ pub enum PickerKind {
     /// Notes linking to the focused note.
     Backlinks,
     Outline,
+    Notebook,
+    Annotations,
 }
 
 /// What a tab shows of its file; each kind of file offers some of these.
@@ -573,11 +575,25 @@ pub enum Resize {
 pub enum DrawingCommand {
     Page(PageCommand),
     Ink(InkCommand),
+    Pdf(PdfCommand),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfCommand {
     Read,
     Copy,
     Find,
     FindSelection,
     FindNext(Direction),
+    Annotate(Annotate),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Annotate {
+    Highlight,
+    Comment,
+    Remove,
+    Bookmark,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

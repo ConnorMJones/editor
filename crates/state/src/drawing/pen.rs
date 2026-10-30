@@ -80,7 +80,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
         Some(Tab::Ink(InkTabs::Pdf(tab))) => match &mut tab.mode {
             PdfMode::Markup => {
                 let view = tab.view;
-                let file = &mut pdfs[tab.file()];
+                let file = &mut pdfs[tab.file()].ink;
                 on(
                     &mut tab.hand,
                     file,
@@ -92,8 +92,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                 )
             }
             PdfMode::Read(reading) => {
-                let paged = pdfs[tab.file].edited.drawing();
-                reading::pen(reading, &tab.view, paged, phase, sample);
+                reading::pen(reading, &tab.view, &pdfs[tab.file], phase, sample);
                 Ok(())
             }
         },

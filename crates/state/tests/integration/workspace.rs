@@ -352,7 +352,9 @@ fn grep_picker_jumps_to_hit() {
             | Items::Buffers(_)
             | Items::Commands
             | Items::Backlinks(_)
-            | Items::Outline(_) => {
+            | Items::Outline(_)
+            | Items::Notebook(_)
+            | Items::Annotations(_) => {
                 panic!("wrong picker")
             }
         },

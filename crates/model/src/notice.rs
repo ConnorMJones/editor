@@ -46,6 +46,18 @@ pub enum Notice {
     },
     NoSearch,
     NoOutline,
+    NoAnnotations,
+    NoAnnotationHits {
+        query: String,
+    },
+    NoHighlightPicked,
+    NotInLibrary,
+    LibraryFailed {
+        reason: String,
+    },
+    HighlightsLost {
+        lost: usize,
+    },
     PageTextFailed {
         page: usize,
         reason: String,
@@ -235,6 +247,17 @@ impl std::fmt::Display for Notice {
                 write!(f, "{} names another kind of file", path.display())
             }
             Notice::NoOutline => f.write_str("the PDF has no table of contents"),
+            Notice::NoAnnotations => f.write_str("the PDF has no annotations yet"),
+            Notice::NoAnnotationHits { query } => write!(f, "no annotation matches {query:?}"),
+            Notice::NoHighlightPicked => f.write_str("no highlight picked"),
+            Notice::NotInLibrary => f.write_str("this PDF is outside the library's folder"),
+            Notice::LibraryFailed { reason } => write!(f, "library: {reason}"),
+            Notice::HighlightsLost { lost } => {
+                write!(
+                    f,
+                    "the PDF changed; {lost} highlights could not be found again"
+                )
+            }
             Notice::NoSearch => f.write_str("nothing searched for yet"),
             Notice::NoHits { query } => write!(f, "no {query:?} in the PDF"),
             Notice::PageTextFailed { page, reason } => {

@@ -9,13 +9,16 @@ Code Guidelines:
   short plain sentence. No history, no measurements, no justification, no
   doc comment on every function. Do not let this regress immediately after
   you check once.
+- No Doc comments. At all.
+- const and static values go at the top of files, most important types first
+  impls and helping code follows. 
 - Write code such that invalid state irrepresentable (THIS IS VERY IMPORTANT).
   The type system is there for explicitly this purpose. It is a core aspect of
   the program which gives richer information to the logic being run.
   Code should be type oriented where the types convey intentionality and
   ensure correctness of the actual program. 
 - `match` over if/else chains. You can use maps and functional paradigms.
-  Avoid using bool flags and structure you're branching off of stricter
+  AVOID USING BOOL FLAGS and structure you're branching off of stricter
   type architecture. Similarly avoid overusing if let Some patterns. The
   branching and possible branches based off data state should be explicit,
   simple, and apparent at a glance.

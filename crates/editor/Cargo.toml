@@ -35,6 +35,7 @@ image.workspace = true
 reader.workspace = true
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 ink.workspace = true
+library.workspace = true
 model.workspace = true
 slotmap.workspace = true
 state = { workspace = true, features = ["typeset"] }

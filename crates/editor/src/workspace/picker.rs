@@ -23,7 +23,11 @@ impl Workspace {
         let fonts = &self.fonts;
         let previewed = match picker.items {
             Items::Files(_) | Items::Buffers(_) | Items::Grep(_) | Items::Backlinks(_) => true,
-            Items::Commands | Items::Images(_) | Items::Outline(_) => false,
+            Items::Commands
+            | Items::Images(_)
+            | Items::Outline(_)
+            | Items::Notebook(_)
+            | Items::Annotations(_) => false,
         };
         let viewport = window.viewport_size();
         let width = match previewed {
@@ -37,6 +41,12 @@ impl Workspace {
                 Search::Done => format!("{} hits", grep.hits.len()),
                 Search::Truncated => format!("{}+ hits", grep.hits.len()),
             },
+            Items::Annotations(found) => match found.search {
+                Search::Idle => String::new(),
+                Search::Running => "searching…".to_owned(),
+                Search::Done => format!("{} found", found.hits.len()),
+                Search::Truncated => format!("{}+ found", found.hits.len()),
+            },
             Items::Backlinks(Referrers {
                 search: Search::Running,
                 ..
@@ -46,7 +56,8 @@ impl Workspace {
             | Items::Buffers(_)
             | Items::Commands
             | Items::Backlinks(_)
-            | Items::Outline(_) => {
+            | Items::Outline(_)
+            | Items::Notebook(_) => {
                 format!("{}/{}", picker.matches.len(), picker.items.len())
             }
         };
@@ -62,7 +73,11 @@ impl Workspace {
                     .map(|row| {
                         let index = picker.matches[row];
                         let (label, detail) = match &picker.items {
-                            Items::Files(_) | Items::Images(_) | Items::Buffers(_) => {
+                            Items::Files(_)
+                            | Items::Images(_)
+                            | Items::Buffers(_)
+                            | Items::Notebook(_)
+                            | Items::Annotations(_) => {
                                 (picker.items.label(index).to_owned(), String::new())
                             }
                             Items::Commands => {

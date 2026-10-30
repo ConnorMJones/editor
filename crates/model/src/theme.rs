@@ -232,6 +232,15 @@ pub struct Theme {
     pub staged: Tones,
     pub rows: Rows,
     pub prose: Prose,
+    pub reader: ReaderColors,
+}
+
+#[derive(Clone, Copy)]
+pub struct ReaderColors {
+    pub selection: Color,
+    pub highlight: Color,
+    pub hit: Color,
+    pub current_hit: Color,
 }
 
 pub struct Slots(pub [Color; 16]);
@@ -376,6 +385,12 @@ impl Theme {
                 Background::TheirsMarker => tint(tones[Tone::Theirs], 8),
                 Background::BaseMarker => tint(tones[Tone::Base], 8),
             })),
+            reader: ReaderColors {
+                selection: tint(slot(Base0D), 35),
+                highlight: tint(slot(Base0A), 45),
+                hit: tint(slot(Base0E), 25),
+                current_hit: tint(slot(Base0E), 55),
+            },
             tones,
             prose: Prose {
                 link: slot(Base0D),

@@ -171,6 +171,7 @@ pub struct State {
     pub pageds: drawing::PagedFiles,
     pub boards: drawing::BoardFiles,
     pub pdfs: drawing::PdfFiles,
+    pub library: library::Library,
     pub images: viewer::ImageFiles,
     /// What new ink tabs draw with.
     pub ink: drawing::InkSettings,
@@ -189,6 +190,12 @@ impl State {
                 .map(|(scope, _)| (*scope).to_owned())
                 .collect(),
         );
+        let library = library::Library::at(match library::Library::existing(root.path()) {
+            Some(folder) => folder.to_owned(),
+            None => (git2::Repository::discover(root.path()).ok())
+                .and_then(|repo| repo.workdir()?.canonicalize().ok())
+                .unwrap_or_else(|| root.path().to_owned()),
+        });
         Ok(State {
             project: Project {
                 root,
@@ -238,6 +245,7 @@ impl State {
             pageds: SlotMap::with_key(),
             boards: SlotMap::with_key(),
             pdfs: SlotMap::with_key(),
+            library,
             images: SlotMap::with_key(),
             ink: drawing::InkSettings::default(),
         })
@@ -258,7 +266,7 @@ impl State {
             Opened::Text(buffer) => self.buffers[buffer].disk,
             Opened::Paged(id) => self.pageds[id].disk,
             Opened::Board(id) => self.boards[id].disk,
-            Opened::Pdf(id) => self.pdfs[id].disk,
+            Opened::Pdf(id) => self.pdfs[id].ink.disk,
             Opened::Image(id) => self.images[id].disk,
         }
     }
@@ -269,7 +277,7 @@ impl State {
             Opened::Text(buffer) => self.buffers[buffer].doc.is_modified(),
             Opened::Paged(id) => self.pageds[id].is_modified(),
             Opened::Board(id) => self.boards[id].is_modified(),
-            Opened::Pdf(id) => self.pdfs[id].is_modified(),
+            Opened::Pdf(id) => self.pdfs[id].ink.is_modified(),
             // Images are only viewed.
             Opened::Image(_) => false,
         }
@@ -280,7 +288,7 @@ impl State {
             Opened::Text(buffer) => &self.buffers[buffer].path,
             Opened::Paged(id) => &self.pageds[id].path,
             Opened::Board(id) => &self.boards[id].path,
-            Opened::Pdf(id) => &self.pdfs[id].path,
+            Opened::Pdf(id) => &self.pdfs[id].ink.path,
             Opened::Image(id) => &self.images[id].path,
         }
     }
@@ -316,7 +324,7 @@ impl State {
             Opened::Text(buffer) => job::Reload::Text(buffer),
             Opened::Paged(id) => job::Reload::Paged(id, self.fonts.clone()),
             Opened::Board(id) => job::Reload::Board(id, self.fonts.clone()),
-            Opened::Pdf(id) => job::Reload::Pdf(id),
+            Opened::Pdf(id) => job::Reload::Pdf(id, self.library.clone()),
             Opened::Image(id) => job::Reload::Image(id, self.images[id].encoding),
         }
     }
@@ -422,6 +430,7 @@ pub struct Prompt {
 pub enum PromptKind {
     Command,
     FindInPdf,
+    Comment(Commenting),
     /// Previews on every edit from `snapshot`, which cancel restores.
     Regex {
         op: RegexOp,
@@ -431,13 +440,20 @@ pub enum PromptKind {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commenting {
+    pub file: drawing::PdfId,
+    pub highlight: library::Highlight,
+}
+
 impl PromptKind {
     /// Register keeping submitted lines, browsed with up and down.
-    pub fn history(&self) -> Register {
+    pub fn history(&self) -> Option<Register> {
         match self {
-            PromptKind::Command => Register::COMMAND,
-            PromptKind::FindInPdf => Register::SEARCH,
-            PromptKind::Regex { register, .. } => *register,
+            PromptKind::Command => Some(Register::COMMAND),
+            PromptKind::FindInPdf => Some(Register::SEARCH),
+            PromptKind::Comment(_) => None,
+            PromptKind::Regex { register, .. } => Some(*register),
         }
     }
 
@@ -445,6 +461,7 @@ impl PromptKind {
         match self {
             PromptKind::Command => ":",
             PromptKind::FindInPdf => "find:",
+            PromptKind::Comment(_) => "comment:",
             PromptKind::Regex { op, .. } => match op {
                 RegexOp::Search(_) => "search:",
                 RegexOp::Select => "select:",

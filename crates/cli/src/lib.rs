@@ -5,33 +5,36 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "edt", version, about)]
 pub struct Args {
-    /// Folder or file to open.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", help = "Folder or file to open.")]
     pub path: PathBuf,
-    /// Config file; defaults to $XDG_CONFIG_HOME/edt/config.toml.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Config file: defaults to $XDG_CONFIG_HOME/edt/config.toml."
+    )]
     pub config: Option<PathBuf>,
-    /// Stay attached to the terminal until the window closes.
-    #[arg(long, short)]
-    pub wait: bool,
-    #[arg(long, hide = true, conflicts_with = "wait")]
-    pub detached: bool,
+    #[arg(
+        long,
+        short,
+        help = "Output logs to the terminal here."
+    )]
+    pub log: bool,
+    #[arg(long, hide = true, conflicts_with = "log")]
+    pub background: bool,
 }
 
-/// How this process relates to the terminal it was started from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attach {
-    Launch,
-    Wait,
-    Detached,
+    Relaunch,
+    Logging,
+    Background,
 }
 
 impl Args {
     pub fn attach(&self) -> Attach {
-        match (self.wait, self.detached) {
-            (false, false) => Attach::Launch,
-            (true, _) => Attach::Wait,
-            (false, true) => Attach::Detached,
+        match (self.log, self.background) {
+            (false, false) => Attach::Relaunch,
+            (true, _) => Attach::Logging,
+            (false, true) => Attach::Background,
         }
     }
 }

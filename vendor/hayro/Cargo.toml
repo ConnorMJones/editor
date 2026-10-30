@@ -1,0 +1,22 @@
+[package]
+name = "hayro"
+version = "0.7.1"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0 OR MIT"
+
+[features]
+default = ["embed-fonts", "embed-cmaps"]
+embed-cmaps = ["hayro-interpret/embed-cmaps"]
+embed-fonts = ["hayro-interpret/embed-fonts"]
+
+[dependencies]
+bytemuck = { workspace = true, features = ["bytemuck_derive"] }
+hayro-interpret.workspace = true
+image.workspace = true
+kurbo.workspace = true
+pic-scale.workspace = true
+vello_cpu.workspace = true
+
+[lints]
+workspace = true

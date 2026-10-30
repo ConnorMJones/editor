@@ -13,6 +13,7 @@ license = "GPL-3.0-or-later"
 cli = { path = "crates/cli" }
 export = { path = "crates/export" }
 reader = { path = "crates/reader" }
+library = { path = "crates/library" }
 ink = { path = "crates/ink" }
 model = { path = "crates/model" }
 state = { path = "crates/state" }
@@ -25,9 +26,15 @@ async-channel = { version = "2.5", default-features = false }
 bitflags = "2.6.0"
 clap = { version = "4.6.7", features = ["derive"] }
 git2 = { version = "0.21.0", default-features = false }
-# PDF parsing and rendering; the version typst-svg uses.
-hayro = "0.7.1"
+# PDF rendering, vendored to add `render_region`; typst-svg shares it through the patch below.
+hayro = { path = "vendor/hayro" }
+hayro-interpret = { version = "0.7.0", default-features = false }
+pic-scale = { version = "0.7.9", default-features = false, features = ["neon", "rdm", "sse", "avx"] }
+vello_cpu = { version = "0.0.8", default-features = false, features = ["std", "png", "u8_pipeline"] }
 kurbo = "0.13.1"
+# The annotations database; bundled so no system SQLite is needed.
+rusqlite = { version = "0.41.0", features = ["bundled"] }
+siphasher = "1.0.4"
 ignore = "0.4.33"
 # Same version helix-core uses, so the tree keeps one copy.
 imara-diff = "0.2.0"
@@ -50,12 +57,14 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # System tracing (context switches, sampling) is opt-in through the editor's `tracy-sampling`.
 tracing-tracy = { version = "0.11.4", default-features = false, features = [
     "enable",
+    "manual-lifetime",
     "broadcast",
     "code-transfer",
     "callstack-inlines",
 ] }
 tracy-client = { version = "=0.18.4", default-features = false, features = [
     "enable",
+    "manual-lifetime",
     "crash-handler",
 ] }
 # Typesetting; only the typeset crate depends on these.
@@ -149,7 +158,7 @@ syn = { version = "2.0", default-features = false, features = ["proc-macro"] }
 taffy = { version = "=0.13.0", default-features = false }
 unicode-bidi = { version = "0.3.18", default-features = false, features = ["hardcoded-data"] }
 url = "2.2"
-uuid = { version = "1.1", features = ["serde"] }
+uuid = { version = "1.1", features = ["serde", "v7"] }
 web-time = "1.1.0"
 wgpu = { version = "29.0", default-features = false }
 xkbcommon = { version = "0.8", default-features = false }
@@ -169,6 +178,7 @@ objc2-core-video = { version = "=0.3.2", default-features = false, features = ["
 nix = "0.30"
 
 [patch.crates-io]
+hayro = { path = "vendor/hayro" }
 # zed's forks, which GPUI needs.
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
@@ -193,6 +203,24 @@ proc-macro2 = { opt-level = 3 }
 taffy = { opt-level = 3 }
 resvg = { opt-level = 3 }
 serde_json = { opt-level = 3 }
+hayro = { opt-level = 3 }
+hayro-interpret = { opt-level = 3 }
+hayro-syntax = { opt-level = 3 }
+hayro-ccitt = { opt-level = 3 }
+hayro-cmap = { opt-level = 3 }
+hayro-jbig2 = { opt-level = 3 }
+hayro-jpeg2000 = { opt-level = 3 }
+hayro-postscript = { opt-level = 3 }
+vello_cpu = { opt-level = 3 }
+vello_common = { opt-level = 3 }
+fearless_simd = { opt-level = 3 }
+kurbo = { opt-level = 3 }
+zune-jpeg = { opt-level = 3 }
+moxcms = { opt-level = 3 }
+miniz_oxide = { opt-level = 3 }
+brotli-decompressor = { opt-level = 3 }
+image = { opt-level = 3 }
+png = { opt-level = 3 }
 
 [profile.release]
 debug = "limited"

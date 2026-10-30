@@ -1,11 +1,12 @@
 //! The binding tables, one per context, after helix's defaults.
 
 use model::command::{
-    Align, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
+    Align, Annotate, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
     DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join, Motion,
-    ObjectScope, PageCommand, PageSide, PageStep, Paste, Pending, PickerCommand, PickerKind,
-    PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy, Shown,
-    SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
+    ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand, Pending, PickerCommand,
+    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy,
+    Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking,
+    ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -1125,7 +1126,7 @@ const PAGE_GO: Bindings = &[
         page(PageCommand::Go(PageStep::Next)),
     ),
     (
-        &[Key::char('p'), Key::char('p')],
+        &[Key::char('p'), Key::char('b')],
         page(PageCommand::Go(PageStep::Previous)),
     ),
     (
@@ -1154,29 +1155,67 @@ const PAGE_EDIT: Bindings = &[
 const PDF_READ: Bindings = &[
     (&[Key::char(':')], Command::CommandMode),
     (&SAVE_ALL, Command::WriteAll),
-    (&[Key::char('y')], Command::Drawing(DrawingCommand::Copy)),
-    (&[Key::char('/')], Command::Drawing(DrawingCommand::Find)),
+    (
+        &[Key::char('y')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Copy)),
+    ),
+    (
+        &[Key::char('/')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Find)),
+    ),
     (
         &[SPACE, Key::char('t')],
         Command::Picker(PickerCommand::Open(PickerKind::Outline)),
     ),
     (
+        &[SPACE, Key::char('a')],
+        Command::Picker(PickerCommand::Open(PickerKind::Notebook)),
+    ),
+    (
+        &[SPACE, Key::char('A')],
+        Command::Picker(PickerCommand::Open(PickerKind::Annotations)),
+    ),
+    (
+        &[Key::char('v')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(
+            Annotate::Highlight,
+        ))),
+    ),
+    (
+        &[Key::char('i')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(Annotate::Comment))),
+    ),
+    (
+        &[Key::char('d')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(Annotate::Remove))),
+    ),
+    (
+        &[Key::char('m')],
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(
+            Annotate::Bookmark,
+        ))),
+    ),
+    (
         &[Key::char('n')],
-        Command::Drawing(DrawingCommand::FindNext(Direction::Forward)),
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::FindNext(
+            Direction::Forward,
+        ))),
     ),
     (
         &[Key::char('N')],
-        Command::Drawing(DrawingCommand::FindNext(Direction::Backward)),
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::FindNext(
+            Direction::Backward,
+        ))),
     ),
     (
         &[Key::code(KeyCode::Esc)],
-        Command::Drawing(DrawingCommand::Read),
+        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
     ),
 ];
 
 const PDF_MARKUP: Bindings = &[(
     &[Key::code(KeyCode::Esc)],
-    Command::Drawing(DrawingCommand::Read),
+    Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
 )];
 
 pub const TABLES: [&[Bindings]; Context::COUNT] = [

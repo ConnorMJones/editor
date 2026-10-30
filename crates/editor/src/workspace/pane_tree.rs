@@ -4,8 +4,8 @@ use gpui::{
     AnyElement, Context, Div, ElementId, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PenEvent, Pixels, ScrollWheelEvent, canvas, div, prelude::*, px,
 };
-use ink::doc::Underlay;
-use model::command::{Command, DrawingCommand};
+use library::Comment;
+use model::command::{Annotate, Command, DrawingCommand, PdfCommand};
 use model::window::Axis;
 use slotmap::Key as _;
 use state::apply;
@@ -25,12 +25,9 @@ use crate::sheet::SheetElement;
 use crate::text::TextElement;
 use state::view::draws::Part;
 
-/// Hit width of split and sidebar dividers; a 1px line is drawn in the middle.
 pub const DIVIDER: Pixels = px(5.0);
-/// Columns of the monospace font each side of a split keeps, however far its divider goes.
 pub const SPLIT_MIN_COLUMNS: f32 = 12.0;
 
-/// A draggable gap between panes along `axis`, or beside the sidebar.
 pub fn divider(axis: Axis, color: Hsla) -> Div {
     match axis {
         Axis::Row => div()
@@ -54,7 +51,6 @@ pub fn divider(axis: Axis, color: Hsla) -> Div {
 }
 
 impl Workspace {
-    /// `path` holds the child indices from the root down to `node`.
     pub fn node(&self, node: &Node, path: &mut SplitPath, cx: &mut Context<Self>) -> AnyElement {
         match node {
             Node::Pane(pane) => {
@@ -73,61 +69,115 @@ impl Workspace {
                     part,
                 };
                 let popup = match target.and_then(Pane::active) {
-                    Some(Tab::Ink(InkTabs::Pdf(tab))) => match (&tab.mode, tab.hand.last) {
-                        (PdfMode::Read(Reading::Selected(span)), Some(measure)) => {
-                            let paged = self.state.pdfs[tab.file()].edited.drawing();
-                            let frame = frame::paged(paged, &tab.view, measure.viewport);
-                            let corner = match paged.underlay() {
-                                Underlay::Pdf(pdf) => (pdf.document.text(span.page.0))
-                                    .and_then(|text| text.chars.get(span.chars.start))
-                                    .map(|char| char.quad[3]),
-                                Underlay::Blank => None,
-                            };
-                            corner.zip(frame.on(span.page)).map(|(corner, shown)| {
-                                let at = shown.to_pane.apply(corner);
-                                let theme = &self.theme;
-                                let button = |label: &'static str, command: DrawingCommand| {
+                    Some(Tab::Ink(InkTabs::Pdf(tab))) => {
+                        let file = &self.state.pdfs[tab.file()];
+                        let offer = match &tab.mode {
+                            PdfMode::Read(Reading::Selected(span)) => {
+                                Some((span, Offer::Selection))
+                            }
+                            PdfMode::Read(Reading::OnHighlight(highlight)) => Some((
+                                &highlight.span,
+                                Offer::Highlight(highlight.comment.as_ref()),
+                            )),
+                            PdfMode::Read(Reading::Idle | Reading::Selecting { .. })
+                            | PdfMode::Markup => None,
+                        };
+                        let corner = offer.as_ref().and_then(|(span, _)| {
+                            let text = file.document().text(span.page.0)?;
+                            let last = text.chars.get(span.chars.end.checked_sub(1)?)?;
+                            Some((span.page, last.quad[0]))
+                        });
+                        match (offer, corner, tab.hand.last) {
+                            (Some((_, offer)), Some((page, corner)), Some(measure)) => {
+                                let paged = file.ink.edited.drawing();
+                                let frame = frame::paged(paged, &tab.view, measure.viewport);
+                                frame.on(page).map(|shown| {
+                                    let at = shown.to_pane.apply(corner);
+                                    let theme = &self.theme;
+                                    let button = |label: &'static str, command: PdfCommand| {
+                                        div()
+                                            .id(label)
+                                            .px(self.fonts.ui_size * 0.6)
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(hsla(theme.chrome.hover)))
+                                            .child(label)
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    move |this, _: &MouseDownEvent, _, cx| {
+                                                        cx.stop_propagation();
+                                                        apply::apply(
+                                                            &mut this.state,
+                                                            Command::Drawing(DrawingCommand::Pdf(
+                                                                command,
+                                                            )),
+                                                            &mut this.effects,
+                                                        );
+                                                        this.changed(cx);
+                                                    },
+                                                ),
+                                            )
+                                    };
+                                    let buttons = div()
+                                        .h(self.fonts.ui_line * 1.2)
+                                        .flex()
+                                        .items_center()
+                                        .gap(self.fonts.ui_size * 0.2);
+                                    let (comment, buttons) = match offer {
+                                        Offer::Selection => (
+                                            None,
+                                            buttons
+                                                .child(button(
+                                                    "Highlight",
+                                                    PdfCommand::Annotate(Annotate::Highlight),
+                                                ))
+                                                .child(button(
+                                                    "Comment",
+                                                    PdfCommand::Annotate(Annotate::Comment),
+                                                ))
+                                                .child(button("Copy", PdfCommand::Copy))
+                                                .child(button("Search", PdfCommand::FindSelection)),
+                                        ),
+                                        Offer::Highlight(comment) => (
+                                            comment,
+                                            buttons
+                                                .child(button(
+                                                    "Edit comment",
+                                                    PdfCommand::Annotate(Annotate::Comment),
+                                                ))
+                                                .child(button(
+                                                    "Delete",
+                                                    PdfCommand::Annotate(Annotate::Remove),
+                                                )),
+                                        ),
+                                    };
                                     div()
-                                        .id(label)
-                                        .px(self.fonts.ui_size * 0.6)
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(hsla(theme.chrome.hover)))
-                                        .child(label)
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                                cx.stop_propagation();
-                                                apply::apply(
-                                                    &mut this.state,
-                                                    Command::Drawing(command),
-                                                    &mut this.effects,
-                                                );
-                                                this.changed(cx);
-                                            }),
-                                        )
-                                };
-                                div()
-                                    .absolute()
-                                    .left(px(at.x))
-                                    .top(px(at.y) - self.fonts.ui_line * 1.4)
-                                    .h(self.fonts.ui_line * 1.2)
-                                    .flex()
-                                    .items_center()
-                                    .gap(self.fonts.ui_size * 0.2)
-                                    .px(self.fonts.ui_size * 0.2)
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(hsla(theme.chrome.border))
-                                    .bg(hsla(theme.surface))
-                                    .text_color(hsla(theme.text))
-                                    .text_size(self.fonts.ui_size)
-                                    .child(button("Copy", DrawingCommand::Copy))
-                                    .child(button("Search", DrawingCommand::FindSelection))
-                            })
+                                        .absolute()
+                                        .left(px(at.x))
+                                        .top(px(at.y) + self.fonts.ui_line * 0.3)
+                                        .max_w(self.fonts.ui_size * 28.0)
+                                        .flex()
+                                        .flex_col()
+                                        .px(self.fonts.ui_size * 0.2)
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(hsla(theme.chrome.border))
+                                        .bg(hsla(theme.surface))
+                                        .text_color(hsla(theme.text))
+                                        .text_size(self.fonts.ui_size)
+                                        .children(comment.map(|comment| {
+                                            div()
+                                                .px(self.fonts.ui_size * 0.6)
+                                                .py(self.fonts.ui_size * 0.3)
+                                                .child(comment.as_str().to_owned())
+                                        }))
+                                        .child(buttons)
+                                })
+                            }
+                            (_, _, _) => None,
                         }
-                        (PdfMode::Read(_) | PdfMode::Markup, _) => None,
-                    },
+                    }
                     Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => None,
                 };
                 let body = match target.and_then(Pane::active) {
@@ -339,6 +389,9 @@ impl Workspace {
                     }
                     None => div().flex_1(),
                 };
+                let body = body
+                    .relative()
+                    .children(crate::sheet_bar::sheet_bar(self, pane, cx));
                 div()
                     .flex_1()
                     .flex()
@@ -406,4 +459,9 @@ impl Workspace {
             }
         }
     }
+}
+
+enum Offer<'a> {
+    Selection,
+    Highlight(Option<&'a Comment>),
 }

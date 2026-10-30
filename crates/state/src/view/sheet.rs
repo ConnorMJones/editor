@@ -1,15 +1,13 @@
-//! Zoom, pan and fit for every tab shown as pages or a plane: typst pages, drawings, images.
-
 use model::command::{ViewCommand, ZoomBy};
 use model::geom::{Pane, Point, Vector};
 use model::notice::Notice;
-use model::sheet::{Measure, PlaneView, SheetView, Stack, Viewport, Zoom};
+use model::sheet::{Measure, PlaneView, SheetView, Stack, Thumb, Viewport, Zoom};
 use model::window::Side;
 
 use crate::State;
 use crate::drawing::InkTabs;
 use crate::view::layout::PaneId;
-use crate::view::tab::{ShowingMut, Tab};
+use crate::view::tab::{Showing, ShowingMut, Tab};
 
 pub const PAN_STEP: f32 = 0.125;
 
@@ -47,7 +45,7 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
             last: &mut tab.hand.last,
         }),
         Tab::Ink(InkTabs::Pdf(tab)) => Some(Viewed::Pages {
-            stack: pdfs[tab.file()].edited.drawing().stack(),
+            stack: pdfs[tab.file()].ink.edited.drawing().stack(),
             view: &mut tab.view,
             last: &mut tab.hand.last,
         }),
@@ -68,6 +66,44 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
             }),
             ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Document(..) => None,
         },
+    }
+}
+
+pub fn thumb(state: &State, pane: PaneId) -> Option<Thumb> {
+    let (view, stack, last) = match state.layout.panes().get(pane)?.active()? {
+        Tab::Ink(InkTabs::Paged(tab)) => (
+            &tab.view,
+            state.pageds[tab.file()].edited.drawing().stack(),
+            tab.hand.last,
+        ),
+        Tab::Ink(InkTabs::Pdf(tab)) => (
+            &tab.view,
+            &state.pdfs[tab.file()].document().pages,
+            tab.hand.last,
+        ),
+        Tab::Image(tab) => (&tab.view, &state.images[tab.file()].stack, tab.last),
+        Tab::Text(text) => match text.showing() {
+            Showing::Pages(source, pages, _) => (
+                &pages.view,
+                &state.compiles.get(source.buffer())?.pages.as_ref()?.stack,
+                pages.last,
+            ),
+            Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => return None,
+        },
+        Tab::Ink(InkTabs::Board(_)) => return None,
+    };
+    let viewport = last?.viewport;
+    Some(view.frame(stack, viewport).thumb(stack, viewport))
+}
+
+pub fn seek(state: &mut State, pane: PaneId, top: f32) {
+    match viewed(state, pane) {
+        Some(Viewed::Pages {
+            view,
+            stack,
+            last: Some(measure),
+        }) => view.seek(stack, measure.viewport, top),
+        Some(Viewed::Pages { last: None, .. } | Viewed::Plane { .. }) | None => {}
     }
 }
 

@@ -256,6 +256,12 @@ pub struct SheetFrame {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Thumb {
+    pub top: f32,
+    pub length: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageFrame {
     pub index: PageIndex,
     pub size: PageSize,
@@ -359,6 +365,14 @@ impl SheetView {
         self.centre = spot(stack, clamp(stack, viewport, scale, to));
     }
 
+    pub fn seek(&mut self, stack: &Stack, viewport: Viewport, top: f32) {
+        let scale = self.scale(stack, viewport);
+        let from = clamp(stack, viewport, scale, self.sheet_centre(stack));
+        let half = viewport.height.get() / scale * 0.5;
+        let to = Point::new(from.x, top * stack.height() + half);
+        self.centre = spot(stack, clamp(stack, viewport, scale, to));
+    }
+
     /// Zooms by `factor`, keeping the point under `at` there.
     pub fn zoom_about(&mut self, stack: &Stack, viewport: Viewport, at: Point<Pane>, factor: f32) {
         let frame = self.frame(stack, viewport);
@@ -402,6 +416,19 @@ impl SheetView {
 }
 
 impl SheetFrame {
+    pub fn thumb(&self, stack: &Stack, viewport: Viewport) -> Thumb {
+        let top = self.from_pane.apply(Point::new(0.0, 0.0)).y;
+        let bottom = self
+            .from_pane
+            .apply(Point::new(0.0, viewport.height.get()))
+            .y;
+        let length = ((bottom - top) / stack.height()).min(1.0);
+        Thumb {
+            top: (top / stack.height()).clamp(0.0, 1.0 - length),
+            length,
+        }
+    }
+
     pub fn page(&self, stack: &Stack, index: PageIndex) -> PageFrame {
         let placed = stack.place(index);
         let [_, _, _, _, x, y] = placed.place.coefficients;

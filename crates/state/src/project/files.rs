@@ -10,12 +10,8 @@ use crate::project::links::Index;
 use crate::project::path::{Folder, RelPath};
 use crate::{Effect, Overlay, State};
 
-/// What is known of the files under the root.
 pub enum FileIndex {
-    /// The first walk runs; what was asked for meanwhile starts when it finishes.
-    Loading {
-        then: OnIndexed,
-    },
+    Loading { then: OnIndexed },
     Ready(Indexed),
 }
 
@@ -25,13 +21,9 @@ pub enum OnIndexed {
     BuildBacklinks,
 }
 
-/// The files under the root and what is derived from them.
 pub struct Indexed {
-    /// Every non-ignored, non-hidden file, sorted.
     pub files: Arc<Vec<RelPath>>,
-    /// Bumped whenever `files` changes; parses note the generation their links resolved in.
     pub generation: u64,
-    /// Built on first use after `files` changed.
     pub links: Option<Index>,
     pub backlinks: Backlinks,
 }
@@ -46,7 +38,6 @@ impl Indexed {
         }
     }
 
-    /// The link index for the current files, and the backlinks read beside it.
     pub fn links(&mut self) -> (&Index, &mut Backlinks) {
         let Indexed {
             files,
@@ -58,7 +49,6 @@ impl Indexed {
         (index, backlinks)
     }
 
-    /// The files changed: links resolve again on next use.
     pub fn changed(&mut self) {
         self.generation += 1;
         self.links = None;
@@ -71,7 +61,7 @@ pub struct Walked {
     pub dirs: Vec<RelPath>,
 }
 
-/// Honours gitignore and hidden-file rules; `depth` 1 lists direct children only.
+// Honours gitignore and hidden-file
 pub fn walk(root: &Path, dir: &Folder, depth: Option<usize>) -> Walked {
     let mut walked = Walked::default();
     let start = dir.to_path(root);
@@ -102,14 +92,10 @@ pub fn walk(root: &Path, dir: &Folder, depth: Option<usize>) -> Walked {
     walked
 }
 
-/// Index changes derived from a batch of changed paths.
 #[derive(Debug, Default)]
 pub struct Rescan {
-    /// Paths that no longer exist; files and whole directories alike.
     pub removed: Vec<RelPath>,
-    /// Directories whose direct files are replaced by the listing.
     pub relisted: Vec<(Folder, Walked)>,
-    /// New directories whose whole contents are replaced by the walk.
     pub subtrees: Vec<(RelPath, Walked)>,
 }
 
@@ -179,7 +165,6 @@ pub fn apply_rescan(files: &mut Vec<RelPath>, rescan: Rescan) -> Changed {
     changed
 }
 
-/// Takes a finished walk of the root: watches its folders and refills a file picker.
 pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
     let root = state.project.root.path();
     let dirs = walked.dirs.iter().map(|dir| dir.to_path(root));
@@ -201,7 +186,9 @@ pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
             | Items::Commands
             | Items::Grep(_)
             | Items::Backlinks(_)
-            | Items::Outline(_) => {}
+            | Items::Outline(_)
+            | Items::Notebook(_)
+            | Items::Annotations(_) => {}
         },
         Overlay::None | Overlay::Prompt(_) | Overlay::Confirm(_) => {}
     }
@@ -215,7 +202,6 @@ pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
                 OnIndexed::BuildBacklinks => backlinks::ensure(state, out),
             }
         }
-        // A second walk keeps what the first built and resolves links again.
         FileIndex::Ready(indexed) => {
             indexed.files = files;
             indexed.changed();
@@ -225,7 +211,6 @@ pub fn indexed(state: &mut State, walked: Walked, out: &mut Vec<Effect>) {
     crate::view::panes::request_preview(state, out);
 }
 
-/// Takes a rescan of paths the watcher reported.
 pub fn rescanned(state: &mut State, rescan: Rescan, out: &mut Vec<Effect>) {
     let root = state.project.root.path();
     let new_dirs: Vec<PathBuf> = rescan
@@ -238,7 +223,6 @@ pub fn rescanned(state: &mut State, rescan: Rescan, out: &mut Vec<Effect>) {
         true => {}
         false => out.push(Effect::Watch(new_dirs)),
     }
-    // Before the first walk ends, the walk itself sees these changes.
     let FileIndex::Ready(indexed) = &mut state.project.index else {
         return;
     };

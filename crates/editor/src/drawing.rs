@@ -25,16 +25,16 @@ use model::picture::{Picture, Source};
 use model::sheet::{Measure, Viewport};
 use model::theme::Color;
 use model::units::Px;
-use reader::pdf::Document;
 use slotmap::Key as _;
 use state::drawing::frame::{self, InkFrame, Paper, REACH};
 use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
 use state::drawing::typing::Writing;
-use state::drawing::{Doing, Found, Hand, InkTabs, PdfMode, Reading, TextSpan};
+use state::drawing::{Doing, Found, Hand, InkTabs, Notes, PdfMode, Reading, TextSpan};
 use state::view::layout::PaneId;
 use state::view::tab::Tab;
 
 use crate::fonts::hsla;
+use crate::page_tiles::{PageOnScreen, TileShown, prefetch, tiles_for};
 use crate::pictures::{Drawn, decoded, paint_picture};
 use crate::workspace::Workspace;
 
@@ -111,7 +111,7 @@ impl Element for DrawingElement {
                     }
                 }
                 Some(Tab::Ink(InkTabs::Pdf(tab))) => {
-                    let paged = state.pdfs[tab.file()].edited.drawing();
+                    let paged = state.pdfs[tab.file()].ink.edited.drawing();
                     let frame = frame::paged(paged, &tab.view, viewport);
                     Wants {
                         last: tab.hand.last,
@@ -135,6 +135,7 @@ impl Element for DrawingElement {
             line: Px(f32::from(workspace.fonts.cell.height)),
         };
         let (pictures, weak) = (workspace.pictures.clone(), self.workspace.downgrade());
+        let page_tiles = workspace.page_tiles.clone();
         // Keys that move by part of the pane hear of a new size after this frame.
         match last {
             Some(seen) if seen == measure => {}
@@ -147,33 +148,36 @@ impl Element for DrawingElement {
                 });
             }
         }
-        let mut decode = |what: &Drawn, size| {
-            let area = Bounds::new(point(px(0.0), px(0.0)), size);
-            decoded(&pictures, &weak, what, area, window, cx)
-        };
+        let view_bounds = Bounds::from_corners(
+            point(px(view.min().x), px(view.min().y)),
+            point(px(view.max().x), px(view.max().y)),
+        );
+        let neighbours = (pages.first().zip(pages.last()))
+            .map(|(first, last)| (first.document.clone(), first.page, last.page));
+        let shown_pages = (pages.iter())
+            .map(|shown| PageShown {
+                page: shown.page as u32,
+                tiles: tiles_for(&page_tiles, &weak, shown, view_bounds, window, cx),
+            })
+            .collect();
+        match neighbours {
+            Some((document, first, last)) => {
+                for page in [first.checked_sub(1), Some(last + 1)].into_iter().flatten() {
+                    prefetch(&page_tiles, &weak, &document, page, cx);
+                }
+            }
+            None => {}
+        }
         Pictured {
             marks: (marks.into_iter())
                 .filter_map(|Wanted { id, picture, size }| {
-                    let image = decode(&Drawn::Picture(picture), size)?;
+                    let area = Bounds::new(point(px(0.0), px(0.0)), size);
+                    let image =
+                        decoded(&pictures, &weak, &Drawn::Picture(picture), area, window, cx)?;
                     Some(ImageShown { id, image })
                 })
                 .collect(),
-            pages: (pages.into_iter())
-                .filter_map(
-                    |PageWanted {
-                         document,
-                         page,
-                         size,
-                     }| {
-                        let drawn = Drawn::PdfPage {
-                            document,
-                            page: page as usize,
-                        };
-                        let image = decode(&drawn, size)?;
-                        Some(PageShown { page, image })
-                    },
-                )
-                .collect(),
+            pages: shown_pages,
         }
     }
 
@@ -210,51 +214,57 @@ impl Element for DrawingElement {
                     paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, pictured, window)
                 }
                 Some(Tab::Ink(InkTabs::Pdf(tab))) => {
-                    let paged = state.pdfs[tab.file()].edited.drawing();
+                    let file = &state.pdfs[tab.file()];
+                    let paged = file.ink.edited.drawing();
                     let frame = frame::paged(paged, &tab.view, viewport);
                     paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, pictured, window);
-                    let mut marked: SmallVec<[(TextSpan, Hsla); 8]> = SmallVec::new();
+                    let reader = &workspace.theme.reader;
+                    let mut marked: SmallVec<[(&TextSpan, Hsla); 16]> = SmallVec::new();
+                    match &file.notes {
+                        Notes::Listed(listed) => marked.extend(
+                            (listed.notebook.highlights.iter())
+                                .filter(|highlight| frame.on(highlight.span.page).is_some())
+                                .map(|highlight| (&highlight.span, hsla(reader.highlight))),
+                        ),
+                        Notes::Unlisted(_) => {}
+                    }
                     match &tab.found {
                         Found::Hits { hits, at, .. } => marked.extend(
                             (hits.iter().enumerate())
                                 .filter(|(_, hit)| frame.on(hit.page).is_some())
-                                .map(|(index, hit)| {
-                                    let tint = match index == *at {
-                                        true => 0.45,
-                                        false => 0.2,
-                                    };
-                                    (
-                                        hit.clone(),
-                                        hsla(workspace.theme.chrome.picked).opacity(tint),
-                                    )
+                                .map(|(index, hit)| match index == *at {
+                                    true => (hit, hsla(reader.current_hit)),
+                                    false => (hit, hsla(reader.hit)),
                                 }),
                         ),
                         Found::Nothing | Found::Searching { .. } => {}
                     }
+                    let selecting;
                     match &tab.mode {
-                        PdfMode::Read(Reading::Selecting { page, anchor, head }) => marked.push((
-                            TextSpan {
+                        PdfMode::Read(Reading::Selecting { page, anchor, head }) => {
+                            selecting = TextSpan {
                                 page: *page,
                                 chars: *anchor.min(head)..*anchor.max(head) + 1,
-                            },
-                            accent.opacity(0.3),
-                        )),
+                            };
+                            marked.push((&selecting, hsla(reader.selection)))
+                        }
                         PdfMode::Read(Reading::Selected(span)) => {
-                            marked.push((span.clone(), accent.opacity(0.3)))
+                            marked.push((span, hsla(reader.selection)))
+                        }
+                        PdfMode::Read(Reading::OnHighlight(highlight)) => {
+                            marked.push((&highlight.span, hsla(reader.selection)))
                         }
                         PdfMode::Read(Reading::Idle) | PdfMode::Markup => {}
                     }
                     for (span, color) in marked {
-                        let text = match paged.underlay() {
-                            Underlay::Pdf(pdf) => pdf.document.text(span.page.0),
-                            Underlay::Blank => None,
-                        };
-                        let (Some(text), Some(shown)) = (text, frame.on(span.page)) else {
+                        let (Some(text), Some(shown)) =
+                            (file.document().text(span.page.0), frame.on(span.page))
+                        else {
                             continue;
                         };
                         let to_screen = shown.to_pane.then(&screen.to_screen);
                         let mut path = PathBuilder::fill();
-                        for char in text.chars.get(span.chars).unwrap_or_default() {
+                        for char in text.chars.get(span.chars.clone()).unwrap_or_default() {
                             for (index, corner) in char.quad.into_iter().enumerate() {
                                 let at = to_screen.apply(corner);
                                 match index {
@@ -306,7 +316,7 @@ pub struct Pictured {
 
 pub struct PageShown {
     pub page: u32,
-    pub image: Arc<RenderImage>,
+    pub tiles: SmallVec<[TileShown; 16]>,
 }
 
 pub struct ImageShown {
@@ -318,14 +328,7 @@ pub struct ImageShown {
 pub struct Wants {
     pub last: Option<Measure>,
     pub marks: SmallVec<[Wanted; 4]>,
-    pub pages: SmallVec<[PageWanted; 2]>,
-}
-
-/// A PDF page on screen, and the size it is drawn at.
-pub struct PageWanted {
-    pub document: Arc<Document>,
-    pub page: u32,
-    pub size: Size<Pixels>,
+    pub pages: SmallVec<[PageOnScreen; 2]>,
 }
 
 /// The PDF pages of a drawing over a PDF that reach into `view`.
@@ -334,7 +337,7 @@ pub fn pages_wanted(
     paged: &Paged,
     to_screen: &Affine<Pane, Screen>,
     view: &Rect<Screen>,
-) -> SmallVec<[PageWanted; 2]> {
+) -> SmallVec<[PageOnScreen; 2]> {
     let pdf = match paged.underlay() {
         Underlay::Pdf(pdf) => pdf,
         Underlay::Blank => return SmallVec::new(),
@@ -349,10 +352,13 @@ pub fn pages_wanted(
                 let area = Rect::spanning(Point::new(0.0, 0.0), corner)
                     .mapped(&shown.to_pane.then(to_screen));
                 let (min, max) = (area.min(), area.max());
-                area.intersects(view).then(|| PageWanted {
+                area.intersects(view).then(|| PageOnScreen {
                     document: pdf.document.clone(),
-                    page,
-                    size: size(px(max.x - min.x), px(max.y - min.y)),
+                    page: page as usize,
+                    area: Bounds::new(
+                        point(px(min.x), px(min.y)),
+                        size(px(max.x - min.x), px(max.y - min.y)),
+                    ),
                 })
             }
             Paper::Page { .. } | Paper::Plane(_) => None,
@@ -360,14 +366,12 @@ pub fn pages_wanted(
         .collect()
 }
 
-/// An image mark on screen, and the size its pixels are drawn at.
 pub struct Wanted {
     pub id: GeometryId,
     pub picture: Picture,
     pub size: Size<Pixels>,
 }
 
-/// The image marks on shown layers that reach into `view`.
 pub fn wanted<D: Drawing>(
     frame: &InkFrame<'_, D::Surface>,
     drawing: &D,
@@ -403,14 +407,12 @@ pub fn wanted<D: Drawing>(
     }
     wanted
 }
-/// Where a pane sits in the window, and the colour its overlays take.
 pub struct Onscreen {
     pub to_screen: Affine<Pane, Screen>,
     pub view: Rect<Screen>,
     pub accent: Hsla,
 }
 
-/// A pane's bounds as a viewport; `None` while it has no area.
 pub fn viewport(bounds: Bounds<Pixels>) -> Option<Viewport> {
     Viewport::new(
         Px(f32::from(bounds.size.width)),
@@ -447,9 +449,10 @@ pub fn paint_ink<D: Drawing>(
         let sheet = rect(min.x, min.y, max.x - min.x, max.y - min.y);
         match background {
             Background::Pdf { page } => {
-                match pictured.pages.iter().find(|shown| shown.page == page) {
-                    Some(shown) => paint_picture(sheet, shown.image.clone(), window),
-                    None => window.paint_quad(fill(sheet, solid(Rgb::hex(0xffffff)))),
+                window.paint_quad(fill(sheet, solid(Rgb::hex(0xffffff))));
+                let tiles = pictured.pages.iter().find(|shown| shown.page == page);
+                for tile in tiles.into_iter().flat_map(|shown| &shown.tiles) {
+                    paint_picture(tile.bounds, tile.image.clone(), window);
                 }
             }
             Background::Plain(paper) => window.paint_quad(fill(sheet, solid(paper))),
@@ -791,7 +794,6 @@ pub fn paint_ink<D: Drawing>(
     }
 }
 
-/// What the hand does to the marks already on a layer.
 pub enum Held<'a> {
     Nothing,
     Hidden(&'a [MarkId]),
@@ -841,7 +843,6 @@ pub fn paint_mesh(
     );
 }
 
-/// Positions `step` apart after `from`, up to `to`.
 pub fn lines(from: f32, to: f32, step: f32) -> impl Iterator<Item = f32> + Clone {
     (1..)
         .map(move |n| from + n as f32 * step)
@@ -852,14 +853,11 @@ pub fn solid(rgb: Rgb) -> Hsla {
     hsla(Color::opaque(rgb))
 }
 
-/// The clock for mouse samples, which carry no time of their own; a stroke never mixes clocks.
 pub fn now() -> Duration {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed()
 }
 
-/// Where `position` in the window falls on `pane`'s drawing, and the pane's size; `None` for a
-/// pane not drawn or with no area.
 pub fn on_pane(
     workspace: &Workspace,
     pane: PaneId,
@@ -891,7 +889,6 @@ pub fn sample(
     })
 }
 
-/// Hands one reading to the pane's drawing, then draws what changed.
 pub fn input(
     workspace: &mut Workspace,
     pane: PaneId,
@@ -904,7 +901,6 @@ pub fn input(
     cx.notify();
 }
 
-/// The wheel pans the drawing, or zooms it about the cursor with Ctrl held.
 pub fn wheel(
     workspace: &mut Workspace,
     pane: PaneId,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use krilla::Document as Writer;
 use krilla::geom::PathBuilder;
 use krilla::page::PageSettings;
-use reader::pdf::{Document, PdfError};
+use reader::pdf::{Bgra, Document, Grid, Level, PdfError, TILE, TileBlock};
 
 /// A 200 by 100 point page with its left half black, then a blank 100 by 300 page.
 fn sample() -> Arc<[u8]> {
@@ -39,17 +39,75 @@ fn a_pdf_opens_with_its_page_sizes() {
 }
 
 #[test]
-fn a_page_renders_at_the_size_asked_on_white() {
+fn a_page_renders_in_tiles_at_a_level_on_white() {
     let document = Document::open(sample()).unwrap();
-    let page = document.render(0, 400, 200).unwrap();
-    assert_eq!((page.width, page.height), (400, 200));
-    let pixel = |x: usize, y: usize| &page.pixels[(y * 400 + x) * 4..][..4];
-    assert_eq!(pixel(50, 100), [0, 0, 0, 255], "the black half");
-    assert_eq!(pixel(350, 100), [255, 255, 255, 255], "white paper");
+    let level = Level(8);
+    assert_eq!(level.pixels_per_point(), 4.0);
+    let grid = Grid::of(document.pages.sizes()[0], level);
+    assert_eq!(
+        (grid.width, grid.height, grid.columns, grid.rows),
+        (800, 400, 2, 1)
+    );
+    let block = |columns: std::ops::Range<u16>| TileBlock {
+        page: 0,
+        level,
+        columns,
+        rows: 0..1,
+    };
+    let tiles = document.render_tiles(block(0..2)).unwrap();
+    let [(first, left), (second, right)] = &tiles[..] else {
+        panic!("two tiles");
+    };
+    assert_eq!((first.column, second.column), (0, 1));
+    let alone = document.render_tiles(block(1..2)).unwrap();
+    assert_eq!(
+        alone[0].1.pixels, right.pixels,
+        "a tile renders the same alone or in a block"
+    );
+    assert_eq!((left.width, left.height), (512, 400));
+    assert_eq!(
+        (right.width, right.height),
+        (288, 400),
+        "the last column is cut to the page"
+    );
+    let pixel = |image: &Bgra, x: usize, y: usize| {
+        image.pixels[(y * usize::from(image.width) + x) * 4..][..4].to_vec()
+    };
+    assert_eq!(
+        pixel(left, 300, 200),
+        [0, 0, 0, 255],
+        "x 75 pt is in the black half"
+    );
+    assert_eq!(
+        pixel(left, 500, 200),
+        [255, 255, 255, 255],
+        "x 125 pt is white paper"
+    );
+    assert_eq!(pixel(right, 10, 200), [255, 255, 255, 255]);
     assert!(matches!(
-        document.render(2, 10, 10),
+        document.render_tiles(block(2..3)),
+        Err(PdfError::NoBlock(_))
+    ));
+    assert!(matches!(
+        document.render_tiles(TileBlock {
+            page: 2,
+            ..block(0..1)
+        }),
         Err(PdfError::NoPage(2))
     ));
+}
+
+#[test]
+fn levels_cover_a_scale_and_the_whole_page_fits_one_tile() {
+    assert_eq!(Level::covering(1.0), Level(0));
+    assert_eq!(Level::covering(1.01), Level(1));
+    assert_eq!(Level::covering(2.0), Level(4));
+    let document = Document::open(sample()).unwrap();
+    for size in document.pages.sizes() {
+        let grid = Grid::of(*size, Level::whole_page(*size));
+        assert_eq!((grid.columns, grid.rows), (1, 1));
+        assert!(grid.width.max(grid.height) > u32::from(TILE) / 2);
+    }
 }
 
 #[test]

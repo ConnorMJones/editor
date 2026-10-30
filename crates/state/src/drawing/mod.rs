@@ -7,8 +7,8 @@ pub mod pen;
 pub mod reading;
 pub mod typing;
 
-use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ink::brush::{Brush, Curve, Fraction, Paint, Size, WidthFrom};
@@ -21,13 +21,18 @@ use ink::text::{FontFamily, TextStyle};
 use ink::tool::{Gather, Picked, ToolKind, Tools, Using, still};
 
 use crate::drawing::typing::Open;
+pub use library::TextSpan;
+use library::{Annotation, Change, DocumentId, Highlight, Library, Notebook};
 use model::geom::{Affine, Pane, Surface};
-use model::sheet::{Measure, PlaneView, SheetView};
+use model::notice::Notice;
+use model::sheet::{Measure, PlaneView, SheetView, Stack};
+use reader::pdf::Document;
 use slotmap::{SlotMap, new_key_type};
 
-use crate::State;
+use crate::job::Job;
 use crate::text::buffer::Disk;
 use crate::view::tab::{Opened, Tab};
+use crate::{Effect, State};
 
 new_key_type! {
     pub struct PagedId;
@@ -39,7 +44,60 @@ pub const PAPER: Background = Background::Plain(model::color::Rgb::hex(0xffffff)
 
 pub type PagedFiles = SlotMap<PagedId, InkFile<Paged>>;
 pub type BoardFiles = SlotMap<BoardId, InkFile<Board>>;
-pub type PdfFiles = SlotMap<PdfId, InkFile<Paged>>;
+pub type PdfFiles = SlotMap<PdfId, PdfFile>;
+
+pub struct PdfFile {
+    pub ink: InkFile<Paged>,
+    document: Arc<Document>, // private: must stay the underlay of `ink`; only `new` and `replace` set both
+    pub notes: Notes,
+}
+
+pub struct PdfRead {
+    pub document: Arc<Document>,
+    pub notes: Notes,
+    pub said: Option<Notice>,
+}
+
+pub enum Notes {
+    Listed(Listed),
+    Unlisted(Unlisted),
+}
+
+pub struct Listed {
+    pub library: Library,
+    pub document: DocumentId,
+    pub notebook: Notebook,
+    pub position: PageIndex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unlisted {
+    Outside,
+    Failed(String),
+}
+
+impl Notes {
+    pub fn listed(&self) -> Result<&Listed, Notice> {
+        match self {
+            Notes::Listed(listed) => Ok(listed),
+            Notes::Unlisted(Unlisted::Outside) => Err(Notice::NotInLibrary),
+            Notes::Unlisted(Unlisted::Failed(reason)) => Err(Notice::LibraryFailed {
+                reason: reason.clone(),
+            }),
+        }
+    }
+}
+
+impl Listed {
+    pub fn write(&self, file: PdfId, change: Change) -> Effect {
+        Effect::Job(Job::Annotate {
+            library: self.library.clone(),
+            file,
+            document: self.document,
+            change,
+        })
+    }
+}
 
 pub struct InkFile<D> {
     pub path: PathBuf,
@@ -65,13 +123,32 @@ impl<D: Drawing> InkFile<D> {
     }
 }
 
+impl PdfFile {
+    pub fn new(path: PathBuf, read: PdfRead, disk: Disk) -> PdfFile {
+        PdfFile {
+            ink: InkFile::new(path, Paged::over_pdf(read.document.clone()), disk),
+            document: read.document,
+            notes: read.notes,
+        }
+    }
+
+    pub fn document(&self) -> &Arc<Document> {
+        &self.document
+    }
+
+    pub fn replace(&mut self, read: PdfRead) -> Revision {
+        self.document = read.document.clone();
+        self.notes = read.notes;
+        self.ink.edited.replace(Paged::over_pdf(read.document))
+    }
+}
+
 pub enum InkTabs {
     Paged(PagedTab),
     Board(BoardTab),
     Pdf(PdfTab),
 }
 
-/// A paged document's tab, viewed as pages fitted to the pane.
 pub struct PagedTab {
     file: PagedId, // private: a tab's file is its identity
     pub view: SheetView,
@@ -116,19 +193,13 @@ pub enum ResumeIn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reading {
     Idle,
-    /// `anchor` and `head` index `page`'s characters.
     Selecting {
         page: PageIndex,
         anchor: usize,
         head: usize,
     },
     Selected(TextSpan),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TextSpan {
-    pub page: PageIndex,
-    pub chars: Range<usize>,
+    OnHighlight(Highlight),
 }
 
 pub struct BoardTab {
@@ -241,6 +312,19 @@ impl PdfTab {
     pub fn file(&self) -> PdfId {
         self.file
     }
+
+    pub fn show_page(&mut self, pages: &Stack, page: PageIndex) {
+        let viewport = self.hand.last.map(|measure| measure.viewport);
+        self.view.go_to(pages, page, viewport);
+    }
+
+    pub fn show(&mut self, pages: &Stack, annotation: Annotation) {
+        self.show_page(pages, annotation.place().0);
+        self.mode = PdfMode::Read(match annotation {
+            Annotation::Highlight(highlight) => Reading::OnHighlight(highlight),
+            Annotation::Lost(_) | Annotation::Bookmark(_) => Reading::Idle,
+        });
+    }
 }
 
 impl BoardTab {
@@ -280,11 +364,18 @@ impl InkTabs {
         }
     }
 
-    pub fn cancel_strokes(&mut self) {
+    pub fn reloaded(&mut self) {
         match self {
             InkTabs::Paged(tab) => tab.hand.cancel_stroke(),
             InkTabs::Board(tab) => tab.hand.cancel_stroke(),
-            InkTabs::Pdf(tab) => tab.hand.cancel_stroke(),
+            InkTabs::Pdf(tab) => {
+                tab.hand.cancel_stroke();
+                tab.found = Found::Nothing;
+                tab.mode = match tab.mode {
+                    PdfMode::Read(_) => PdfMode::Read(Reading::Idle),
+                    PdfMode::Markup => PdfMode::Markup,
+                };
+            }
         }
     }
 }
@@ -347,7 +438,13 @@ pub fn open_paged(state: &State, id: PagedId) -> InkTabs {
 }
 
 pub fn open_pdf(state: &State, id: PdfId) -> InkTabs {
-    let view = SheetView::start(state.pdfs[id].edited.drawing().stack());
+    let file = &state.pdfs[id];
+    let stack = file.ink.edited.drawing().stack();
+    let mut view = SheetView::start(stack);
+    match &file.notes {
+        Notes::Listed(listed) => view.go_to(stack, listed.position, None),
+        Notes::Unlisted(_) => {}
+    }
     InkTabs::Pdf(PdfTab::new(
         id,
         view,
@@ -381,7 +478,7 @@ pub fn reopen(state: &State, opened: Opened, saved: Saved) -> Option<Tab> {
             Some(Tab::Ink(InkTabs::Board(BoardTab::new(id, view, hand))))
         }
         (Opened::Pdf(id), Saved::Pdf { layer, view, mode }) => {
-            let layer = at(state.pdfs[id].edited.drawing().layers(), layer);
+            let layer = at(state.pdfs[id].ink.edited.drawing().layers(), layer);
             let hand = Hand::new(&state.ink, layer);
             let mode = match mode {
                 ResumeIn::Read => PdfMode::Read(Reading::Idle),

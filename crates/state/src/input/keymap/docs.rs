@@ -27,7 +27,7 @@ const DRAWINGS: &str = "\
 The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
 Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
 Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
-PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg` / `ge` move through them. Dragging across text selects it, with a bar offering Copy and Search; `y` copies it and `esc` lets it go. `/` finds text in the whole PDF, `n` / `N` step through the hits, and `space t` lists the table of contents. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
+PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg` / `ge` move through them. Dragging across text selects it, with a bar offering Highlight, Comment, Copy and Search; `v` highlights it, `i` highlights it with a comment, `y` copies it and `esc` lets it go. Tapping a highlight shows its comment; `i` edits the comment and `d` removes the highlight. `m` bookmarks the page in view, `space a` lists the PDF's highlights and bookmarks, and `space A` searches every annotation in the library. Annotations live in `.edt/library.db`, in the nearest folder above the project that has one, else the git repository's top, else the project. `/` finds text in the whole PDF, `n` / `N` step through the hits, and `space t` lists the table of contents. A tool key (`b`, `e`, `s`, `S`, `t…`) starts marking the PDF up with that tool, and `esc` goes back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
 
 | Keys | Context | Action |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pp` and `gg`
 | `+` / `-` / `=` | pages, drawing, image | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
 | `zf` | pages, drawing, image | Swap between fitting the pane's width and its height; an image, which opens fitted whole, goes to the one that fills more. |
 | `h j k l`, arrows, wheel | pages, drawing, image | Pan; pages stay on screen. On typst pages `j`/`k` scroll and only `h`/`l` pan. |
-| `pn` / `pp`, `gg` / `ge` | drawing | Next / previous page, first / last page. |
+| `pn` / `pb`, `gg` / `ge` | drawing | Next / previous page, first / last page. |
 | `po` / `pO` | drawing | A blank page below / above the page in focus. |
 | `pd` | drawing | Remove the page in focus. |
 | `]l` / `[l` | drawing | Next / previous layer becomes active. |

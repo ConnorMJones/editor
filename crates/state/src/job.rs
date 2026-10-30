@@ -19,7 +19,7 @@ use model::picture::Encoding;
 use model::sheet::Stack;
 
 use crate::drawing::embed::{self, Destination};
-use crate::drawing::{BoardId, PagedId, PdfId, TextSpan};
+use crate::drawing::{BoardId, Listed, Notes, PagedId, PdfId, PdfRead, TextSpan, Unlisted};
 use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
@@ -35,15 +35,18 @@ use crate::view::tab::Opened;
 use crate::viewer::{self, ImageId, ProbeError, Probed};
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 use ink::history::Revision;
+use library::{Change, DocumentId, Identity, Library, LibraryError, SearchHit, SearchQuery};
+use model::notice::Notice;
 use reader::pdf::{Document, PdfError, TextClaim};
 
-/// Blocking work run off the UI thread.
+// Blocking work run off the UI thread.
 pub enum Job {
     Open {
         read: ReadId,
         path: PathBuf,
         languages: Arc<Loader>,
         fonts: Fonts,
+        library: Library,
     },
     Write {
         path: PathBuf,
@@ -65,6 +68,22 @@ pub enum Job {
         file: PdfId,
         document: Arc<Document>,
         query: String,
+    },
+    Annotate {
+        library: Library,
+        file: PdfId,
+        document: DocumentId,
+        change: Change,
+    },
+    SearchAnnotations {
+        library: Library,
+        query: SearchQuery,
+        typed: String,
+    },
+    KeepPlace {
+        library: Library,
+        document: DocumentId,
+        page: PageIndex,
     },
 
     Index {
@@ -233,6 +252,17 @@ pub enum JobResult {
         query: String,
         hits: Vec<TextSpan>,
     },
+    Annotated {
+        file: PdfId,
+        document: DocumentId,
+        change: Change,
+        result: Result<(), LibraryError>,
+    },
+    PlaceKept(Result<(), LibraryError>),
+    AnnotationsFound {
+        typed: String,
+        result: Result<Vec<SearchHit>, LibraryError>,
+    },
     Typeset(typeset::Done),
 
     Indexed(Walked),
@@ -353,7 +383,7 @@ pub enum OpenRead {
         disk: Disk,
     },
     Pdf {
-        drawing: Paged,
+        read: PdfRead,
         disk: Disk,
     },
     Image {
@@ -382,7 +412,7 @@ pub enum Reload {
     Text(BufferId),
     Paged(PagedId, Fonts),
     Board(BoardId, Fonts),
-    Pdf(PdfId),
+    Pdf(PdfId, Library),
     Image(ImageId, Encoding),
 }
 
@@ -390,7 +420,7 @@ pub enum Reloaded {
     Text(BufferId, DiskRead<Rope, NotUtf8>),
     Paged(PagedId, DiskRead<Paged, FormatError>),
     Board(BoardId, DiskRead<Board, FormatError>),
-    Pdf(PdfId, DiskRead<Paged, PdfError>),
+    Pdf(PdfId, DiskRead<PdfRead, PdfError>),
     Image(ImageId, DiskRead<PageSize, ProbeError>),
 }
 
@@ -447,6 +477,9 @@ pub fn run(job: Job) -> JobResult {
         Job::ExportDrawing { .. } => "export drawing",
         Job::PdfText(_) => "pdf text",
         Job::PdfFind { .. } => "pdf find",
+        Job::Annotate { .. } => "annotate",
+        Job::SearchAnnotations { .. } => "search annotations",
+        Job::KeepPlace { .. } => "keep place",
         Job::Index { .. } => "index",
         Job::ListDir { .. } => "list dir",
         Job::Rescan { .. } => "rescan",
@@ -471,9 +504,10 @@ pub fn run(job: Job) -> JobResult {
             path,
             languages,
             fonts,
+            library,
         } => JobResult::Opened {
             read,
-            result: read_file(&path, &languages, &fonts),
+            result: read_file(&path, &languages, &fonts, &library),
         },
         Job::Write {
             path,
@@ -534,17 +568,42 @@ pub fn run(job: Job) -> JobResult {
                         continue;
                     }
                 };
-                for found in pattern.find_iter(&text.text) {
-                    let first = text.chars.partition_point(|char| char.at < found.start());
-                    let last = text.chars.partition_point(|char| char.at < found.end());
-                    hits.extend((first < last).then(|| TextSpan {
-                        page: PageIndex(page),
-                        chars: first..last,
-                    }));
-                }
+                hits.extend(
+                    (pattern.find_iter(&text.text))
+                        .map(|found| text.chars_in(found.range()))
+                        .filter(|chars| !chars.is_empty())
+                        .map(|chars| TextSpan {
+                            page: PageIndex(page),
+                            chars,
+                        }),
+                );
             }
             JobResult::PdfFound { file, query, hits }
         }
+        Job::Annotate {
+            library,
+            file,
+            document,
+            change,
+        } => JobResult::Annotated {
+            result: library.write(document, &change),
+            file,
+            document,
+            change,
+        },
+        Job::SearchAnnotations {
+            library,
+            query,
+            typed,
+        } => JobResult::AnnotationsFound {
+            typed,
+            result: library.search(&query),
+        },
+        Job::KeepPlace {
+            library,
+            document,
+            page,
+        } => JobResult::PlaceKept(library.keep_place(document, page)),
         Job::PdfText(claim) => JobResult::PdfText {
             page: claim.page,
             result: claim.read().map(|_| ()),
@@ -590,12 +649,9 @@ pub fn run(job: Job) -> JobResult {
                     id,
                     read_again(&path, when, |bytes| ink::format::read_board(&bytes, &fonts)),
                 ),
-                Reload::Pdf(id) => Reloaded::Pdf(
+                Reload::Pdf(id, library) => Reloaded::Pdf(
                     id,
-                    read_again(&path, when, |bytes| {
-                        Document::open(bytes.into())
-                            .map(|document| Paged::over_pdf(Arc::new(document)))
-                    }),
+                    read_again(&path, when, |bytes| read_pdf(&path, bytes, &library)),
                 ),
                 Reload::Image(id, encoding) => Reloaded::Image(
                     id,
@@ -777,6 +833,9 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Exported { .. } => "exported",
         JobResult::PdfText { .. } => "pdf text",
         JobResult::PdfFound { .. } => "pdf found",
+        JobResult::Annotated { .. } => "annotated",
+        JobResult::AnnotationsFound { .. } => "annotations found",
+        JobResult::PlaceKept(_) => "place kept",
         JobResult::Typeset(_) => "typeset",
         JobResult::Indexed(_) => "indexed",
         JobResult::Listed { .. } => "listed",
@@ -806,6 +865,21 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Exported { path, result } => crate::export::exported(state, path, result),
         JobResult::PdfFound { file, query, hits } => {
             crate::drawing::reading::found(state, file, query, hits)
+        }
+        JobResult::Annotated {
+            file,
+            document,
+            change,
+            result,
+        } => crate::drawing::reading::annotated(state, file, document, change, result),
+        JobResult::PlaceKept(Ok(())) => {}
+        JobResult::PlaceKept(Err(error)) => {
+            state.notice = Some(Notice::LibraryFailed {
+                reason: error.to_string(),
+            })
+        }
+        JobResult::AnnotationsFound { typed, result } => {
+            picker::annotations_found(state, typed, result)
         }
         JobResult::PdfText { page, result } => match result {
             Ok(()) => {}
@@ -856,7 +930,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
 }
 
 /// Reads `path` into a document; a missing file opens empty, to be created on write.
-pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts) -> OpenRead {
+pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts, library: &Library) -> OpenRead {
     let _span = tracing::info_span!("read", ?path).entered();
     match FileKind::of(path) {
         FileKind::Text(kind) => read_text(path, kind, languages),
@@ -873,9 +947,9 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts) -> OpenRead {
             |drawing, disk| OpenRead::Board { drawing, disk },
         ),
         FileKind::Pdf => match (std::fs::read(path), modified(path)) {
-            (Ok(bytes), Ok(mtime)) => match Document::open(bytes.into()) {
-                Ok(document) => OpenRead::Pdf {
-                    drawing: Paged::over_pdf(Arc::new(document)),
+            (Ok(bytes), Ok(mtime)) => match read_pdf(path, bytes, library) {
+                Ok(read) => OpenRead::Pdf {
+                    read,
                     disk: Disk::Synced { mtime },
                 },
                 Err(error) => OpenRead::Unreadable(error.into()),
@@ -893,6 +967,46 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts) -> OpenRead {
             Err(error) => OpenRead::Unreadable(error.into()),
         },
     }
+}
+
+fn read_pdf(path: &Path, bytes: Vec<u8>, library: &Library) -> Result<PdfRead, PdfError> {
+    let document = Arc::new(Document::open(bytes.into())?);
+    let (notes, said) = match library
+        .place(path)
+        .map(|place| library.identify(&place, &document))
+    {
+        None => (Notes::Unlisted(Unlisted::Outside), None),
+        Some(Ok(found)) => {
+            let lost = found.notebook.lost.len();
+            let said = match (found.identity, lost) {
+                (Identity::Changed, 1..) => Some(Notice::HighlightsLost { lost }),
+                (
+                    Identity::Changed | Identity::Known | Identity::Moved { .. } | Identity::New,
+                    _,
+                ) => None,
+            };
+            let listed = Listed {
+                library: library.clone(),
+                document: found.id,
+                notebook: found.notebook,
+                position: found.position,
+            };
+            (Notes::Listed(listed), said)
+        }
+        Some(Err(error)) => {
+            tracing::warn!(?path, %error, "library");
+            let reason = error.to_string();
+            (
+                Notes::Unlisted(Unlisted::Failed(reason.clone())),
+                Some(Notice::LibraryFailed { reason }),
+            )
+        }
+    };
+    Ok(PdfRead {
+        document,
+        notes,
+        said,
+    })
 }
 
 fn read_drawing<D>(
