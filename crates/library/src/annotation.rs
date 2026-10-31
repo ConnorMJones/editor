@@ -1,10 +1,7 @@
 use std::cmp::Reverse;
-use std::ops::Range;
-use std::sync::Arc;
-
-use model::sheet::PageIndex;
-use reader::pdf::Document;
 use uuid::Uuid;
+
+use crate::text::{Part, Place, TextSpan, Texts};
 
 pub const QUOTE_CONTEXT: usize = 32;
 
@@ -15,12 +12,6 @@ impl AnnotationId {
     pub fn new() -> AnnotationId {
         AnnotationId(Uuid::now_v7())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TextSpan {
-    pub page: PageIndex,
-    pub chars: Range<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +35,7 @@ pub struct Highlight {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lost {
     pub id: AnnotationId,
-    pub page: PageIndex,
+    pub part: Part,
     pub quote: Quote,
     pub comment: Option<Comment>,
 }
@@ -52,7 +43,7 @@ pub struct Lost {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bookmark {
     pub id: AnnotationId,
-    pub page: PageIndex,
+    pub at: Place,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,26 +89,27 @@ impl Quote {
         &self.exact
     }
 
-    pub fn find_in(&self, document: &Arc<Document>, near: PageIndex) -> Option<TextSpan> {
+    pub fn find_in(&self, texts: &dyn Texts, near: Part) -> Option<TextSpan> {
         let shared = |a: &mut dyn Iterator<Item = char>, b: &mut dyn Iterator<Item = char>| {
             a.zip(b).take_while(|(a, b)| a == b).count()
         };
-        (0..document.pages.sizes().len())
-            .filter_map(|page| Some((page, document.read_text(page).ok()?)))
-            .flat_map(|(page, text)| {
-                (text.text.match_indices(self.exact.as_str()))
+        (0..texts.parts())
+            .filter_map(|part| Some((part, texts.part(Part(part))?)))
+            .flat_map(|(part, text)| {
+                let whole = text.text();
+                (whole.match_indices(self.exact.as_str()))
                     .map(|(start, exact)| {
                         let end = start + exact.len();
                         let context =
                             shared(
-                                &mut text.text[..start].chars().rev(),
+                                &mut whole[..start].chars().rev(),
                                 &mut self.prefix.chars().rev(),
-                            ) + shared(&mut text.text[end..].chars(), &mut self.suffix.chars());
+                            ) + shared(&mut whole[end..].chars(), &mut self.suffix.chars());
                         let span = TextSpan {
-                            page: PageIndex(page),
+                            part: Part(part),
                             chars: text.chars_in(start..end),
                         };
-                        (span, context, Reverse(page.abs_diff(near.0)))
+                        (span, context, Reverse(part.abs_diff(near.0)))
                     })
                     .collect::<Vec<_>>()
             })
@@ -128,13 +120,13 @@ impl Quote {
 }
 
 impl Highlight {
-    pub fn of(document: &Document, span: TextSpan) -> Option<Highlight> {
-        let text = document.text(span.page.0)?;
+    pub fn of(texts: &dyn Texts, span: TextSpan) -> Option<Highlight> {
+        let text = texts.part(span.part)?;
         let exact = text.slice(span.chars.clone());
         let start = text.byte(span.chars.start);
-        let before = &text.text[..start];
+        let before = &text.text()[..start];
         let from = (before.char_indices().rev().nth(QUOTE_CONTEXT - 1)).map_or(0, |(at, _)| at);
-        let after = &text.text[start + exact.len()..];
+        let after = &text.text()[start + exact.len()..];
         let quote = Quote::new(
             exact.to_owned(),
             before[from..].to_owned(),
@@ -148,29 +140,29 @@ impl Highlight {
         })
     }
 
-    pub fn reanchor(self, document: &Arc<Document>) -> Annotation {
-        let unmoved = (document.read_text(self.span.page.0))
-            .is_ok_and(|text| text.slice(self.span.chars.clone()) == self.quote.exact);
-        match (unmoved, self.quote.find_in(document, self.span.page)) {
+    pub fn reanchor(self, texts: &dyn Texts) -> Annotation {
+        let unmoved = (texts.part(self.span.part))
+            .is_some_and(|text| text.slice(self.span.chars.clone()) == self.quote.exact);
+        match (unmoved, self.quote.find_in(texts, self.span.part)) {
             (true, _) => Annotation::Highlight(self),
             (false, Some(span)) => Annotation::Highlight(Highlight { span, ..self }),
             (false, None) => Annotation::Lost(Lost {
                 id: self.id,
-                page: self.span.page,
+                part: self.span.part,
                 quote: self.quote,
                 comment: self.comment,
             }),
         }
     }
 
-    pub fn place(&self) -> (PageIndex, usize) {
-        (self.span.page, self.span.chars.start)
+    pub fn place(&self) -> Place {
+        self.span.start()
     }
 }
 
 impl Lost {
-    pub fn reanchor(self, document: &Arc<Document>) -> Annotation {
-        match self.quote.find_in(document, self.page) {
+    pub fn reanchor(self, texts: &dyn Texts) -> Annotation {
+        match self.quote.find_in(texts, self.part) {
             Some(span) => Annotation::Highlight(Highlight {
                 id: self.id,
                 span,
@@ -191,12 +183,14 @@ impl Annotation {
         }
     }
 
-    pub fn place(&self) -> (PageIndex, usize) {
+    pub fn place(&self) -> Place {
         match self {
             Annotation::Highlight(highlight) => highlight.place(),
-            Annotation::Lost(Lost { page, .. }) | Annotation::Bookmark(Bookmark { page, .. }) => {
-                (*page, 0)
-            }
+            Annotation::Lost(Lost { part, .. }) => Place {
+                part: *part,
+                char: 0,
+            },
+            Annotation::Bookmark(Bookmark { at, .. }) => *at,
         }
     }
 }
@@ -217,13 +211,13 @@ impl Notebook {
                 self.highlights.insert(at, highlight.clone());
             }
             Change::Put(Annotation::Lost(lost)) => {
-                let at = self.lost.partition_point(|kept| kept.page <= lost.page);
+                let at = self.lost.partition_point(|kept| kept.part <= lost.part);
                 self.lost.insert(at, lost.clone());
             }
             Change::Put(Annotation::Bookmark(bookmark)) => {
                 let at = self
                     .bookmarks
-                    .partition_point(|kept| kept.page <= bookmark.page);
+                    .partition_point(|kept| kept.at <= bookmark.at);
                 self.bookmarks.insert(at, bookmark.clone());
             }
             Change::Remove(_) => {}

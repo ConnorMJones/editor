@@ -1,13 +1,17 @@
 use model::command::{ViewCommand, ZoomBy};
 use model::geom::{Pane, Point, Vector};
 use model::notice::Notice;
-use model::sheet::{Measure, PlaneView, SheetView, Stack, Thumb, Viewport, Zoom};
+use model::scroll_bar::Thumb;
+use model::sheet::{Measure, PlaneView, SheetView, Stack, Viewport, Zoom};
 use model::window::Side;
 
 use crate::State;
-use crate::drawing::InkTabs;
+use crate::drawing::{InkTabs, PagedFiles, PagedId, PdfFiles, PdfId};
+use crate::render::pages::Compiles;
+use crate::text::buffer::BufferId;
 use crate::view::layout::PaneId;
 use crate::view::tab::{Showing, ShowingMut, Tab};
+use crate::viewer::{ImageFiles, ImageId};
 
 pub const PAN_STEP: f32 = 0.125;
 
@@ -29,6 +33,125 @@ pub enum Viewed<'a> {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stacked {
+    Paged(PagedId),
+    Pdf(PdfId),
+    Image(ImageId),
+    Typst(BufferId),
+}
+
+pub enum Sheeted<'a> {
+    Pages {
+        view: &'a SheetView,
+        last: Option<Measure>,
+        of: Stacked,
+    },
+    Plane {
+        view: &'a PlaneView,
+        last: Option<Measure>,
+    },
+}
+
+pub enum SheetedMut<'a> {
+    Pages {
+        view: &'a mut SheetView,
+        last: &'a mut Option<Measure>,
+        of: Stacked,
+    },
+    Plane {
+        view: &'a mut PlaneView,
+        last: &'a mut Option<Measure>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub struct Stacks<'a> {
+    pub pageds: &'a PagedFiles,
+    pub pdfs: &'a PdfFiles,
+    pub images: &'a ImageFiles,
+    pub compiles: &'a Compiles,
+}
+
+impl<'a> Stacks<'a> {
+    pub fn get(self, of: Stacked) -> Option<&'a Stack> {
+        match of {
+            Stacked::Paged(id) => Some(self.pageds[id].edited.drawing().stack()),
+            Stacked::Pdf(id) => Some(self.pdfs[id].pages()),
+            Stacked::Image(id) => Some(&self.images[id].stack),
+            Stacked::Typst(buffer) => Some(&self.compiles.get(buffer)?.pages.as_ref()?.stack),
+        }
+    }
+}
+
+impl Tab {
+    pub fn sheet(&self) -> Option<Sheeted<'_>> {
+        match self {
+            Tab::Ink(InkTabs::Paged(tab)) => Some(Sheeted::Pages {
+                view: &tab.view,
+                last: tab.hand.last,
+                of: Stacked::Paged(tab.file()),
+            }),
+            Tab::Ink(InkTabs::Pdf(tab)) => Some(Sheeted::Pages {
+                view: &tab.view,
+                last: tab.hand.last,
+                of: Stacked::Pdf(tab.file()),
+            }),
+            Tab::Ink(InkTabs::Board(tab)) => Some(Sheeted::Plane {
+                view: &tab.view,
+                last: tab.hand.last,
+            }),
+            Tab::Image(tab) => Some(Sheeted::Pages {
+                view: &tab.view,
+                last: tab.last,
+                of: Stacked::Image(tab.file()),
+            }),
+            Tab::Text(text) => match text.showing() {
+                Showing::Pages(source, pages, _) => Some(Sheeted::Pages {
+                    view: &pages.view,
+                    last: pages.last,
+                    of: Stacked::Typst(source.buffer()),
+                }),
+                Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => None,
+            },
+            Tab::Book(_) => None,
+        }
+    }
+
+    pub fn sheet_mut(&mut self) -> Option<SheetedMut<'_>> {
+        match self {
+            Tab::Ink(InkTabs::Paged(tab)) => Some(SheetedMut::Pages {
+                of: Stacked::Paged(tab.file()),
+                view: &mut tab.view,
+                last: &mut tab.hand.last,
+            }),
+            Tab::Ink(InkTabs::Pdf(tab)) => Some(SheetedMut::Pages {
+                of: Stacked::Pdf(tab.file()),
+                view: &mut tab.view,
+                last: &mut tab.hand.last,
+            }),
+            Tab::Ink(InkTabs::Board(tab)) => Some(SheetedMut::Plane {
+                view: &mut tab.view,
+                last: &mut tab.hand.last,
+            }),
+            Tab::Image(tab) => Some(SheetedMut::Pages {
+                of: Stacked::Image(tab.file()),
+                view: &mut tab.view,
+                last: &mut tab.last,
+            }),
+            Tab::Text(text) => match text.showing_mut() {
+                ShowingMut::Pages(source, pages, _) => Some(SheetedMut::Pages {
+                    of: Stacked::Typst(source.buffer()),
+                    view: &mut pages.view,
+                    last: &mut pages.last,
+                }),
+                ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Document(..) => None,
+            },
+            Tab::Book(_) => None,
+        }
+    }
+}
+
 pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
     let State {
         layout,
@@ -38,62 +161,36 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
         images,
         ..
     } = state;
-    match layout.find_pane(pane)?.active_mut()? {
-        Tab::Ink(InkTabs::Paged(tab)) => Some(Viewed::Pages {
-            stack: pageds[tab.file()].edited.drawing().stack(),
-            view: &mut tab.view,
-            last: &mut tab.hand.last,
+    let stacks = Stacks {
+        pageds,
+        pdfs,
+        images,
+        compiles,
+    };
+    match layout.find_pane(pane)?.active_mut()?.sheet_mut()? {
+        SheetedMut::Pages { view, last, of } => Some(Viewed::Pages {
+            stack: stacks.get(of)?,
+            view,
+            last,
         }),
-        Tab::Ink(InkTabs::Pdf(tab)) => Some(Viewed::Pages {
-            stack: pdfs[tab.file()].ink.edited.drawing().stack(),
-            view: &mut tab.view,
-            last: &mut tab.hand.last,
-        }),
-        Tab::Ink(InkTabs::Board(tab)) => Some(Viewed::Plane {
-            view: &mut tab.view,
-            last: &mut tab.hand.last,
-        }),
-        Tab::Image(tab) => Some(Viewed::Pages {
-            stack: &images[tab.file()].stack,
-            view: &mut tab.view,
-            last: &mut tab.last,
-        }),
-        Tab::Text(text) => match text.showing_mut() {
-            ShowingMut::Pages(source, pages, _) => Some(Viewed::Pages {
-                stack: &compiles.get(source.buffer())?.pages.as_ref()?.stack,
-                view: &mut pages.view,
-                last: &mut pages.last,
-            }),
-            ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Document(..) => None,
-        },
+        SheetedMut::Plane { view, last } => Some(Viewed::Plane { view, last }),
     }
 }
 
 pub fn thumb(state: &State, pane: PaneId) -> Option<Thumb> {
-    let (view, stack, last) = match state.layout.panes().get(pane)?.active()? {
-        Tab::Ink(InkTabs::Paged(tab)) => (
-            &tab.view,
-            state.pageds[tab.file()].edited.drawing().stack(),
-            tab.hand.last,
-        ),
-        Tab::Ink(InkTabs::Pdf(tab)) => (
-            &tab.view,
-            &state.pdfs[tab.file()].document().pages,
-            tab.hand.last,
-        ),
-        Tab::Image(tab) => (&tab.view, &state.images[tab.file()].stack, tab.last),
-        Tab::Text(text) => match text.showing() {
-            Showing::Pages(source, pages, _) => (
-                &pages.view,
-                &state.compiles.get(source.buffer())?.pages.as_ref()?.stack,
-                pages.last,
-            ),
-            Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => return None,
-        },
-        Tab::Ink(InkTabs::Board(_)) => return None,
+    let stacks = Stacks {
+        pageds: &state.pageds,
+        pdfs: &state.pdfs,
+        images: &state.images,
+        compiles: &state.compiles,
     };
-    let viewport = last?.viewport;
-    Some(view.frame(stack, viewport).thumb(stack, viewport))
+    match state.layout.panes().get(pane)?.active()?.sheet()? {
+        Sheeted::Pages { view, last, of } => {
+            let (stack, viewport) = (stacks.get(of)?, last?.viewport);
+            Some(view.frame(stack, viewport).thumb(stack, viewport))
+        }
+        Sheeted::Plane { .. } => None,
+    }
 }
 
 pub fn seek(state: &mut State, pane: PaneId, top: f32) {

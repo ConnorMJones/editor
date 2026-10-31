@@ -14,7 +14,7 @@ use state::view::layout::Node;
 use state::view::panes;
 use state::{Files, Overlay, Repo, Sidebar, State};
 
-use crate::harness::Harness;
+use crate::harness::{Harness, canonical};
 
 fn commit_all(dir: &Path) {
     let repo = git2::Repository::init(dir).unwrap();
@@ -34,10 +34,6 @@ fn status(state: &State, path: &str) -> Option<GitStatus> {
         Repo::Found { snapshot, .. } => snapshot.get(&RelPath::parse(path).unwrap()),
         Repo::None | Repo::Unknown => panic!("no repository"),
     }
-}
-
-fn canonical(dir: &Path, rel: &str) -> std::path::PathBuf {
-    dir.canonicalize().unwrap().join(rel)
 }
 
 #[test]

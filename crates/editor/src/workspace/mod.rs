@@ -45,7 +45,7 @@ use crate::fonts::{Fonts, hsla};
 use crate::page_tiles::PageTiles;
 use crate::pictures::Pictures;
 use crate::rendered::RenderedPane;
-use crate::sheet_bar::OnTrack;
+use crate::scroll_bar;
 use chrome::{corners, round};
 use pane_tree::{DIVIDER, SPLIT_MIN_COLUMNS};
 use sidebar::SIDEBAR_HIDE;
@@ -108,7 +108,7 @@ pub enum Drag {
     Split {
         pane: PaneId,
     },
-    SheetThumb {
+    ScrollThumb {
         pane: PaneId,
         grab: f32,
     },
@@ -122,7 +122,7 @@ pub struct Areas {
     pub splits: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
     /// Each drawing's body, which pen and mouse positions are measured from.
     pub drawings: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
-    pub sheet_bars: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
+    pub scroll_bars: RefCell<SecondaryMap<PaneId, Bounds<Pixels>>>,
 }
 
 impl Workspace {
@@ -250,16 +250,17 @@ impl Workspace {
                 self.state.layout.drag_divider(path, *divider, at);
                 cx.notify();
             }
-            (Drag::SheetThumb { pane, grab }, Some(MouseButton::Left)) => {
-                let Some(track) = self.areas.sheet_bars.borrow().get(*pane).copied() else {
+            (Drag::ScrollThumb { pane, grab }, Some(MouseButton::Left)) => {
+                let Some(track) = self.areas.scroll_bars.borrow().get(*pane).copied() else {
                     return;
                 };
-                let along = (event.position.y - track.origin.y) / track.size.height;
-                let thumb = state::view::sheet::thumb(&self.state, *pane);
-                match thumb.and_then(|thumb| OnTrack::of(thumb, track.size.height)) {
-                    Some(on_track) => {
-                        let top = on_track.top_at(along - grab);
-                        state::view::sheet::seek(&mut self.state, *pane, top);
+                let along = scroll_bar::along(track, event.position.y);
+                let thumb = scroll_bar::thumb(self, *pane);
+                match thumb.and_then(|thumb| scroll_bar::on_track(thumb, track)) {
+                    Some(on) => {
+                        let top = on.top_at(along - grab);
+                        scroll_bar::seek(self, *pane, top);
+                        self.flush(cx);
                         cx.notify();
                     }
                     None => self.drag = Drag::Idle,
@@ -393,12 +394,7 @@ impl Render for Workspace {
             }
         }
         let state = &self.state;
-        let relative = |path: &std::path::Path| {
-            path.strip_prefix(state.project.root.path())
-                .unwrap_or(path)
-                .display()
-                .to_string()
-        };
+        let relative = |path: &std::path::Path| state.project.root.label(path);
         let bottom = match (&state.overlay, &state.sidebar, &state.notice) {
             (Overlay::Prompt(_), ..) => String::new(),
             (

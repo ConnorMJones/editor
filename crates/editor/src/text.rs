@@ -11,6 +11,7 @@ use gpui::{
 };
 use helix_core::Selection;
 use model::mode::Mode;
+use model::scroll_bar::{OnTrack, Thumb};
 use model::theme::{Modifiers, Theme, Tone};
 use slotmap::Key as _;
 use state::git::conflict;
@@ -20,15 +21,12 @@ use state::view::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
 use state::view::draws::{self, Drawing, Draws, Part, Rows};
-use state::view::layout::{PaneId, Viewport};
-use state::view::scroll::{self, Gesture, OnTrack, Press, Scrollbar, Unit};
+use state::view::layout::{PaneId, Scroll, Viewport};
+use state::view::scroll::{self, Gesture, Press, Unit};
 
 use crate::fonts::{Fonts, hsla};
+use crate::scroll_bar::{self, Held};
 use crate::workspace::Workspace;
-
-/// Right-edge strip for the scrollbar.
-const SCROLLBAR_WIDTH: Pixels = px(8.);
-const MIN_THUMB: f32 = 16.;
 
 /// Draws one side of the tab shown in `pane`: its source, or either side of its diff.
 pub struct TextElement {
@@ -71,6 +69,7 @@ pub struct Number {
 pub struct Pointer {
     /// Wheel movement not yet amounting to a whole row.
     pub wheel: Cell<Pixels>,
+    pub sideways: Cell<Pixels>,
     pub drag: Cell<Drag>,
 }
 
@@ -79,20 +78,16 @@ pub enum Drag {
     #[default]
     Idle,
     Selecting(Gesture),
-    /// `grab` is the pointer's offset from the thumb's top.
     Thumb {
-        grab: Pixels,
+        grab: f32,
     },
 }
 
 /// Scrollbar geometry of one frame; thumb drags map back to lines through it.
 pub struct Bar {
     pub hitbox: Hitbox,
-    pub scrollbar: Scrollbar,
+    pub on: Option<OnTrack>,
     pub len_lines: usize,
-    /// Document lines on screen.
-    pub shown: usize,
-    pub page: isize,
 }
 
 pub struct Prepaint {
@@ -226,7 +221,7 @@ impl Element for TextElement {
             bounds.origin.x + cell.width * gutter.cols as f32,
             bounds.origin.y,
         );
-        let text_width = bounds.size.width - SCROLLBAR_WIDTH;
+        let text_width = bounds.size.width - scroll_bar::WIDTH;
         let viewport = Viewport {
             rows: (bounds.size.height / cell.height).floor().max(0.0) as u16,
             cols: ((text_width / cell.width).floor().max(0.0) as u16).saturating_sub(gutter.cols),
@@ -249,8 +244,8 @@ impl Element for TextElement {
             HitboxBehavior::Normal,
         );
         let track = Bounds::new(
-            point(bounds.right() - SCROLLBAR_WIDTH, bounds.origin.y),
-            size(SCROLLBAR_WIDTH, bounds.size.height),
+            point(bounds.right() - scroll_bar::WIDTH, bounds.origin.y),
+            size(scroll_bar::WIDTH, bounds.size.height),
         );
         let bar_hitbox = window.insert_hitbox(track, HitboxBehavior::Normal);
         let id = id.expect("text element has an id");
@@ -300,7 +295,7 @@ impl Element for TextElement {
                         frame,
                         doc,
                         &Selection::point(0),
-                        top,
+                        Scroll { viewport, ..top },
                         languages,
                         focus,
                         &scroll::annotations(doc.text.slice(..), side.padding()),
@@ -405,14 +400,7 @@ impl Element for TextElement {
                                     LineMark::Cursor => theme.editor.line_number_cursor,
                                     LineMark::Plain => theme.editor.line_number,
                                 };
-                                let run = TextRun {
-                                    len: cache.label.len(),
-                                    font: fonts.mono[0].clone(),
-                                    color: hsla(number),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                };
+                                let run = fonts.mono_run(cache.label.len(), hsla(number));
                                 Rc::new(text_system.shape_line(
                                     SharedString::from(cache.label.clone()),
                                     fonts.mono_size,
@@ -453,36 +441,27 @@ impl Element for TextElement {
             };
             let bar = Bar {
                 hitbox: bar_hitbox,
-                scrollbar: match draws {
-                    Draws::Head { .. } | Draws::NoHead => Scrollbar::Hidden,
+                on: match draws {
+                    Draws::Head { .. } | Draws::NoHead => None,
                     Draws::Editable { .. } | Draws::Deleted { .. } | Draws::Absent => {
-                        scroll::scrollbar(
-                            len_lines,
-                            visible.clone(),
-                            f32::from(track.size.height),
-                            MIN_THUMB,
-                        )
+                        Thumb::of(visible.start, visible.len(), len_lines)
+                            .and_then(|thumb| scroll_bar::on_track(thumb, track))
                     }
                 },
                 len_lines,
-                shown: visible.len(),
-                page: viewport.rows as isize,
             };
 
             let primary = frame.cursors.iter().find(|c| c.rank == Rank::Primary);
             let preedit = match (focus, workspace.preedit.is_empty(), primary) {
                 (Focus::Focused(_), false, Some(cursor)) => {
                     let run = TextRun {
-                        len: workspace.preedit.len(),
-                        font: fonts.mono[0].clone(),
-                        color: hsla(theme.text),
                         background_color: Some(hsla(theme.background)),
                         underline: Some(UnderlineStyle {
                             color: Some(hsla(theme.text)),
                             thickness: px(1.),
                             wavy: false,
                         }),
-                        strikethrough: None,
+                        ..fonts.mono_run(workspace.preedit.len(), hsla(theme.text))
                     };
                     let line = text_system.shape_line(
                         SharedString::from(workspace.preedit.clone()),
@@ -674,22 +653,15 @@ impl Element for TextElement {
             }
 
             let track = bar.hitbox.bounds;
-            match bar.scrollbar {
-                Scrollbar::Hidden => {}
-                Scrollbar::Shown(thumb) => {
-                    window.paint_quad(fill(track, hsla(editor.scrollbar_track)));
-                    let thumb_color = match cache.pointer.drag.get() {
-                        Drag::Thumb { .. } => editor.scrollbar_thumb_dragged,
-                        Drag::Idle | Drag::Selecting(_) => editor.scrollbar_thumb,
+            match bar.on {
+                Some(on) => {
+                    let held = match cache.pointer.drag.get() {
+                        Drag::Thumb { .. } => Held::Dragged,
+                        Drag::Idle | Drag::Selecting(_) => Held::Free,
                     };
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(track.origin.x, track.origin.y + px(thumb.top)),
-                            size(track.size.width, px(thumb.height)),
-                        ),
-                        hsla(thumb_color),
-                    ));
+                    scroll_bar::paint(window, track, on, held, &editor);
                 }
+                None => {}
             }
 
             match preedit.take() {
@@ -711,8 +683,7 @@ impl Element for TextElement {
         }
 
         let track = bar.hitbox.bounds;
-        let (scrollbar, len_lines, shown, page) =
-            (bar.scrollbar, bar.len_lines, bar.shown, bar.page);
+        let (on, len_lines) = (bar.on, bar.len_lines);
         let part = self.part;
         window.on_mouse_event({
             let workspace = self.workspace.clone();
@@ -774,23 +745,18 @@ impl Element for TextElement {
                         cx.notify();
                     });
                 }
-                (DispatchPhase::Bubble, MouseButton::Left, Over::Track, _) => match scrollbar {
-                    Scrollbar::Shown(thumb) => {
-                        match thumb.hit(f32::from(event.position.y - track.origin.y)) {
-                            OnTrack::Thumb { grab } => {
-                                pointer.drag.set(Drag::Thumb { grab: px(grab) })
-                            }
-                            OnTrack::Above => workspace.update(cx, |workspace, cx| {
-                                scroll::wheel(&mut workspace.state, pane, -page);
-                                cx.notify();
-                            }),
-                            OnTrack::Below => workspace.update(cx, |workspace, cx| {
-                                scroll::wheel(&mut workspace.state, pane, page);
-                                cx.notify();
-                            }),
-                        }
+                (DispatchPhase::Bubble, MouseButton::Left, Over::Track, _) => match on {
+                    Some(on) => {
+                        let along = scroll_bar::along(track, event.position.y);
+                        let grab = on.grab(along);
+                        pointer.drag.set(Drag::Thumb { grab });
+                        let line = on.index_at(along - grab, len_lines);
+                        workspace.update(cx, |workspace, cx| {
+                            scroll::scroll_to_line(&mut workspace.state, pane, line);
+                            cx.notify();
+                        });
                     }
-                    Scrollbar::Hidden => {}
+                    None => {}
                 },
                 _ => {}
             }
@@ -802,7 +768,7 @@ impl Element for TextElement {
                 phase,
                 event.pressed_button,
                 pointer.drag.get(),
-                scrollbar,
+                on,
             ) {
                 (DispatchPhase::Bubble, Some(MouseButton::Left), Drag::Selecting(gesture), _) => {
                     let (row, col) = cell_at(origin, cell, event.position);
@@ -815,16 +781,10 @@ impl Element for TextElement {
                     DispatchPhase::Bubble,
                     Some(MouseButton::Left),
                     Drag::Thumb { grab },
-                    Scrollbar::Shown(thumb),
+                    Some(on),
                 ) => {
-                    let top = event.position.y - track.origin.y - grab;
-                    let line = scroll::line_at_thumb(
-                        len_lines,
-                        shown,
-                        thumb.height,
-                        f32::from(track.size.height),
-                        f32::from(top),
-                    );
+                    let along = scroll_bar::along(track, event.position.y);
+                    let line = on.index_at(along - grab, len_lines);
                     workspace.update(cx, |workspace, cx| {
                         scroll::scroll_to_line(&mut workspace.state, pane, line);
                         cx.notify();
@@ -864,12 +824,31 @@ impl Element for TextElement {
                 over(&hitbox, &bar_hitbox, window),
             ) {
                 (DispatchPhase::Bubble, Over::Text | Over::Track) => {
-                    let delta = match event.delta {
-                        ScrollDelta::Lines(lines) => {
-                            cell.height * (lines.y * scroll::WHEEL_LINES as f32)
-                        }
-                        ScrollDelta::Pixels(pixels) => pixels.y,
+                    let (across, down) = match event.delta {
+                        ScrollDelta::Lines(lines) => (
+                            cell.width * (lines.x * scroll::WHEEL_COLUMNS as f32),
+                            cell.height * (lines.y * scroll::WHEEL_LINES as f32),
+                        ),
+                        ScrollDelta::Pixels(pixels) => (pixels.x, pixels.y),
                     };
+                    // Shift turns a plain wheel sideways.
+                    let (across, delta) = match event.modifiers.shift {
+                        true => {
+                            let per_row = (scroll::WHEEL_COLUMNS / scroll::WHEEL_LINES) as f32;
+                            (across + down * (cell.width / cell.height) * per_row, px(0.))
+                        }
+                        false => (across, down),
+                    };
+                    let total = pointer.sideways.get() - across;
+                    let cols = (total / cell.width).trunc();
+                    pointer.sideways.set(total - cell.width * cols);
+                    match cols as isize {
+                        0 => {}
+                        cols => workspace.update(cx, |workspace, cx| {
+                            scroll::wheel_sideways(&mut workspace.state, pane, cols);
+                            cx.notify();
+                        }),
+                    }
                     let total = pointer.wheel.get() - delta;
                     let rows = (total / cell.height).trunc();
                     pointer.wheel.set(total - cell.height * rows);

@@ -3,7 +3,7 @@ use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Range, Rope, RopeSlice, Selection};
 use model::mode::Mode;
 use state::view::display::{Indent, text_format};
-use state::view::layout::{Scroll, Viewport};
+use state::view::layout::{Scroll, Sideways, Viewport};
 use state::view::scroll::{self, SCROLLOFF};
 
 fn top(anchor: usize, viewport: Viewport) -> Scroll {
@@ -11,6 +11,7 @@ fn top(anchor: usize, viewport: Viewport) -> Scroll {
         anchor,
         rows: 0,
         viewport,
+        sideways: Sideways::Wrapped,
     }
 }
 
@@ -70,7 +71,13 @@ fn numbered(lines: usize) -> Rope {
 fn cursor_inside_band_keeps_anchor() {
     let text = numbered(100);
     let slice = text.slice(..);
-    let format = text_format(Viewport { rows: 20, cols: 80 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 20, cols: 80 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     let cursor = text.line_to_char(10);
     assert_eq!(follow(slice, cursor, 0, 20, &format), 0);
 }
@@ -79,7 +86,13 @@ fn cursor_inside_band_keeps_anchor() {
 fn cursor_below_band_scrolls_to_scrolloff() {
     let text = numbered(100);
     let slice = text.slice(..);
-    let format = text_format(Viewport { rows: 20, cols: 80 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 20, cols: 80 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     let cursor = text.line_to_char(50);
     let anchor = follow(slice, cursor, 0, 20, &format);
     assert_eq!(text.char_to_line(anchor), 50 - (20 - SCROLLOFF - 1));
@@ -89,7 +102,13 @@ fn cursor_below_band_scrolls_to_scrolloff() {
 fn cursor_above_band_scrolls_up() {
     let text = numbered(100);
     let slice = text.slice(..);
-    let format = text_format(Viewport { rows: 20, cols: 80 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 20, cols: 80 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     let anchor = text.line_to_char(60);
     let cursor = text.line_to_char(30);
     let anchor = follow(slice, cursor, anchor, 20, &format);
@@ -100,7 +119,13 @@ fn cursor_above_band_scrolls_up() {
 fn top_of_document_never_scrolls_past_start() {
     let text = numbered(100);
     let slice = text.slice(..);
-    let format = text_format(Viewport { rows: 20, cols: 80 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 20, cols: 80 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     let anchor = text.line_to_char(10);
     assert_eq!(follow(slice, 1, anchor, 20, &format), 0);
 }
@@ -110,7 +135,13 @@ fn wrapped_rows_count_towards_scrolloff() {
     let line = "word ".repeat(10);
     let text = Rope::from(format!("{line}\n").repeat(20));
     let slice = text.slice(..);
-    let format = text_format(Viewport { rows: 11, cols: 20 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 11, cols: 20 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     let cursor = text.line_to_char(5);
     let anchor = follow(slice, cursor, 0, 11, &format);
     // Lines wrap to three rows, so five rows above the cursor is the second row of line 3.
@@ -121,7 +152,13 @@ fn wrapped_rows_count_towards_scrolloff() {
 #[test]
 fn zero_height_viewport_is_ignored() {
     let text = numbered(10);
-    let format = text_format(Viewport { rows: 0, cols: 0 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 0, cols: 0 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     assert_eq!(follow(text.slice(..), 30, 4, 0, &format), 4);
 }
 
@@ -130,7 +167,7 @@ fn wheel_drags_cursor_into_band() {
     let text = numbered(100);
     let slice = text.slice(..);
     let viewport = Viewport { rows: 20, cols: 80 };
-    let format = text_format(viewport, INDENT);
+    let format = text_format(top(0, viewport), INDENT);
     let selection = Selection::point(0);
     let (anchor, moved) = wheel(slice, &selection, viewport, 3, &format);
     assert_eq!(text.char_to_line(anchor), 3);
@@ -149,7 +186,13 @@ fn wheel_drags_cursor_into_band() {
 fn click_maps_cells_to_chars() {
     let text = Rope::from("ab\n\tcd\n");
     let slice = text.slice(..);
-    let format = text_format(Viewport { rows: 5, cols: 40 }, INDENT);
+    let format = text_format(
+        Scroll {
+            viewport: Viewport { rows: 5, cols: 40 },
+            ..Scroll::default()
+        },
+        INDENT,
+    );
     assert_eq!(char_at(slice, 0, 1, &format), 1);
     assert_eq!(char_at(slice, 1, 2, &format), 3);
     assert_eq!(char_at(slice, 1, 5, &format), 5);
@@ -264,80 +307,5 @@ mod mouse {
         );
         // A 10-row view narrows the scrolloff band to 4 rows.
         assert_eq!((line, top), (54, 50));
-    }
-}
-
-mod scrollbar {
-    use state::view::scroll::{OnTrack, Scrollbar, Thumb, line_at_thumb, scrollbar};
-
-    #[test]
-    fn a_press_on_the_track_lands_above_on_or_below_the_thumb() {
-        let thumb = Thumb {
-            top: 50.,
-            height: 20.,
-        };
-        assert_eq!(thumb.hit(10.), OnTrack::Above);
-        assert_eq!(thumb.hit(55.), OnTrack::Thumb { grab: 5. });
-        assert_eq!(thumb.hit(70.), OnTrack::Thumb { grab: 20. });
-        assert_eq!(thumb.hit(71.), OnTrack::Below);
-    }
-    #[test]
-    fn hidden_when_everything_fits() {
-        assert_eq!(scrollbar(10, 0..10, 100., 10.), Scrollbar::Hidden);
-        assert_eq!(scrollbar(10, 0..12, 100., 10.), Scrollbar::Hidden);
-    }
-
-    #[test]
-    fn thumb_spans_the_visible_lines() {
-        assert_eq!(
-            scrollbar(100, 0..25, 200., 10.),
-            Scrollbar::Shown(Thumb {
-                top: 0.,
-                height: 50.
-            })
-        );
-        assert_eq!(
-            scrollbar(100, 75..100, 200., 10.),
-            Scrollbar::Shown(Thumb {
-                top: 150.,
-                height: 50.
-            })
-        );
-        // Scrolled to the last line, the bar stays shown and pinned to the bottom.
-        assert_eq!(
-            scrollbar(100, 99..100, 200., 10.),
-            Scrollbar::Shown(Thumb {
-                top: 190.,
-                height: 10.
-            })
-        );
-    }
-
-    #[test]
-    fn small_thumbs_are_clamped_and_still_reach_both_ends() {
-        let Scrollbar::Shown(top) = scrollbar(100_000, 0..50, 200., 16.) else {
-            panic!("shown");
-        };
-        assert_eq!(top.height, 16.);
-        let Scrollbar::Shown(bottom) = scrollbar(100_000, 99_950..100_000, 200., 16.) else {
-            panic!("shown");
-        };
-        assert_eq!(bottom.top + bottom.height, 200.);
-    }
-
-    #[test]
-    fn dragging_inverts_the_geometry() {
-        let (len, shown, track) = (1_000, 40, 400.);
-        for first in [0, 1, 123, 480, 960] {
-            let Scrollbar::Shown(thumb) = scrollbar(len, first..first + shown, track, 16.) else {
-                panic!("shown");
-            };
-            assert_eq!(
-                line_at_thumb(len, shown, thumb.height, track, thumb.top),
-                first
-            );
-        }
-        assert_eq!(line_at_thumb(len, shown, 16., track, -50.), 0);
-        assert_eq!(line_at_thumb(len, shown, 16., track, 1e6), len - shown);
     }
 }

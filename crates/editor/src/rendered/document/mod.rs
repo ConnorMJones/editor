@@ -7,18 +7,24 @@ use inline::inline;
 use media::{code_box, figure_element, picture, placeholder};
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, IntoElement, SharedString, TextAlign, TextRun,
+    AnyElement, ClickEvent, Context, Div, Hsla, IntoElement, SharedString, TextAlign, TextRun,
     WeakEntity, div, prelude::*, px,
 };
+use helix_core::SmallVec;
 use model::markdown::CalloutKind;
 use model::theme::{Modifiers, Theme};
+use state::State;
+use state::book::BookId;
 use state::project::links::{self, Origin as LinkOrigin, Resolution};
-use state::render::document::{BlockClick, DocumentState, Parsed};
+use state::render::book::{Align, BookTarget, InChapter, Layout};
+use state::render::document::BlockClick;
+use state::render::flow::{Flow, Lines, Origin};
 use state::render::markdown::{
-    self, BlockKind, CalloutFold, Column, EmbedKind, LinkTarget, ListKind, Markdown, RowKind, Task,
+    self, BlockKind, CalloutFold, Column, EmbedKind, LinkTarget, ListKind, RowKind, Task,
 };
 use state::render::typeset::Figures;
 use state::text::buffer::BufferId;
@@ -34,18 +40,115 @@ const MEASURE: f32 = 45.0;
 /// Heading sizes relative to prose, `#` to `######`.
 const SCALES: [f32; 6] = [1.6, 1.4, 1.25, 1.12, 1.05, 1.0];
 
-/// What a block's drawing needs from the workspace.
-struct Draw<'a> {
+struct Draw<'a, O: Drawable> {
     theme: &'a Theme,
     fonts: &'a Fonts,
-    view: &'a DocumentState,
-    markdown: &'a Markdown,
+    flow: &'a Flow<O>,
+    key: O::Key,
+    version: u64,
+    toggled: &'a [u32],
+    marked: &'a dyn Fn(usize) -> Tints,
     figures: &'a Figures,
     pictures: &'a Rc<RefCell<Pictures>>,
     pane: PaneId,
-    buffer: BufferId,
-    version: u64,
     workspace: WeakEntity<Workspace>,
+}
+
+pub trait Drawable: Origin + Sized + 'static {
+    type Key: Copy + 'static;
+
+    fn flow(state: &State, key: Self::Key) -> Option<&Flow<Self>>;
+
+    fn follow(this: &mut Workspace, key: Self::Key, pane: PaneId, target: &Self::Target);
+
+    fn clicked(&self, version: u64) -> Option<BlockClick>;
+
+    fn arrange(&self, fonts: &Fonts, block: Div) -> Div;
+
+    fn note(key: Self::Key) -> Option<BufferId>;
+
+    fn book(key: Self::Key) -> Option<BookId>;
+}
+
+impl Drawable for Lines {
+    type Key = BufferId;
+
+    fn flow(state: &State, buffer: BufferId) -> Option<&Flow<Lines>> {
+        let doc = &state.buffers.get(buffer)?.doc;
+        state::render::document::markdown(&state.documents, buffer, doc).map(|parsed| &parsed.flow)
+    }
+
+    fn follow(this: &mut Workspace, buffer: BufferId, pane: PaneId, target: &LinkTarget) {
+        links::follow(
+            &mut this.state,
+            buffer,
+            target,
+            LinkOrigin::Document(pane),
+            &mut this.effects,
+        )
+    }
+
+    fn clicked(&self, version: u64) -> Option<BlockClick> {
+        Some(BlockClick {
+            line: self.lines.start,
+            version,
+        })
+    }
+
+    fn arrange(&self, _: &Fonts, block: Div) -> Div {
+        block
+    }
+
+    fn note(buffer: BufferId) -> Option<BufferId> {
+        Some(buffer)
+    }
+
+    fn book(_: BufferId) -> Option<BookId> {
+        None
+    }
+}
+
+impl Drawable for InChapter {
+    type Key = BookId;
+
+    fn flow(state: &State, book: BookId) -> Option<&Flow<InChapter>> {
+        state.books.get(book).map(|book| &book.flow.flow)
+    }
+
+    fn follow(this: &mut Workspace, book: BookId, pane: PaneId, target: &BookTarget) {
+        state::book::follow(&mut this.state, pane, book, target, &mut this.effects)
+    }
+
+    fn clicked(&self, _: u64) -> Option<BlockClick> {
+        None
+    }
+
+    fn arrange(&self, fonts: &Fonts, block: Div) -> Div {
+        let Layout {
+            align,
+            margin,
+            scale,
+            ..
+        } = self.layout;
+        let size = fonts.prose_size * scale;
+        block
+            .pl(fonts.prose_size * margin)
+            .text_size(size)
+            .line_height(size * PROSE_LINE)
+            .text_align(match align {
+                Align::Start | Align::Justify => TextAlign::Left,
+                Align::Center => TextAlign::Center,
+                Align::End => TextAlign::Right,
+            })
+    }
+
+    fn note(_: BookId) -> Option<BufferId> {
+        None
+    }
+
+    fn book(book: BookId) -> Option<BookId> {
+        Some(book)
+    }
 }
 
 /// How a block's text is inked: done tasks read struck through and muted.
@@ -56,34 +159,45 @@ enum Ink {
 }
 
 /// Root block `index` of `pane`'s document view, in the reading column.
-pub fn item(
+pub type Tints = SmallVec<[(Range<usize>, Hsla); 4]>;
+
+pub struct From<'a, O: Drawable> {
+    pub flow: &'a Flow<O>,
+    pub key: O::Key,
+    pub version: u64,
+    pub toggled: &'a [u32],
+    pub marked: &'a dyn Fn(usize) -> Tints,
+}
+
+pub fn item<O: Drawable>(
     this: &Workspace,
     pane: PaneId,
-    buffer: BufferId,
-    view: &DocumentState,
+    from: From<O>,
     index: usize,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let (state, theme, fonts) = (&this.state, &this.theme, &this.fonts);
-    let Some(Parsed {
-        version, markdown, ..
-    }) = state.documents.get(buffer)
-    else {
-        return div().into_any_element();
-    };
-    let Some(root) = markdown.roots.get(index) else {
+    let (theme, fonts) = (&this.theme, &this.fonts);
+    let From {
+        flow,
+        key,
+        version,
+        toggled,
+        marked,
+    } = from;
+    let Some(root) = flow.roots.get(index) else {
         return div().into_any_element();
     };
     let draw = Draw {
         theme,
         fonts,
-        view,
-        markdown,
-        figures: &state.figures,
+        flow,
+        key,
+        version,
+        toggled,
+        marked,
+        figures: &this.state.figures,
         pictures: &this.pictures,
         pane,
-        buffer,
-        version: *version,
         workspace: cx.weak_entity(),
     };
     let top = match index {
@@ -110,29 +224,34 @@ pub fn item(
         .into_any_element()
 }
 
-/// A block that puts the source cursor on its first line when clicked.
-fn clickable(draw: &Draw, index: usize) -> gpui::Stateful<Div> {
+fn clickable<O: Drawable>(draw: &Draw<O>, index: usize) -> gpui::Stateful<Div> {
     let (workspace, pane) = (draw.workspace.clone(), draw.pane);
-    let click = BlockClick {
-        line: draw.markdown.blocks[index].lines.start,
-        version: draw.version,
-    };
-    div()
-        .id(("block", index))
-        .on_click(move |_: &ClickEvent, window, cx| {
+    let block = div().id(("block", index));
+    match draw.flow.blocks[index].origin.clicked(draw.version) {
+        Some(click) => block.on_click(move |_: &ClickEvent, window, cx| {
             cx.stop_propagation();
             update(&workspace, window, cx, |this| {
                 state::render::document::click(&mut this.state, pane, click)
             });
-        })
+        }),
+        None => block,
+    }
 }
 
-fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
+fn block<O: Drawable>(draw: &Draw<O>, index: usize, ink: Ink) -> AnyElement {
+    let target = &draw.flow.blocks[index];
+    target
+        .origin
+        .arrange(draw.fonts, div().child(kind(draw, index, ink)))
+        .into_any_element()
+}
+
+fn kind<O: Drawable>(draw: &Draw<O>, index: usize, ink: Ink) -> AnyElement {
     let theme = draw.theme;
     let fonts = draw.fonts;
-    let markdown = draw.markdown;
-    let target = &markdown.blocks[index];
-    let children = || markdown.children(index);
+    let flow = draw.flow;
+    let target = &flow.blocks[index];
+    let children = || flow.children(index);
     match &target.kind {
         BlockKind::Heading { level, text } => {
             let scale = SCALES[*level as usize - 1];
@@ -159,7 +278,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
             .child(inline(draw, text, index, ink, Modifiers::empty()))
             .into_any_element(),
         BlockKind::List(kind) => {
-            let depth = (markdown.blocks[..index].iter())
+            let depth = (flow.blocks[..index].iter())
                 .filter(|outer| matches!(outer.kind, BlockKind::List(_)) && outer.end >= target.end)
                 .count();
             let bullet = match depth % 2 {
@@ -171,7 +290,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                 .flex_col()
                 .gap_1()
                 .children(children().enumerate().map(|(n, item)| {
-                    let task = match markdown.blocks[item].kind {
+                    let task = match flow.blocks[item].kind {
                         BlockKind::Item(task) => task,
                         _ => Task::None,
                     };
@@ -204,9 +323,13 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                                 .child(marker),
                         )
                         .child(
-                            div().flex_1().min_w_0().flex().flex_col().gap_1().children(
-                                markdown.children(item).map(|child| block(draw, child, ink)),
-                            ),
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(flow.children(item).map(|child| block(draw, child, ink))),
                         )
                 }))
                 .into_any_element()
@@ -240,7 +363,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                 CalloutKind::Bug => "✱",
                 CalloutKind::Quote => "❝",
             };
-            let fold = draw.view.fold(callout);
+            let fold = callout.shown(draw.toggled);
             let chevron = match fold {
                 CalloutFold::Static => "",
                 CalloutFold::Open => "▾",
@@ -300,7 +423,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                 .into_any_element()
         }
         BlockKind::Code(code) => {
-            let runs = markdown.highlights.get(&code.hash).map(|runs| {
+            let runs = flow.highlights.get(&code.hash).map(|runs| {
                 let mut start = 0;
                 runs.iter()
                     .map(|run| {
@@ -344,7 +467,7 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                 .border_1()
                 .border_color(hsla(theme.chrome.border))
                 .children(children().map(|row| {
-                    let head = match markdown.blocks[row].kind {
+                    let head = match flow.blocks[row].kind {
                         BlockKind::Row(RowKind::Head) => RowKind::Head,
                         _ => RowKind::Body,
                     };
@@ -359,13 +482,13 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                             .font_weight(gpui::FontWeight::BOLD),
                         RowKind::Body => line,
                     };
-                    line.children(markdown.children(row).enumerate().map(|(n, cell)| {
+                    line.children(flow.children(row).enumerate().map(|(n, cell)| {
                         let align = match columns.get(n).copied().unwrap_or(Column::None) {
                             Column::None | Column::Left => TextAlign::Left,
                             Column::Center => TextAlign::Center,
                             Column::Right => TextAlign::Right,
                         };
-                        let content = match &markdown.blocks[cell].kind {
+                        let content = match &flow.blocks[cell].kind {
                             BlockKind::Cell(text) => {
                                 let modifiers = match head {
                                     RowKind::Head => Modifiers::BOLD,
@@ -402,25 +525,31 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
                     Resolution::Missing(path) => ("embedded note not found", format!("⧉ {path}")),
                     Resolution::Invalid => ("embed", format!("⧉ {}", embed.link.target)),
                 };
-                let (workspace, pane, buffer) = (draw.workspace.clone(), draw.pane, draw.buffer);
-                let target = LinkTarget::Wiki(embed.link.clone());
-                div()
-                    .id(("embed", index))
-                    .cursor_pointer()
-                    .on_click(move |_: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        update(&workspace, window, cx, |this| {
-                            links::follow(
-                                &mut this.state,
-                                buffer,
-                                &target,
-                                LinkOrigin::Document(pane),
-                                &mut this.effects,
-                            )
-                        });
-                    })
-                    .child(placeholder(theme, fonts, label, SharedString::from(shown)))
-                    .into_any_element()
+                let shown = placeholder(theme, fonts, label, SharedString::from(shown));
+                match O::note(draw.key) {
+                    Some(buffer) => {
+                        let (workspace, pane) = (draw.workspace.clone(), draw.pane);
+                        let target = LinkTarget::Wiki(embed.link.clone());
+                        div()
+                            .id(("embed", index))
+                            .cursor_pointer()
+                            .on_click(move |_: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                update(&workspace, window, cx, |this| {
+                                    links::follow(
+                                        &mut this.state,
+                                        buffer,
+                                        &target,
+                                        LinkOrigin::Document(pane),
+                                        &mut this.effects,
+                                    )
+                                });
+                            })
+                            .child(shown)
+                            .into_any_element()
+                    }
+                    None => shown,
+                }
             }
         },
         BlockKind::Rule => div()
@@ -470,10 +599,10 @@ fn block(draw: &Draw, index: usize, ink: Ink) -> AnyElement {
 }
 
 /// A clickable task checkbox flipping the `[ ]` at byte `marker` of the source.
-fn checkbox(draw: &Draw, marker: usize, ink: Ink) -> AnyElement {
+fn checkbox<O: Drawable>(draw: &Draw<O>, marker: usize, ink: Ink) -> AnyElement {
     let theme = draw.theme;
     let fonts = draw.fonts;
-    let (workspace, buffer, version) = (draw.workspace.clone(), draw.buffer, draw.version);
+    let (workspace, version) = (draw.workspace.clone(), draw.version);
     let accent = hsla(theme.chrome.accent);
     let box_ = div()
         .id(("task", marker))
@@ -484,15 +613,19 @@ fn checkbox(draw: &Draw, marker: usize, ink: Ink) -> AnyElement {
         .justify_center()
         .rounded(px(3.))
         .border_1()
-        .cursor_pointer()
-        .text_size(fonts.prose_size * 0.75)
-        .hover(move |style| style.border_color(accent))
-        .on_click(move |_: &ClickEvent, window, cx| {
-            cx.stop_propagation();
-            update(&workspace, window, cx, |this| {
-                state::render::document::toggle_task(&mut this.state, buffer, version, marker)
-            });
-        });
+        .text_size(fonts.prose_size * 0.75);
+    let box_ = match O::note(draw.key) {
+        Some(buffer) => box_
+            .cursor_pointer()
+            .hover(move |style| style.border_color(accent))
+            .on_click(move |_: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                update(&workspace, window, cx, |this| {
+                    state::render::document::toggle_task(&mut this.state, buffer, version, marker)
+                });
+            }),
+        None => box_,
+    };
     match ink {
         Ink::Plain => box_.border_color(hsla(theme.prose.checkbox)),
         Ink::Done => box_

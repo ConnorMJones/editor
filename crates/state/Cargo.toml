@@ -24,6 +24,8 @@ export.workspace = true
 ink.workspace = true
 library.workspace = true
 reader.workspace = true
+roxmltree.workspace = true
+simplecss.workspace = true
 model.workspace = true
 serde.workspace = true
 notify.workspace = true
@@ -40,6 +42,7 @@ typeset = { workspace = true, optional = true }
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+miniz_oxide.workspace = true
 grammars.workspace = true
 
 [[test]]

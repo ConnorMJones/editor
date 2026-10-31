@@ -86,7 +86,7 @@ pub fn export(state: &mut State, to: ExportAs, out: &mut Vec<Effect>) {
         }
         (Some(Tab::Ink(InkTabs::Pdf(_))), ExportAs::Svg | ExportAs::Png)
         | (Some(Tab::Text(_)), ExportAs::Svg | ExportAs::Png)
-        | (Some(Tab::Image(_)) | None, _) => Err(Notice::NotExportable { to }),
+        | (Some(Tab::Image(_) | Tab::Book(_)) | None, _) => Err(Notice::NotExportable { to }),
     };
     match job {
         Ok(job) => out.push(Effect::Job(job)),

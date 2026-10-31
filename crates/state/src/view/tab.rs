@@ -2,14 +2,16 @@
 
 use model::command::{Direction, Resize, Shown};
 
+use crate::book::{BookId, BookTab};
 use crate::drawing::{self, BoardId, InkTabs, PagedId, PdfId};
 use crate::git::diffview::DiffSides;
 use crate::project::path::TextKind;
+use crate::render::document::Placed;
 use crate::render::document::{DocumentSeen, DocumentState};
 use crate::render::pages::{PagesSeen, PagesState};
 use crate::render::{Opening, Rendering};
 use crate::text::buffer::BufferId;
-use crate::view::layout::TextView;
+use crate::view::layout::{Sideways, TextView};
 use crate::viewer::{ImageId, ImageTab};
 
 pub trait Modes: Sized + Clone {
@@ -109,6 +111,10 @@ impl<M: Modes> TextTab<M> {
 
     fn enter(&mut self, shown: Shown, at: Opening) -> Result<(), NoMode> {
         self.mode = M::enter(shown, at).ok_or(NoMode)?;
+        self.text.scroll.sideways = match shown {
+            Shown::Diff => Sideways::Unwrapped { left: 0 },
+            Shown::Source | Shown::Render | Shown::Split => Sideways::Wrapped,
+        };
         Ok(())
     }
 
@@ -344,6 +350,7 @@ pub enum Opened {
     Board(BoardId),
     Pdf(PdfId),
     Image(ImageId),
+    Book(BookId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,7 +368,7 @@ impl Opened {
             Opened::Paged(id) => Some(Writable::Paged(id)),
             Opened::Board(id) => Some(Writable::Board(id)),
             Opened::Pdf(id) => Some(Writable::Pdf(id)),
-            Opened::Image(_) => None,
+            Opened::Image(_) | Opened::Book(_) => None,
         }
     }
 }
@@ -381,6 +388,7 @@ pub enum Tab {
     Text(TextTabs),
     Ink(InkTabs),
     Image(ImageTab),
+    Book(BookTab),
 }
 
 impl Tab {
@@ -389,20 +397,21 @@ impl Tab {
             Tab::Text(text) => Opened::Text(text.buffer()),
             Tab::Ink(ink) => ink.opened(),
             Tab::Image(image) => Opened::Image(image.file()),
+            Tab::Book(book) => Opened::Book(book.file()),
         }
     }
 
     pub fn as_text(&self) -> Option<&TextTabs> {
         match self {
             Tab::Text(text) => Some(text),
-            Tab::Ink(_) | Tab::Image(_) => None,
+            Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) => None,
         }
     }
 
     pub fn as_text_mut(&mut self) -> Option<&mut TextTabs> {
         match self {
             Tab::Text(text) => Some(text),
-            Tab::Ink(_) | Tab::Image(_) => None,
+            Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) => None,
         }
     }
 }
@@ -415,6 +424,7 @@ impl Tab {
             Opened::Board(id) => Tab::Ink(drawing::open_board(state, id)),
             Opened::Pdf(id) => Tab::Ink(drawing::open_pdf(state, id)),
             Opened::Image(id) => Tab::Image(ImageTab::open(id)),
+            Opened::Book(id) => Tab::Book(BookTab::new(id, Placed::item(0))),
         }
     }
 
@@ -423,6 +433,7 @@ impl Tab {
             Tab::Text(text) => Tab::Text(text.clone()),
             Tab::Ink(ink) => Tab::Ink(ink.copy()),
             Tab::Image(image) => Tab::Image(image.copy()),
+            Tab::Book(book) => Tab::Book(book.copy()),
         }
     }
 }

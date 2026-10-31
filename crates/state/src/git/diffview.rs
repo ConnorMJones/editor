@@ -17,6 +17,7 @@ use crate::text::buffer::{Buffer, BufferId, Disk, TextDoc};
 use crate::view::display::{Indent, Shade, text_format};
 use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView};
 use crate::view::scroll::{self, Padding};
+use crate::view::tab::Share;
 use crate::view::tab::{Showing, ShowingMut, TextTabs};
 use crate::{Effect, State};
 
@@ -31,6 +32,14 @@ pub const RIGHT: usize = 1;
 pub struct DiffSides {
     pub left: Left,
     pub align: Align,
+    pub share: Share,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffShown {
+    Both,
+    Head,
+    Buffer,
 }
 
 impl DiffSides {
@@ -38,6 +47,17 @@ impl DiffSides {
         DiffSides {
             left: Left::Pending,
             align: Align::default(),
+            share: Share::EVEN,
+        }
+    }
+
+    pub fn shown(&self, buffer: &Buffer) -> DiffShown {
+        match (&self.left, right(buffer)) {
+            (_, Right::Deleted) => DiffShown::Head,
+            (Left::Absent, Right::Live) => DiffShown::Buffer,
+            (Left::Pending | Left::Parsing { .. } | Left::Head { .. }, Right::Live) => {
+                DiffShown::Both
+            }
         }
     }
 }
@@ -417,7 +437,7 @@ pub fn sync_left(state: &mut State, pane: PaneId) {
     let Some((text, sides, doc, tracked)) = active(layout, buffers, pane) else {
         return;
     };
-    let DiffSides { left, align } = sides;
+    let DiffSides { left, align, .. } = sides;
     let Left::Head {
         oid,
         doc: head,
@@ -427,7 +447,7 @@ pub fn sync_left(state: &mut State, pane: PaneId) {
         return;
     };
     let viewport = text.scroll.viewport;
-    let format = text_format(viewport, Indent::of(doc, languages));
+    let format = text_format(text.scroll, Indent::of(doc, languages));
     // Hunks against an older HEAD than the one shown cannot align it.
     let key = match tracked.stamp {
         Some(stamp) if stamp.bases[0] == Some(*oid) => Some(AlignKey {
@@ -476,6 +496,7 @@ pub fn sync_left(state: &mut State, pane: PaneId) {
         anchor,
         rows,
         viewport,
+        sideways: text.scroll.sideways,
     };
 }
 
@@ -646,7 +667,7 @@ pub fn click_left(state: &mut State, pane: PaneId, row: u16, col: u16) {
     else {
         return;
     };
-    let format = text_format(text_view.scroll.viewport, Indent::of(doc, languages));
+    let format = text_format(text_view.scroll, Indent::of(doc, languages));
     let head_text = head.text.slice(..);
     let annotations = scroll::annotations(head_text, diff.align.sides[LEFT].padding());
     let pos = scroll::char_at(head_text, *scroll, row, col, &format, &annotations);

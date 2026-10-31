@@ -1,3 +1,4 @@
+use crate::harness::hunk;
 use std::path::Path;
 
 use helix_core::doc_formatter::TextFormat;
@@ -8,7 +9,7 @@ use state::git::diff::{Hunk, Side};
 use state::git::diffview::{self, Align, LEFT, RIGHT};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, Indent, RowKind, Shade, text_format};
-use state::view::layout::{Scroll, Viewport};
+use state::view::layout::{Scroll, Sideways, Viewport};
 use state::view::scroll::{self, Padding};
 
 const INDENT: Indent = Indent {
@@ -18,15 +19,14 @@ const INDENT: Indent = Indent {
 
 const COLS: u16 = 20;
 
-fn hunk(before: std::ops::Range<u32>, after: std::ops::Range<u32>) -> Hunk {
-    Hunk { before, after }
-}
-
 fn format() -> TextFormat {
     text_format(
-        Viewport {
-            rows: 100,
-            cols: COLS,
+        Scroll {
+            viewport: Viewport {
+                rows: 100,
+                cols: COLS,
+            },
+            ..Scroll::default()
         },
         INDENT,
     )
@@ -203,6 +203,7 @@ fn both_sides_scroll_row_for_row() {
         anchor: 0,
         rows: -(lead as isize),
         viewport: all,
+        sideways: Sideways::Wrapped,
     };
     let mut frame = Frame::default();
     let left_rows = rows_of(
@@ -250,6 +251,7 @@ fn both_sides_scroll_row_for_row() {
             anchor,
             rows,
             viewport: one,
+            sideways: Sideways::Wrapped,
         };
         assert_eq!(
             rows_of(&right, at, right_padding, &loader, &mut frame),
@@ -276,6 +278,7 @@ fn both_sides_scroll_row_for_row() {
             anchor,
             rows,
             viewport: one,
+            sideways: Sideways::Wrapped,
         };
         assert_eq!(
             rows_of(
@@ -321,6 +324,7 @@ fn deleted_lines_at_the_top_scroll_through_the_lead() {
         anchor: 0,
         rows,
         viewport: one,
+        sideways: Sideways::Wrapped,
     };
     // The second lead row faces HEAD's second removed line.
     let spot = diffview::spot(

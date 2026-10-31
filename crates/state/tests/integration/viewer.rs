@@ -6,7 +6,7 @@ use model::notice::Notice;
 use model::picture::{Bitmap, Encoding};
 use model::sheet::{Fit, PageSize, SheetView, Zoom};
 use state::project::session;
-use state::render::markdown::LocalImage;
+use state::render::markdown::{ImagePlace, LocalImage};
 use state::render::typeset::Probe;
 use state::view::tab::Tab;
 use state::viewer::ImageTab;
@@ -128,7 +128,7 @@ fn a_session_restores_an_image_with_its_view() {
 /// The size the focused rendering's image was read at.
 fn shown_size(h: &Harness, path: &Path) -> Option<(f32, f32)> {
     let image = LocalImage {
-        path: path.into(),
+        place: ImagePlace::File(path.into()),
         encoding: Encoding::Bitmap(Bitmap::Png),
     };
     match h.state.figures.image(&image) {

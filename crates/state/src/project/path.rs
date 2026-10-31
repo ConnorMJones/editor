@@ -223,6 +223,7 @@ pub enum FileKind {
     Paged,
     Board,
     Pdf,
+    Book,
     Image(Encoding),
 }
 
@@ -243,6 +244,7 @@ impl FileKind {
             (None, Some("pdt")) => FileKind::Paged,
             (None, Some("bdt")) => FileKind::Board,
             (None, Some("pdf")) => FileKind::Pdf,
+            (None, Some("epub")) => FileKind::Book,
             (None, Some(_) | None) => FileKind::Text(TextKind::Code),
         }
     }

@@ -3,10 +3,9 @@ use std::sync::Arc;
 use krilla::Document as Writer;
 use krilla::page::PageSettings;
 use library::{
-    Annotation, AnnotationId, Bookmark, Change, Comment, FastHash, Highlight, Identity, Library,
-    SearchQuery, TextSpan,
+    Annotation, AnnotationId, Bookmark, Change, Comment, FastHash, Highlight, Identity, LibPath,
+    Library, LibraryError, Listed, Part, Place, SearchQuery, TextSpan,
 };
-use model::sheet::PageIndex;
 use reader::pdf::Document;
 
 fn pdf(pages: &[&[&str]]) -> Arc<Document> {
@@ -37,13 +36,22 @@ fn highlight(document: &Arc<Document>, page: usize, word: &str) -> Highlight {
     let text = document.read_text(page).unwrap();
     let start = text.text.find(word).unwrap();
     let span = TextSpan {
-        page: PageIndex(page),
+        part: Part(page),
         chars: text.chars_in(start..start + word.len()),
     };
     Highlight {
         comment: Comment::new("a note".to_owned()),
         ..Highlight::of(document, span).unwrap()
     }
+}
+
+fn identify(
+    library: &Library,
+    path: &LibPath,
+    document: &Arc<Document>,
+) -> Result<Listed, LibraryError> {
+    let hash = FastHash::of(&document.bytes);
+    library.identify(path, hash, document.bytes.len() as u64, document)
 }
 
 fn put(highlight: &Highlight) -> Change {
@@ -92,7 +100,7 @@ fn a_document_is_known_again_by_path_and_by_bytes() {
             .is_none()
     );
 
-    let listed = library.identify(&path, &document).unwrap();
+    let listed = identify(&library, &path, &document).unwrap();
     assert_eq!(listed.identity, Identity::New);
     assert!(folder.path().join(".edt/library.db").is_file());
     assert_eq!(
@@ -101,22 +109,26 @@ fn a_document_is_known_again_by_path_and_by_bytes() {
     );
     let fox = highlight(&document, 0, "fox");
     library.write(listed.id, &put(&fox)).unwrap();
-    library.keep_place(listed.id, PageIndex(1)).unwrap();
+    let at = Place {
+        part: Part(1),
+        char: 0,
+    };
+    library.keep_place(listed.id, at).unwrap();
 
-    let again = library.identify(&path, &document).unwrap();
+    let again = identify(&library, &path, &document).unwrap();
     assert_eq!(again.identity, Identity::Known);
     assert_eq!(again.notebook.highlights, [fox.clone()]);
-    assert_eq!(again.position, PageIndex(1));
+    assert_eq!(again.position, at);
 
     let moved = library.place(&folder.path().join("b.pdf")).unwrap();
-    let listed = library.identify(&moved, &document).unwrap();
+    let listed = identify(&library, &moved, &document).unwrap();
     assert_eq!(listed.identity, Identity::Moved { from: path.clone() });
     assert_eq!(listed.notebook.highlights, [fox]);
 
     std::fs::write(folder.path().join("b.pdf"), b"here").unwrap();
     let copy = library.place(&folder.path().join("c.pdf")).unwrap();
     assert_eq!(
-        library.identify(&copy, &document).unwrap().identity,
+        identify(&library, &copy, &document).unwrap().identity,
         Identity::New,
         "a copy beside the original"
     );
@@ -128,7 +140,7 @@ fn a_changed_document_finds_its_highlights_again_or_loses_them() {
     let library = Library::at(folder.path().to_owned());
     let path = library.place(&folder.path().join("a.pdf")).unwrap();
     let document = pdf(FIRST);
-    let listed = library.identify(&path, &document).unwrap();
+    let listed = identify(&library, &path, &document).unwrap();
     let (fox, jumps, world) = (
         highlight(&document, 0, "fox"),
         highlight(&document, 1, "jumps"),
@@ -139,7 +151,10 @@ fn a_changed_document_finds_its_highlights_again_or_loses_them() {
     }
     let bookmark = Bookmark {
         id: AnnotationId::new(),
-        page: PageIndex(1),
+        at: Place {
+            part: Part(1),
+            char: 0,
+        },
     };
     let marked = Change::Put(Annotation::Bookmark(bookmark.clone()));
     library.write(listed.id, &marked).unwrap();
@@ -148,7 +163,7 @@ fn a_changed_document_finds_its_highlights_again_or_loses_them() {
         &["Hello there", "a new line", "the quick brown fox"],
         &["jumps over"],
     ]);
-    let listed = library.identify(&path, &changed).unwrap();
+    let listed = identify(&library, &path, &changed).unwrap();
     assert_eq!(listed.identity, Identity::Changed);
     let notebook = &listed.notebook;
     let found = |id| {
@@ -171,7 +186,7 @@ fn a_changed_document_finds_its_highlights_again_or_loses_them() {
     );
     assert_eq!(notebook.bookmarks, [bookmark]);
     assert_eq!(
-        library.identify(&path, &changed).unwrap().notebook,
+        identify(&library, &path, &changed).unwrap().notebook,
         listed.notebook,
         "the new anchors are saved"
     );
@@ -183,7 +198,7 @@ fn search_finds_quotes_and_comments_by_prefix() {
     let library = Library::at(folder.path().to_owned());
     let path = library.place(&folder.path().join("a.pdf")).unwrap();
     let document = pdf(FIRST);
-    let listed = library.identify(&path, &document).unwrap();
+    let listed = identify(&library, &path, &document).unwrap();
     let fox = highlight(&document, 0, "fox");
     let jumps = highlight(&document, 1, "jumps");
     library.write(listed.id, &put(&fox)).unwrap();

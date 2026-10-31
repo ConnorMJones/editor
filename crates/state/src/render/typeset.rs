@@ -14,9 +14,11 @@ use model::typeset::{
 use model::units::Pt;
 use slotmap::SlotMap;
 
+use crate::book::BookFiles;
 use crate::job::Job;
 use crate::project::path::TextKind;
 use crate::render::document::Documents;
+use crate::render::flow;
 #[cfg(feature = "typeset")]
 use crate::render::markdown::FigureKind;
 use crate::render::markdown::{
@@ -207,7 +209,7 @@ pub fn root_of<'a>(root: &'a Path, main: &'a Path) -> &'a Path {
     }
 }
 
-pub fn each_figure(blocks: &[Block], mut f: impl FnMut(Figure, &str)) {
+pub fn each_figure<O: flow::Origin>(blocks: &[Block<O>], mut f: impl FnMut(Figure, &str)) {
     for block in blocks {
         match &block.kind {
             BlockKind::Math(math) => f(math.figure, &math.tex),
@@ -232,7 +234,7 @@ pub fn each_figure(blocks: &[Block], mut f: impl FnMut(Figure, &str)) {
 }
 
 /// Each image file shown on its own in `blocks`.
-pub fn each_image(blocks: &[Block], mut f: impl FnMut(&LocalImage)) {
+pub fn each_image<O: flow::Origin>(blocks: &[Block<O>], mut f: impl FnMut(&LocalImage)) {
     for block in blocks {
         match &block.kind {
             BlockKind::Image(Image {
@@ -249,7 +251,12 @@ pub fn each_image(blocks: &[Block], mut f: impl FnMut(&LocalImage)) {
 }
 
 /// Requests new figures and image sizes, and evicts the oldest unreferenced beyond `SPARE`.
-pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>) {
+pub fn mark(
+    figures: &mut Figures,
+    documents: &Documents,
+    books: &BookFiles,
+    out: &mut Vec<Effect>,
+) {
     figures.clock += 1;
     let Figures {
         look,
@@ -258,6 +265,22 @@ pub fn mark(figures: &mut Figures, documents: &Documents, out: &mut Vec<Effect>)
         clock,
         ..
     } = figures;
+    for book in books.values() {
+        each_image(&book.flow.flow.blocks, |local| {
+            match images.get_mut(local) {
+                Some(entry) => entry.used = *clock,
+                None => {
+                    let entry = Entry {
+                        render: Probe::Pending,
+                        used: *clock,
+                        filled: 0,
+                    };
+                    images.insert(local.clone(), entry);
+                    out.push(Effect::Job(Job::Probe(local.clone())));
+                }
+            }
+        });
+    }
     for markdown in documents.values().map(|parsed| &parsed.markdown) {
         each_figure(&markdown.blocks, |figure, source| {
             match entries.get_mut(&figure) {
@@ -320,6 +343,18 @@ fn evict<K, R>(entries: &mut HashMap<K, Entry<R>>, clock: u64) {
 }
 
 /// Takes an image's size; a size for an image no longer shown is dropped.
+pub fn settle(figures: &mut Figures, images: Vec<(LocalImage, Probe)>) {
+    figures.generation += 1;
+    for (image, render) in images {
+        let entry = Entry {
+            render,
+            used: figures.clock,
+            filled: figures.generation,
+        };
+        figures.images.insert(image, entry);
+    }
+}
+
 pub fn probed(figures: &mut Figures, image: LocalImage, result: Result<Probed, ProbeError>) {
     match figures.images.get_mut(&image) {
         Some(
@@ -331,7 +366,7 @@ pub fn probed(figures: &mut Figures, image: LocalImage, result: Result<Probed, P
             entry.render = match result {
                 Ok(probed) => Probe::Read(probed),
                 Err(error) => {
-                    tracing::debug!(path = ?image.path, %error, "image size unreadable");
+                    tracing::debug!(place = ?image.place, %error, "image size unreadable");
                     Probe::Failed(Arc::from(error.to_string()))
                 }
             };
@@ -648,7 +683,7 @@ pub fn invalidate(compiles: &mut Compiles, paths: &[PathBuf]) {
 /// Reads again the size of each shown image among `paths`.
 pub fn reprobe(figures: &mut Figures, paths: &[PathBuf], out: &mut Vec<Effect>) {
     let changed = |(image, _): &(&LocalImage, &mut Entry<Probe>)| {
-        paths.iter().any(|path| *path == *image.path)
+        paths.iter().any(|path| path == image.place.file())
     };
     for (image, entry) in figures.images.iter_mut().filter(changed) {
         entry.render = Probe::Pending;

@@ -16,15 +16,19 @@ use crate::git::diffview::{self, RIGHT, Right};
 use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::text::registers::ClipboardUse;
 use crate::view::display::{Fillers, Indent, text_format};
-use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView, Viewport};
+use crate::view::layout::{
+    Layout, NotInLayout, Pane, PaneId, Scroll, Sideways, TextView, Viewport,
+};
 use crate::view::tab::{BesideMut, ShowingMut};
 use crate::{Effect, State};
 
 /// Rows kept between the primary cursor and the viewport edges.
 pub const SCROLLOFF: usize = 5;
+pub const SIDEOFF: u16 = 5;
 
 /// Rows a mouse wheel notch scrolls, as helix's `scroll-lines`.
 pub const WHEEL_LINES: isize = 3;
+pub const WHEEL_COLUMNS: isize = 6;
 
 /// Rows a view shows besides its text: filler rows after lines and above the first line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +133,32 @@ pub fn follow(
     )
 }
 
+pub fn sideways(
+    text: RopeSlice,
+    cursor: usize,
+    scroll: Scroll,
+    format: &TextFormat,
+    annotations: &TextAnnotations,
+) -> Sideways {
+    match scroll.sideways {
+        Sideways::Wrapped => Sideways::Wrapped,
+        Sideways::Unwrapped { left } => {
+            let start = text.line_to_char(text.char_to_line(cursor));
+            let (at, _) =
+                helix_core::visual_offset_from_block(text, start, cursor, format, annotations);
+            let col = at.col as u16;
+            let cols = scroll.viewport.cols;
+            let margin = SIDEOFF.min(cols / 4);
+            let left = match col {
+                col if col < left + margin => col.saturating_sub(margin),
+                col if col + margin >= left + cols => (col + margin + 1).saturating_sub(cols),
+                _ => left,
+            };
+            Sideways::Unwrapped { left }
+        }
+    }
+}
+
 /// Scrolls by `rows` and drags the primary cursor along once it would leave the scrolloff band.
 #[allow(clippy::too_many_arguments)]
 pub fn scroll(
@@ -153,7 +183,7 @@ pub fn scroll(
     let moved = Scroll {
         anchor,
         rows: top,
-        viewport: scroll.viewport,
+        ..scroll
     };
     let dragged = into_band(
         text,
@@ -213,7 +243,10 @@ pub fn char_at(
         text,
         scroll.anchor.min(text.len_chars()),
         scroll.rows + row as isize,
-        col as usize,
+        match scroll.sideways {
+            Sideways::Wrapped => col as usize,
+            Sideways::Unwrapped { left } => (left + col) as usize,
+        },
         format,
         annotations,
     )
@@ -288,72 +321,6 @@ pub fn extend(text: RopeSlice, gesture: Gesture, pos: usize) -> Range {
     }
 }
 
-/// Vertical scrollbar thumb, in the track's units.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Thumb {
-    pub top: f32,
-    pub height: f32,
-}
-
-/// Where a press on the track lands, from the thumb's point of view.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum OnTrack {
-    Above,
-    /// On the thumb, `grab` below its top.
-    Thumb {
-        grab: f32,
-    },
-    Below,
-}
-
-impl Thumb {
-    pub fn hit(self, y: f32) -> OnTrack {
-        match y - self.top {
-            grab if grab < 0.0 => OnTrack::Above,
-            grab if grab > self.height => OnTrack::Below,
-            grab => OnTrack::Thumb { grab },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Scrollbar {
-    /// The whole document is on screen.
-    Hidden,
-    Shown(Thumb),
-}
-
-/// Lines stand in for visual rows, so a soft-wrapped line counts as one.
-pub fn scrollbar(
-    len_lines: usize,
-    visible: std::ops::Range<usize>,
-    track: f32,
-    min_thumb: f32,
-) -> Scrollbar {
-    match (visible.start, visible.end >= len_lines) {
-        (0, true) => Scrollbar::Hidden,
-        _ => {
-            let shown = visible.len().max(1);
-            let height = (track * shown as f32 / len_lines.max(1) as f32)
-                .max(min_thumb)
-                .min(track);
-            let travel = len_lines.saturating_sub(shown).max(1);
-            let top = (track - height) * (visible.start.min(travel) as f32 / travel as f32);
-            Scrollbar::Shown(Thumb { top, height })
-        }
-    }
-}
-
-/// First line to show when a `height` thumb is dragged to `top`; the inverse of `scrollbar`.
-pub fn line_at_thumb(len_lines: usize, shown: usize, height: f32, track: f32, top: f32) -> usize {
-    let travel = len_lines.saturating_sub(shown.max(1));
-    let room = track - height;
-    match room > 0.0 {
-        true => ((top / room).clamp(0.0, 1.0) * travel as f32).round() as usize,
-        false => 0,
-    }
-}
-
 /// A text view, or a diff's buffer side with the diff's filler rows.
 pub struct Pointed<'a> {
     pub view: &'a mut TextView,
@@ -408,16 +375,18 @@ pub fn follow_cursor(state: &mut State, pane: PaneId) {
             right: Right::Live,
         }) => {
             let text = doc.text.slice(..);
-            let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+            let format = text_format(view.scroll, Indent::of(doc, languages));
             let annotations = annotations(text, padding);
+            let cursor = view.selection.primary().cursor(text);
             (view.scroll.anchor, view.scroll.rows) = follow(
                 text,
-                view.selection.primary().cursor(text),
+                cursor,
                 view.scroll,
                 padding.lead,
                 &format,
                 &annotations,
             );
+            view.scroll.sideways = sideways(text, cursor, view.scroll, &format, &annotations);
         }
         // Nothing to follow on an inert side.
         Some(Pointed {
@@ -442,19 +411,16 @@ pub fn fit(
         true => scroll,
         false => {
             let text = doc.text.slice(..);
-            let format = text_format(viewport, Indent::of(doc, languages));
-            let (anchor, rows) = follow(
-                text,
-                selection.primary().cursor(text),
-                Scroll { viewport, ..scroll },
-                padding.lead,
-                &format,
-                &annotations(text, padding),
-            );
+            let resized = Scroll { viewport, ..scroll };
+            let format = text_format(resized, Indent::of(doc, languages));
+            let annotations = annotations(text, padding);
+            let cursor = selection.primary().cursor(text);
+            let (anchor, rows) = follow(text, cursor, resized, padding.lead, &format, &annotations);
             Scroll {
                 anchor,
                 rows,
                 viewport,
+                sideways: sideways(text, cursor, resized, &format, &annotations),
             }
         }
     }
@@ -516,7 +482,7 @@ pub fn wheel(state: &mut State, pane: PaneId, rows: isize) {
         return;
     };
     let text = doc.text.slice(..);
-    let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+    let format = text_format(view.scroll, Indent::of(doc, languages));
     let annotations = annotations(text, padding);
     let (moved, dragged) = scroll(
         text,
@@ -534,6 +500,19 @@ pub fn wheel(state: &mut State, pane: PaneId, rows: isize) {
         (Some(_), Right::Deleted) | (None, _) => {}
     }
     drop(annotations);
+    diffview::sync_left(state, pane);
+}
+
+pub fn wheel_sideways(state: &mut State, pane: PaneId, cols: isize) {
+    let State {
+        layout, buffers, ..
+    } = state;
+    match pane_text(layout, buffers, pane).map(|pointed| &mut pointed.view.scroll.sideways) {
+        Some(Sideways::Unwrapped { left }) => {
+            *left = (*left as isize + cols).clamp(0, u16::MAX as isize) as u16
+        }
+        Some(Sideways::Wrapped) | None => return,
+    }
     diffview::sync_left(state, pane);
 }
 
@@ -560,7 +539,7 @@ fn pointed(
         return None;
     };
     let text = doc.text.slice(..);
-    let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+    let format = text_format(view.scroll, Indent::of(doc, languages));
     let annotations = annotations(text, padding);
     let pos = char_at(text, view.scroll, row, col, &format, &annotations);
     Some((view, doc, pos))
@@ -667,9 +646,9 @@ pub fn scroll_to_line(state: &mut State, pane: PaneId, line: usize) {
     let moved = Scroll {
         anchor: text.line_to_char(line),
         rows: 0,
-        viewport: view.scroll.viewport,
+        ..view.scroll
     };
-    let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+    let format = text_format(view.scroll, Indent::of(doc, languages));
     let annotations = annotations(text, padding);
     let dragged = into_band(
         text,

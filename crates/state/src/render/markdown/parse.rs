@@ -15,11 +15,13 @@ use pulldown_cmark::{
 
 use crate::project::links::{self, Dest, Resolution};
 
-use super::targets::{link_target, locate, percent_decode, vault_image};
+use model::href::percent_decode;
+
+use super::targets::{link_target, locate, vault_image};
 use super::{
     Base, Block, BlockKind, Callout, CalloutFold, Code, Column, Embed, EmbedKind, Emphasis, Figure,
-    FigureKind, Image, Inline, Level, Link, LinkTarget, ListKind, Markdown, Math, Mermaid, RowKind,
-    Span, SpanKind, Task, WikiLink, hash,
+    FigureKind, Flow, Image, InlineBuf, Level, Lines, Link, LinkTarget, ListKind, Markdown, Math,
+    Mermaid, RowKind, SpanKind, Task, WikiLink, hash,
 };
 
 fn figure(kind: FigureKind, text: &str) -> Figure {
@@ -83,52 +85,12 @@ struct Capture {
     alt: String,
 }
 
-#[derive(Default)]
-struct InlineBuf {
-    text: String,
-    spans: Vec<Span>,
-    links: Vec<Link>,
-    link: Option<(usize, LinkTarget)>,
-    /// Spans do not merge across this byte, where a link starts or ends.
-    fence: usize,
-}
-
-impl InlineBuf {
-    fn push(&mut self, text: &str, style: Emphasis, kind: SpanKind) {
-        let start = self.text.len();
-        self.text.push_str(text);
-        let end = self.text.len();
-        match (self.spans.last_mut(), kind) {
-            (Some(last), SpanKind::Text)
-                if last.kind == SpanKind::Text && last.style == style && start != self.fence =>
-            {
-                last.range.end = end
-            }
-            (Some(_), _) | (None, _) => self.spans.push(Span {
-                range: start..end,
-                style,
-                kind,
-            }),
-        }
-    }
-
-    fn take(&mut self) -> Inline {
-        self.link = None;
-        self.fence = 0;
-        Inline {
-            text: Arc::from(std::mem::take(&mut self.text).as_str()),
-            spans: std::mem::take(&mut self.spans).into_boxed_slice(),
-            links: std::mem::take(&mut self.links).into_boxed_slice(),
-        }
-    }
-}
-
 struct Builder<'a> {
     src: &'a str,
     base: Base<'a>,
     /// Byte offset of every line start after the first.
     breaks: Vec<usize>,
-    blocks: Vec<Block>,
+    blocks: Vec<Block<Lines>>,
     open: Vec<Open>,
     inline: InlineBuf,
     sole: Sole,
@@ -158,8 +120,7 @@ impl Builder<'_> {
         let lines = self.lines(&bytes);
         self.blocks.push(Block {
             kind,
-            bytes,
-            lines,
+            origin: Lines { bytes, lines },
             end: index + 1,
         });
         index
@@ -169,9 +130,9 @@ impl Builder<'_> {
         let end_index = self.blocks.len();
         let block = &mut self.blocks[index];
         block.end = end_index;
-        block.bytes.end = end.max(block.bytes.start);
-        let bytes = block.bytes.clone();
-        self.blocks[index].lines = self.lines(&bytes);
+        block.origin.bytes.end = end.max(block.origin.bytes.start);
+        let bytes = block.origin.bytes.clone();
+        self.blocks[index].origin.lines = self.lines(&bytes);
     }
 
     /// Opens an implicit paragraph for text arriving directly in a container.
@@ -712,13 +673,16 @@ impl Builder<'_> {
 /// Parses `text` into blocks; `reuse` lends its buffers and highlight cache to the new parse.
 pub fn parse(text: RopeSlice, base: Base, reuse: Option<Markdown>) -> Markdown {
     let (mut blocks, mut roots, mut hashes, mut highlights, mut source) = match reuse {
-        Some(old) => (
-            old.blocks,
-            old.roots,
-            old.hashes,
-            old.highlights,
-            old.source,
-        ),
+        Some(Markdown {
+            flow:
+                Flow {
+                    blocks,
+                    roots,
+                    hashes,
+                    highlights,
+                },
+            source,
+        }) => (blocks, roots, hashes, highlights, source),
         None => (
             Vec::new(),
             Vec::new(),
@@ -772,7 +736,7 @@ pub fn parse(text: RopeSlice, base: Base, reuse: Option<Markdown>) -> Markdown {
     let mut at = 0;
     while at < blocks.len() {
         roots.push(at);
-        hashes.push(hash(&src[blocks[at].bytes.clone()]));
+        hashes.push(hash(&src[blocks[at].origin.bytes.clone()]));
         at = blocks[at].end;
     }
     let mut live: Vec<u64> = blocks
@@ -785,10 +749,12 @@ pub fn parse(text: RopeSlice, base: Base, reuse: Option<Markdown>) -> Markdown {
     live.sort_unstable();
     highlights.retain(|hash, _| live.binary_search(hash).is_ok());
     Markdown {
-        blocks,
-        roots,
-        hashes,
-        highlights,
+        flow: Flow {
+            blocks,
+            roots,
+            hashes,
+            highlights,
+        },
         source,
     }
 }

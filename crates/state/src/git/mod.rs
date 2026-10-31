@@ -7,16 +7,20 @@ pub mod track;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use git2::build::CheckoutBuilder;
 use git2::{ErrorCode, IndexEntry, IndexTime, ObjectType, Oid, Repository, Status, StatusOptions};
 use helix_core::{Rope, SmallVec, smallvec};
-use model::command::Direction;
+use model::command::{Direction, Shown};
 use model::git::{Change, GitStatus, Group, Kind};
 
 use crate::Repo;
 use crate::git::diff::{Base, BaseRead};
 use crate::project::path::{Folder, RelPath, RelPathError};
+use crate::view::panes::Arrive;
+
+static INDEX: Mutex<()> = Mutex::new(());
 
 /// Change of every non-clean path under the root, plus the status each directory inherits.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -110,6 +114,13 @@ impl Changed {
     /// Sidebar order, and what the list cursor keeps across refreshes.
     pub fn key(&self) -> (Group, &RelPath) {
         (self.entry.group(), &self.path)
+    }
+
+    pub fn arrive(&self) -> Arrive {
+        match self.entry.group() {
+            Group::Conflicts => Arrive::In(Shown::Source),
+            Group::Staged | Group::Changes => Arrive::In(Shown::Diff),
+        }
     }
 }
 
@@ -349,17 +360,47 @@ pub fn read_bases(
     Ok([read(head, known[0])?, read(staged, known[1])?])
 }
 
-/// Index changes made for hunk and file commands.
+#[derive(Clone, Debug)]
+pub struct InRepo {
+    pub file: RepoPath,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct Files {
+    pub first: InRepo,
+    pub rest: Vec<InRepo>,
+}
+
+impl Files {
+    pub fn iter(&self) -> impl Iterator<Item = &InRepo> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum IndexOp {
     /// Replaces the staged text, provided the entry still holds `expected`.
-    Write { expected: Option<Oid>, text: Rope },
-    /// Stages the worktree file, or its deletion.
-    Stage,
-    /// Resets the entry to HEAD.
-    Unstage,
+    Write {
+        at: InRepo,
+        expected: Option<Oid>,
+        text: Rope,
+    },
+    /// Stages the worktree files, or their deletion.
+    Stage(Files),
+    /// Resets the entries to HEAD.
+    Unstage(Files),
     /// Restores the worktree file from the index.
-    Checkout,
+    Checkout(InRepo),
+}
+
+impl IndexOp {
+    pub fn path(&self) -> &Path {
+        match self {
+            IndexOp::Write { at, .. } | IndexOp::Checkout(at) => &at.path,
+            IndexOp::Stage(files) | IndexOp::Unstage(files) => &files.first.path,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -370,12 +411,16 @@ pub enum IndexError {
     Changed,
 }
 
-pub fn change_index(git_dir: &Path, path: &RepoPath, op: &IndexOp) -> Result<(), IndexError> {
+pub fn change_index(git_dir: &Path, op: &IndexOp) -> Result<(), IndexError> {
+    // libgit2 refuses to write the index while another write holds its lock file.
+    let _writing = INDEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let repo = Repository::open(git_dir)?;
-    let file = Path::new(path.0.as_str());
     let mut index = repo.index()?;
     match op {
-        IndexOp::Write { expected, text } => {
+        IndexOp::Write { at, expected, text } => {
+            let file = Path::new(at.file.0.as_str());
             let current = index.get_path(file, 0);
             match current.as_ref().map(|entry| entry.id) == *expected {
                 true => {}
@@ -406,7 +451,7 @@ pub fn change_index(git_dir: &Path, path: &RepoPath, op: &IndexOp) -> Result<(),
                     id: Oid::ZERO_SHA1,
                     flags: 0,
                     flags_extended: 0,
-                    path: path.0.as_str().as_bytes().to_vec(),
+                    path: at.file.0.as_str().as_bytes().to_vec(),
                 },
             };
             let mut bytes = Vec::with_capacity(text.len_bytes());
@@ -416,17 +461,20 @@ pub fn change_index(git_dir: &Path, path: &RepoPath, op: &IndexOp) -> Result<(),
             index.add_frombuffer(&entry, &bytes)?;
             index.write()?;
         }
-        IndexOp::Stage => {
+        IndexOp::Stage(files) => {
             let workdir = repo
                 .workdir()
                 .ok_or_else(|| git2::Error::from_str("repository has no worktree"))?;
-            match workdir.join(file).exists() {
-                true => index.add_path(file)?,
-                false => index.remove_path(file)?,
+            for at in files.iter() {
+                let file = Path::new(at.file.0.as_str());
+                match workdir.join(file).exists() {
+                    true => index.add_path(file)?,
+                    false => index.remove_path(file)?,
+                }
             }
             index.write()?;
         }
-        IndexOp::Unstage => {
+        IndexOp::Unstage(files) => {
             let head = match repo.head().and_then(|head| head.peel_to_commit()) {
                 Ok(commit) => Some(commit.into_object()),
                 Err(error)
@@ -436,17 +484,20 @@ pub fn change_index(git_dir: &Path, path: &RepoPath, op: &IndexOp) -> Result<(),
                 }
                 Err(error) => return Err(error.into()),
             };
+            let paths = files.iter().map(|at| Path::new(at.file.0.as_str()));
             match head {
-                Some(head) => repo.reset_default(Some(&head), [file])?,
+                Some(head) => repo.reset_default(Some(&head), paths)?,
                 None => {
-                    index.remove_path(file)?;
+                    for file in paths {
+                        index.remove_path(file)?;
+                    }
                     index.write()?;
                 }
             }
         }
-        IndexOp::Checkout => {
+        IndexOp::Checkout(at) => {
             let mut checkout = CheckoutBuilder::new();
-            checkout.force().path(file);
+            checkout.force().path(at.file.0.as_str());
             repo.checkout_index(Some(&mut index), Some(&mut checkout))?;
         }
     }

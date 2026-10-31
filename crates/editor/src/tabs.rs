@@ -114,6 +114,7 @@ impl Workspace {
                 },
                 Tab::Ink(_) => Some("✎"),
                 Tab::Image(_) => Some("▣"),
+                Tab::Book(_) => Some("❧"),
             }
             .map(|icon| div().text_color(hsla(theme.muted)).child(icon));
             // Ids from different stores can be equal, so the kind is part of the name.
@@ -123,6 +124,7 @@ impl Workspace {
                 Opened::Board(id) => ("tab-board", "tab-close-board", id.data().as_ffi()),
                 Opened::Pdf(id) => ("tab-pdf", "tab-close-pdf", id.data().as_ffi()),
                 Opened::Image(id) => ("tab-image", "tab-close-image", id.data().as_ffi()),
+                Opened::Book(id) => ("tab-book", "tab-close-book", id.data().as_ffi()),
             };
             let close = div()
                 .id(ElementId::NamedInteger(close_name.into(), key))
@@ -200,7 +202,10 @@ impl Workspace {
                 }))
                 .on_drop(
                     cx.listener(move |this, dragged: &DraggedEntry, window, cx| {
-                        let file = Dragged::File(dragged.path.clone());
+                        let file = Dragged::File {
+                            file: dragged.path.clone(),
+                            arrive: dragged.arrive,
+                        };
                         this.drop_on_tabs(pane, index, file, window, cx)
                     }),
                 )
@@ -252,7 +257,10 @@ impl Workspace {
                 }))
                 .on_drop(
                     cx.listener(move |this, dragged: &DraggedEntry, window, cx| {
-                        let file = Dragged::File(dragged.path.clone());
+                        let file = Dragged::File {
+                            file: dragged.path.clone(),
+                            arrive: dragged.arrive,
+                        };
                         this.drop_on_tabs(pane, end, file, window, cx)
                     }),
                 )

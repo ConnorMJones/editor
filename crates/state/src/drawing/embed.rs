@@ -12,6 +12,7 @@ use ink::tool::{Frame, Picked};
 use model::geom::{Point, Surface, Vector};
 use model::notice::Notice;
 use model::picture::Encoding;
+use model::units::{Pt, Px};
 
 use crate::State;
 use crate::drawing::command::add;
@@ -20,7 +21,6 @@ use crate::view::tab::Tab;
 use crate::viewer::{ProbeError, probe};
 
 /// Points per image pixel, at the usual 96 pixels to the inch.
-pub const POINTS_PER_PIXEL: f32 = 0.75;
 /// The widest part of a page a new image takes.
 pub const PAGE_SHARE: f32 = 0.8;
 
@@ -139,8 +139,9 @@ pub fn place<D: Drawing>(
     read: &Read,
     widest: f32,
 ) -> Result<Picked, Notice> {
-    let natural = read.pixels.width.get() * POINTS_PER_PIXEL;
-    let scale = POINTS_PER_PIXEL * (widest / natural).min(1.0);
+    let per_pixel = Pt::from(Px(1.0)).0;
+    let natural = read.pixels.width.get() * per_pixel;
+    let scale = per_pixel * (widest / natural).min(1.0);
     let extent = PageSize::new(
         read.pixels.width.get() * scale,
         read.pixels.height.get() * scale,

@@ -56,3 +56,22 @@ impl Positive {
         self.0
     }
 }
+
+pub const RUNGS_PER_DOUBLING: f32 = 4.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Rung(pub i32);
+
+impl Rung {
+    pub fn up(value: f32) -> Rung {
+        Rung((value.log2() * RUNGS_PER_DOUBLING).ceil() as i32)
+    }
+
+    pub fn down(value: f32) -> Rung {
+        Rung((value.log2() * RUNGS_PER_DOUBLING).floor() as i32)
+    }
+
+    pub fn value(self) -> f32 {
+        (self.0 as f32 / RUNGS_PER_DOUBLING).exp2()
+    }
+}

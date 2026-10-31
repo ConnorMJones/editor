@@ -55,7 +55,7 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
                 .apply(Point::new(x, y))
         }
         Some(Tab::Ink(InkTabs::Pdf(tab))) => {
-            let stack = h.state.pdfs[tab.file()].ink.edited.drawing().stack();
+            let stack = h.state.pdfs[tab.file()].pages();
             tab.view
                 .frame(stack, viewport())
                 .to_pane
@@ -64,7 +64,7 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             tab.view.frame(viewport()).to_pane.apply(Point::new(x, y))
         }
-        Some(Tab::Text(_) | Tab::Image(_)) | None => panic!("no drawing is focused"),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => panic!("no drawing is focused"),
     }
 }
 
@@ -106,7 +106,7 @@ fn marks(h: &Harness) -> usize {
             let drawing = h.state.pdfs[tab.file()].ink.edited.drawing();
             drawing.marks(FIRST).unwrap().len()
         }
-        Some(Tab::Text(_) | Tab::Image(_)) | None => panic!("no drawing is focused"),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => panic!("no drawing is focused"),
     }
 }
 

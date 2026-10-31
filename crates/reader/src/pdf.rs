@@ -18,11 +18,11 @@ use hayro::vello_cpu::color::palette::css::WHITE;
 use kurbo::{Affine, BezPath, Rect};
 use model::geom::{Point, Surface};
 use model::sheet::{PageSize, Stack};
+use model::units::Rung;
 
 pub mod revise;
 
 pub const TILE: u16 = 512;
-pub const LEVELS_PER_DOUBLING: f32 = 4.0;
 pub const FINEST: Level = Level(40);
 pub const OUTLINE_ENTRIES: usize = 100_000;
 
@@ -211,18 +211,18 @@ pub struct Bgra {
 
 impl Level {
     pub fn covering(pixels_per_point: f32) -> Level {
-        let level = (pixels_per_point.log2() * LEVELS_PER_DOUBLING).ceil();
-        Level(level.clamp(f32::from(i8::MIN), f32::from(FINEST.0)) as i8)
+        let Rung(level) = Rung::up(pixels_per_point);
+        Level(level.clamp(i32::from(i8::MIN), i32::from(FINEST.0)) as i8)
     }
 
     pub fn whole_page(size: PageSize) -> Level {
         let longest = size.width.get().max(size.height.get());
-        let level = ((f32::from(TILE) / longest).log2() * LEVELS_PER_DOUBLING).floor();
-        Level(level.clamp(f32::from(i8::MIN), f32::from(FINEST.0)) as i8)
+        let Rung(level) = Rung::down(f32::from(TILE) / longest);
+        Level(level.clamp(i32::from(i8::MIN), i32::from(FINEST.0)) as i8)
     }
 
     pub fn pixels_per_point(self) -> f32 {
-        (f32::from(self.0) / LEVELS_PER_DOUBLING).exp2()
+        Rung(i32::from(self.0)).value()
     }
 }
 

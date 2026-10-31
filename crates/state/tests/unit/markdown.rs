@@ -9,8 +9,9 @@ use state::project::links::{Index, Resolution};
 use state::project::path::RelPath;
 use state::project::path::{FileKind, TextKind};
 use state::render::markdown::{
-    self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, ImageFile, Level,
-    LinkTarget, ListKind, LocalImage, Markdown, RowKind, SpanKind, Task, WikiLink,
+    self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, ImageFile,
+    ImagePlace, Level, LinkTarget, ListKind, LocalImage, Markdown, RowKind, SpanKind, Task,
+    WikiLink,
 };
 
 fn parse(text: &str) -> Markdown {
@@ -149,7 +150,7 @@ fn blocks_keep_source_lines() {
         .iter()
         .map(|root| {
             let block = &parsed.blocks[*root];
-            (name(&block.kind), block.lines.clone())
+            (name(&block.kind), block.origin.lines.clone())
         })
         .collect();
     assert_eq!(lines[0], ("frontmatter", 0..3));
@@ -475,11 +476,11 @@ fn images_resolve_against_the_note_then_the_root() {
         files,
         [
             &ImageFile::Local(LocalImage {
-                path: dir.path().join("notes/near.png").into(),
+                place: ImagePlace::File(dir.path().join("notes/near.png").into()),
                 encoding: Encoding::Bitmap(Bitmap::Png),
             }),
             &ImageFile::Local(LocalImage {
-                path: dir.path().join("far.png").into(),
+                place: ImagePlace::File(dir.path().join("far.png").into()),
                 encoding: Encoding::Bitmap(Bitmap::Png),
             }),
             &ImageFile::Missing,
@@ -573,7 +574,7 @@ fn tables_keep_alignment_rows_and_cells() {
             (RowKind::Body, vec!["4", "5", "6"]),
         ]
     );
-    assert_eq!(parsed.blocks[0].lines, 0..4);
+    assert_eq!(parsed.blocks[0].origin.lines, 0..4);
 }
 
 #[test]

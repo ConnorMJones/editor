@@ -191,16 +191,7 @@ fn with_md(name: &str) -> String {
 /// `rest` applied to folder `base`; `None` when `..` climbs out of the vault or it lands on the
 /// root itself.
 fn normalize(base: &str, rest: &str) -> Option<RelPath> {
-    let mut parts: SmallVec<[&str; 8]> = base.split('/').filter(|part| !part.is_empty()).collect();
-    for part in rest.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            part => parts.push(part),
-        }
-    }
+    let parts = model::href::normalize(base, rest)?;
     RelPath::parse(&parts.join("/")).ok()
 }
 
@@ -233,7 +224,7 @@ pub fn heading_line(doc: &TextDoc, parsed: Option<&Markdown>, heading: &str) -> 
     match parsed {
         Some(parsed) => parsed.blocks.iter().find_map(|block| match &block.kind {
             BlockKind::Heading { text, .. } if slug(&text.text) == wanted => {
-                Some(block.lines.start)
+                Some(block.origin.lines.start)
             }
             _ => None,
         }),

@@ -14,7 +14,7 @@ use model::sheet::Viewport;
 use crate::State;
 use crate::drawing::command::commit;
 use crate::drawing::frame::{self, Landed};
-use crate::drawing::reading;
+use crate::drawing::pdf_text;
 use crate::drawing::typing::{self, Ended};
 use crate::drawing::{Doing, Gesture, Hand, InkFile, InkTabs, PdfMode, Pen};
 use crate::view::layout::PaneId;
@@ -92,7 +92,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                 )
             }
             PdfMode::Read(reading) => {
-                reading::pen(reading, &tab.view, &pdfs[tab.file], phase, sample);
+                pdf_text::pen(reading, &tab.view, &pdfs[tab.file], phase, sample);
                 Ok(())
             }
         },
@@ -109,7 +109,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                 |board, layer| frame::board(board, &view, viewport).land::<Board>(at, layer),
             )
         }
-        Some(Tab::Text(_) | Tab::Image(_)) | None => Ok(()),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => Ok(()),
     };
     match result {
         Ok(()) => {}

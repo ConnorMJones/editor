@@ -33,6 +33,10 @@ hayro-interpret = { version = "0.7.0", default-features = false }
 pdf-writer = "0.15.0"
 hayro-write = "0.7.0"
 miniz_oxide = "0.8.9"
+# EPUB package, navigation and chapters; the version already in the build.
+roxmltree = "0.21.1"
+# Stylesheets of EPUB chapters; the version usvg uses.
+simplecss = "0.2.2"
 pic-scale = { version = "0.7.9", default-features = false, features = ["neon", "rdm", "sse", "avx"] }
 vello_cpu = { version = "0.0.8", default-features = false, features = ["std", "png", "u8_pipeline"] }
 kurbo = "0.13.1"

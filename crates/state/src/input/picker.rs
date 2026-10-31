@@ -14,18 +14,17 @@ use model::window::{Axis, Side};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 
-use library::{Annotation, Comment, Highlight, LibraryError, Lost, Quote, SearchHit};
+use library::{Annotation, Comment, Highlight, LibraryError, Lost, Place, Quote, SearchHit};
 use model::notice::Notice;
-use reader::pdf::Heading;
 
-use crate::drawing::PdfId;
+use crate::reading::{ReaderId, ReaderKind};
 
 use crate::project::path::RelPath;
 use crate::text::buffer::{BufferId, TextDoc};
 use crate::{Effect, Overlay, State};
 
 pub const MAX_HITS: usize = 10_000;
-const MAX_LINE: usize = 240;
+pub const MAX_LINE: usize = 240;
 
 pub struct Picker {
     pub query: String,
@@ -47,13 +46,24 @@ pub enum Items {
     Commands,
     Grep(Grep),
     Backlinks(Referrers),
-    Outline(Vec<Heading>),
+    Outline(Outline),
     Notebook(Notebook),
     Annotations(AnnotationSearch),
 }
 
+pub struct Outline {
+    pub file: ReaderId,
+    pub entries: Vec<OutlineEntry>,
+}
+
+pub struct OutlineEntry {
+    pub title: String,
+    pub depth: usize,
+    pub at: Option<Place>,
+}
+
 pub struct Notebook {
-    pub file: PdfId,
+    pub file: ReaderId,
     pub entries: Vec<(Annotation, String)>,
 }
 
@@ -115,7 +125,7 @@ impl Items {
             Items::Commands => PALETTE.len(),
             Items::Grep(grep) => grep.hits.len(),
             Items::Backlinks(referrers) => referrers.hits.len(),
-            Items::Outline(headings) => headings.len(),
+            Items::Outline(outline) => outline.entries.len(),
             Items::Notebook(notebook) => notebook.entries.len(),
             Items::Annotations(found) => found.hits.len(),
         }
@@ -134,7 +144,7 @@ impl Items {
             Items::Commands => PALETTE[index].0,
             Items::Grep(grep) => &grep.hits[index].text,
             Items::Backlinks(referrers) => referrers.hits[index].path.as_str(),
-            Items::Outline(headings) => &headings[index].title,
+            Items::Outline(outline) => &outline.entries[index].title,
             Items::Notebook(notebook) => &notebook.entries[index].1,
             Items::Annotations(found) => &found.hits[index].1,
         }
@@ -287,7 +297,7 @@ pub fn grep(
                 path: file.clone(),
                 line,
                 column,
-                text: text.trim().chars().take(MAX_LINE).collect(),
+                text: line_text(&text),
             });
             match hits.len() >= MAX_HITS {
                 true => return (hits, Search::Truncated),
@@ -517,7 +527,9 @@ pub fn annotations_found(
                 };
                 found.hits = (hits.into_iter())
                     .map(|hit| {
-                        let label = format!("{}  {}", hit.path.as_str(), label(&hit.annotation));
+                        let kind = ReaderKind::of(std::path::Path::new(hit.path.as_str()));
+                        let label =
+                            format!("{}  {}", hit.path.as_str(), label(&hit.annotation, kind));
                         (hit, label)
                     })
                     .collect();
@@ -538,8 +550,15 @@ pub fn annotations_found(
     }
 }
 
-pub fn label(annotation: &Annotation) -> String {
-    let page = annotation.place().0.0 + 1;
+pub fn line_text(text: &str) -> String {
+    text.trim().chars().take(MAX_LINE).collect()
+}
+
+pub fn label(annotation: &Annotation, file: ReaderKind) -> String {
+    let page = match file {
+        ReaderKind::Pdf => format!("p. {}", annotation.place().part.0 + 1),
+        ReaderKind::Book => format!("ch. {}", annotation.place().part.0 + 1),
+    };
     let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let quoted = |quote: &Quote, comment: &Option<Comment>| {
         let comment = comment.as_ref().map_or(String::new(), |comment| {
@@ -549,12 +568,12 @@ pub fn label(annotation: &Annotation) -> String {
     };
     match annotation {
         Annotation::Highlight(Highlight { quote, comment, .. }) => {
-            format!("p. {page}  {}", quoted(quote, comment))
+            format!("{page}  {}", quoted(quote, comment))
         }
         Annotation::Lost(Lost { quote, comment, .. }) => {
-            format!("p. {page} (lost)  {}", quoted(quote, comment))
+            format!("{page} (lost)  {}", quoted(quote, comment))
         }
-        Annotation::Bookmark(_) => format!("p. {page}  bookmark"),
+        Annotation::Bookmark(_) => format!("{page}  bookmark"),
     }
 }
 

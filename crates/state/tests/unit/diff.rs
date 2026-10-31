@@ -1,3 +1,4 @@
+use crate::harness::hunk;
 use std::path::Path;
 
 use git2::Oid;
@@ -11,17 +12,13 @@ use state::git::diff::{
 };
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Fillers, Focus, Frame, RowKind, Shade};
-use state::view::layout::{Scroll, Viewport};
+use state::view::layout::{Scroll, Sideways, Viewport};
 
 fn blob(byte: u8, text: &str) -> Base {
     Base::Blob {
         oid: Oid::from_bytes(&[byte; 20]).unwrap(),
         text: Rope::from(text),
     }
-}
-
-fn hunk(before: std::ops::Range<u32>, after: std::ops::Range<u32>) -> Hunk {
-    Hunk { before, after }
 }
 
 /// HEAD-to-text hunks, with the index equal to HEAD.
@@ -231,6 +228,7 @@ fn fillers_insert_virtual_rows_and_shades_colour_lines() {
             anchor: 0,
             rows: 0,
             viewport: Viewport { rows: 7, cols: 40 },
+            sideways: Sideways::Wrapped,
         },
         &loader,
         Focus::Focused(Mode::Normal),
@@ -279,6 +277,7 @@ fn virtual_rows_fill_the_viewport_end() {
             anchor: 0,
             rows: 0,
             viewport: Viewport { rows: 4, cols: 40 },
+            sideways: Sideways::Wrapped,
         },
         &loader,
         Focus::Unfocused,

@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,12 +10,12 @@ use gpui::{
     WeakEntity, Window, canvas, prelude::*,
 };
 use helix_core::SmallVec;
-use model::picture::{Bitmap, Encoding, Picture, Source};
+use model::picture::{Encoding, Picture, Source};
+use model::units::Rung;
 
 use crate::workspace::Workspace;
 
 pub const PICTURE_BYTES_KEPT: usize = 256 << 20;
-pub const STEPS_PER_DOUBLING: f32 = 4.0;
 
 #[derive(Default)]
 pub struct Pictures {
@@ -42,6 +41,7 @@ pub enum Drawn {
 pub enum SourceKey {
     File(Arc<Path>, SystemTime),
     Bytes(usize),
+    Zipped(Arc<Path>, SystemTime, Arc<str>),
 }
 
 pub struct Entry {
@@ -68,6 +68,15 @@ impl SourceKey {
                 source: Source::Bytes(bytes),
                 ..
             }) => SourceKey::Bytes(Arc::as_ptr(bytes) as *const u8 as usize),
+            Drawn::Picture(Picture {
+                source:
+                    Source::Zipped {
+                        archive,
+                        modified,
+                        name,
+                    },
+                ..
+            }) => SourceKey::Zipped(archive.clone(), *modified, name.clone()),
         }
     }
 }
@@ -123,7 +132,7 @@ pub fn decoded(
     };
     let size = {
         let width = size.width.0 as f32;
-        let snapped = ((width.log2() * STEPS_PER_DOUBLING).ceil() / STEPS_PER_DOUBLING).exp2();
+        let snapped = Rung::up(width).value();
         let grow =
             |side: i32| DevicePixels(((side as f32) * snapped / width).round().max(1.0) as i32);
         Size {
@@ -211,6 +220,10 @@ pub fn decode(
             read = std::fs::read(path)?;
             &read
         }
+        Source::Zipped { archive, name, .. } => {
+            read = reader::zip::Archive::open(std::fs::File::open(archive)?)?.read(name)?;
+            &read
+        }
         Source::Bytes(bytes) => bytes,
     };
     match picture.encoding {
@@ -219,15 +232,7 @@ pub fn decode(
             Ok(renderer.render_parsed(&tree, SvgSize::ExactSize(size))?)
         }
         Encoding::Bitmap(bitmap) => {
-            let format = match bitmap {
-                Bitmap::Png => image::ImageFormat::Png,
-                Bitmap::Jpeg => image::ImageFormat::Jpeg,
-                Bitmap::Webp => image::ImageFormat::WebP,
-                Bitmap::Gif => image::ImageFormat::Gif,
-                Bitmap::Bmp => image::ImageFormat::Bmp,
-            };
-            let mut decoder =
-                image::ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
+            let mut decoder = state::viewer::decoder(bytes, bitmap)?;
             let orientation = image::ImageDecoder::orientation(&mut decoder)?;
             let mut image = image::DynamicImage::from_decoder(decoder)?;
             image.apply_orientation(orientation);
@@ -255,29 +260,17 @@ pub fn evict(pictures: &mut Pictures, window: &mut Window, cx: &mut App) {
             (Decoded::Failed, false) => false,
             (Decoded::Failed, true) | (Decoded::Pending | Decoded::Ready(_), _) => true,
         });
-    let bytes = |image: &RenderImage| {
-        let size = image.size(0);
-        size.width.0 as usize * size.height.0 as usize * 4
-    };
-    let mut ready: Vec<(u64, PictureKey, usize)> = (pictures.entries.iter())
-        .filter_map(|(key, entry)| match &entry.image {
-            Decoded::Ready(image) => Some((entry.drawn, key.clone(), bytes(image))),
+    let trimmed = crate::budget::keep_within(
+        &mut pictures.entries,
+        PICTURE_BYTES_KEPT,
+        |entry| frame.saturating_sub(entry.drawn),
+        |entry| match &entry.image {
+            Decoded::Ready(image) => Some(image),
             Decoded::Pending | Decoded::Failed => None,
-        })
-        .collect();
-    let mut kept: usize = ready.iter().map(|(_, _, bytes)| bytes).sum();
-    ready.sort_by_key(|(drawn, ..)| *drawn);
-    for (_, key, bytes) in ready.into_iter().filter(|(drawn, ..)| *drawn < frame) {
-        match kept.checked_sub(PICTURE_BYTES_KEPT) {
-            Some(1..) => {}
-            Some(0) | None => break,
-        }
-        match pictures.entries.remove(&key).map(|entry| entry.image) {
-            Some(Decoded::Ready(image)) => cx.drop_image(image, Some(window)),
-            Some(Decoded::Pending | Decoded::Failed) | None => {}
-        }
-        kept -= bytes;
-    }
-    let _span = tracing::trace_span!("pictures kept", bytes = kept).entered();
+        },
+        window,
+        cx,
+    );
+    let _span = tracing::trace_span!("pictures kept", bytes = trimmed.kept).entered();
     pictures.frame += 1;
 }

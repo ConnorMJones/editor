@@ -12,6 +12,8 @@ use slotmap::{SlotMap, new_key_type};
 use crate::text::buffer::Disk;
 use model::sheet::Measure;
 
+pub const SIZE_WITHIN: usize = 64 * 1024;
+
 new_key_type! {
     pub struct ImageId;
 }
@@ -86,6 +88,19 @@ pub enum ProbeError {
     Svg(#[from] usvg::Error),
     #[error("the image has no area")]
     Empty,
+    #[error("{0}")]
+    Zip(#[from] reader::zip::ZipError),
+}
+
+pub fn decoder(bytes: &[u8], bitmap: Bitmap) -> image::ImageResult<impl image::ImageDecoder + '_> {
+    let format = match bitmap {
+        Bitmap::Png => image::ImageFormat::Png,
+        Bitmap::Jpeg => image::ImageFormat::Jpeg,
+        Bitmap::Webp => image::ImageFormat::WebP,
+        Bitmap::Gif => image::ImageFormat::Gif,
+        Bitmap::Bmp => image::ImageFormat::Bmp,
+    };
+    image::ImageReader::with_format(Cursor::new(bytes), format).into_decoder()
 }
 
 /// The size an image shows at, in pixels, read from its header without decoding it.
@@ -96,15 +111,7 @@ pub fn probe(bytes: &[u8], encoding: Encoding) -> Result<PageSize, ProbeError> {
             (tree.size().width(), tree.size().height())
         }
         Encoding::Bitmap(bitmap) => {
-            let format = match bitmap {
-                Bitmap::Png => image::ImageFormat::Png,
-                Bitmap::Jpeg => image::ImageFormat::Jpeg,
-                Bitmap::Webp => image::ImageFormat::WebP,
-                Bitmap::Gif => image::ImageFormat::Gif,
-                Bitmap::Bmp => image::ImageFormat::Bmp,
-            };
-            let mut decoder =
-                image::ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
+            let mut decoder = decoder(bytes, bitmap)?;
             let (width, height) = image::ImageDecoder::dimensions(&decoder);
             // A camera's quarter turn swaps the sides the picture shows with.
             match image::ImageDecoder::orientation(&mut decoder)? {
@@ -120,6 +127,20 @@ pub fn probe(bytes: &[u8], encoding: Encoding) -> Result<PageSize, ProbeError> {
         }
     };
     PageSize::new(width, height).map_err(|_| ProbeError::Empty)
+}
+
+pub fn probe_zipped(
+    archive: &reader::zip::Archive,
+    name: &str,
+    encoding: Encoding,
+    modified: SystemTime,
+) -> Result<Probed, ProbeError> {
+    let bytes = match encoding {
+        Encoding::Bitmap(_) => archive.head(name, SIZE_WITHIN)?,
+        Encoding::Svg => archive.read(name)?,
+    };
+    let size = probe(&bytes, encoding)?;
+    Ok(Probed { size, modified })
 }
 
 /// An image file's size as read, and the time that names those pixels.

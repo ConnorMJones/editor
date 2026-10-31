@@ -73,6 +73,11 @@ pub enum Source {
         modified: SystemTime,
     },
     Bytes(Arc<[u8]>),
+    Zipped {
+        archive: Arc<Path>,
+        modified: SystemTime,
+        name: Arc<str>,
+    },
 }
 
 impl std::fmt::Debug for Source {
@@ -80,6 +85,7 @@ impl std::fmt::Debug for Source {
         match self {
             Source::File { path, .. } => write!(f, "File({path:?})"),
             Source::Bytes(bytes) => write!(f, "Bytes({} bytes)", bytes.len()),
+            Source::Zipped { archive, name, .. } => write!(f, "Zipped({archive:?}, {name})"),
         }
     }
 }

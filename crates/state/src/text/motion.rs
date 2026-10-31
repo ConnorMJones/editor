@@ -18,7 +18,7 @@ use crate::apply::{
 };
 use crate::git::diffview::Right;
 use crate::view::display::{Indent, text_format};
-use crate::view::layout::{Edited, Viewport};
+use crate::view::layout::{Edited, Scroll};
 use crate::view::scroll::{self, Pointed, SCROLLOFF};
 
 pub fn direction(direction: Direction) -> movement::Direction {
@@ -43,18 +43,19 @@ pub fn motion(state: &mut State, motion: Motion) {
     let count = count_of(state);
     let behaviour = movement_of(state);
     let extend = behaviour == Movement::Extend;
-    let viewport = match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
+    let shown = match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
         Some(FocusedText { view, .. }) => match view.edited {
-            Edited::Buffer { scroll, .. } => scroll.viewport,
+            Edited::Buffer { scroll, .. } => *scroll,
             // A drawing's text is not drawn in cells, so it has no soft wrap or pages.
-            Edited::Mark => Viewport::default(),
+            Edited::Mark => Scroll::default(),
         },
         None => return,
     };
+    let viewport = shown.viewport;
     // Same format as drawn, so visual lines follow soft wrap.
     let vertical = |state: &mut State, f: MoveFn, dir: Direction| {
         select(state, |doc, selection, loader| {
-            let format = text_format(viewport, Indent::of(doc, loader));
+            let format = text_format(shown, Indent::of(doc, loader));
             let mut annotations = TextAnnotations::default();
             let text = doc.text.slice(..);
             selection.clone().transform(|range| {
@@ -198,7 +199,7 @@ pub fn motion(state: &mut State, motion: Motion) {
                 return;
             };
             let text = doc.text.slice(..);
-            let format = text_format(viewport, Indent::of(doc, languages));
+            let format = text_format(shown, Indent::of(doc, languages));
             let annotations = scroll::annotations(text, padding);
             let anchor = view.scroll.anchor.min(text.len_chars());
             let height = viewport.rows as usize;
@@ -385,7 +386,7 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
     };
     let text = doc.text.slice(..);
     let viewport = view.scroll.viewport;
-    let format = text_format(viewport, Indent::of(doc, languages));
+    let format = text_format(view.scroll, Indent::of(doc, languages));
     let padded = scroll::annotations(text, padding);
     let height = viewport.rows as isize;
     let sign = match dir {
@@ -462,7 +463,7 @@ pub fn align_view(state: &mut State, align: Align) {
         return;
     };
     let text = doc.text.slice(..);
-    let format = text_format(view.scroll.viewport, Indent::of(doc, languages));
+    let format = text_format(view.scroll, Indent::of(doc, languages));
     let annotations = scroll::annotations(text, padding);
     let last_row = view.scroll.viewport.rows.saturating_sub(1) as isize;
     let row = match align {

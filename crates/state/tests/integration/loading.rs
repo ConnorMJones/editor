@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use helix_core::Selection;
 use model::command::{Command, PickerCommand, PickerKind};
@@ -9,11 +8,7 @@ use state::job::{self, Job};
 use state::text::buffer::{Disk, Position, Target};
 use state::{Effect, State};
 
-use crate::harness::Harness;
-
-fn canonical(dir: &Path, rel: &str) -> std::path::PathBuf {
-    dir.canonicalize().unwrap().join(rel)
-}
+use crate::harness::{Harness, canonical};
 
 /// Applies `command` without running the jobs it queues.
 fn apply_held(state: &mut State, command: Command) -> Vec<Effect> {

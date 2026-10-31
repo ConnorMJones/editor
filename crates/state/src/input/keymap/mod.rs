@@ -27,10 +27,11 @@ pub enum Context {
     DrawingText,
     PdfRead,
     PdfMarkup,
+    Book,
 }
 
 impl Context {
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
     pub const ALL: [Context; Context::COUNT] = [
         Context::Normal,
         Context::Insert,
@@ -48,6 +49,7 @@ impl Context {
         Context::DrawingText,
         Context::PdfRead,
         Context::PdfMarkup,
+        Context::Book,
     ];
 }
 
@@ -154,6 +156,7 @@ impl Keymap {
             drawing_text,
             pdf_read,
             pdf_markup,
+            book,
         ] = Context::ALL;
         Ok(Keymap {
             tries: [
@@ -173,6 +176,7 @@ impl Keymap {
                 build_trie(drawing_text)?,
                 build_trie(pdf_read)?,
                 build_trie(pdf_markup)?,
+                build_trie(book)?,
             ],
         })
     }

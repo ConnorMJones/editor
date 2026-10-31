@@ -1,20 +1,25 @@
 pub mod annotation;
+pub mod text;
 
+use std::borrow::Cow;
+use std::fs::File;
 use std::hash::Hasher;
 use std::io::{self, Write};
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use model::sheet::PageIndex;
 use reader::pdf::Document;
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 use siphasher::sip128::{Hasher128, SipHasher13};
 use uuid::Uuid;
 
 pub use annotation::{
-    Annotation, AnnotationId, Bookmark, Change, Comment, Highlight, Lost, Notebook, Quote, TextSpan,
+    Annotation, AnnotationId, Bookmark, Change, Comment, Highlight, Lost, Notebook, Quote,
 };
+pub use text::{Part, PartText, Place, TextSpan, Texts};
 
 pub const FOLDER: &str = ".edt";
 pub const FILE: &str = "library.db";
@@ -30,8 +35,9 @@ CREATE TABLE documents (
     path TEXT NOT NULL UNIQUE,
     hash BLOB NOT NULL,
     size INTEGER NOT NULL,
-    pages INTEGER NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0,
+    parts INTEGER NOT NULL,
+    position_part INTEGER NOT NULL DEFAULT 0,
+    position_char INTEGER NOT NULL DEFAULT 0,
     markup INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX documents_hash ON documents(hash);
@@ -39,7 +45,7 @@ CREATE TABLE annotations (
     id BLOB PRIMARY KEY,
     document INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     kind INTEGER NOT NULL,
-    page INTEGER NOT NULL,
+    part INTEGER NOT NULL,
     start INTEGER,
     end INTEGER,
     exact TEXT,
@@ -65,7 +71,7 @@ CREATE TRIGGER annotations_changed AFTER UPDATE ON annotations BEGIN
 END;
 ";
 
-const COLUMNS: &str = "id, kind, page, start, end, exact, prefix, suffix, comment";
+const COLUMNS: &str = "id, kind, part, start, end, exact, prefix, suffix, comment";
 
 const HIGHLIGHT: i64 = 0;
 const BOOKMARK: i64 = 1;
@@ -75,14 +81,33 @@ pub struct FastHash(pub [u8; 16]);
 
 impl FastHash {
     pub fn of(bytes: &[u8]) -> FastHash {
+        let Ok(hash) = FastHash::sampled(bytes.len(), |range| {
+            Ok::<_, std::convert::Infallible>(Cow::Borrowed(&bytes[range]))
+        });
+        hash
+    }
+
+    pub fn read(file: &File) -> io::Result<FastHash> {
+        let length = file.metadata()?.len() as usize;
+        FastHash::sampled(length, |range| {
+            let mut chunk = vec![0; range.len()];
+            file.read_exact_at(&mut chunk, range.start as u64)?;
+            Ok(Cow::Owned(chunk))
+        })
+    }
+
+    fn sampled<'a, E>(
+        length: usize,
+        mut chunk: impl FnMut(Range<usize>) -> Result<Cow<'a, [u8]>, E>,
+    ) -> Result<FastHash, E> {
         let mut hasher = SipHasher13::new();
-        hasher.write(&(bytes.len() as u64).to_le_bytes());
-        hasher.write(&bytes[..CHUNK.min(bytes.len())]);
-        for start in (STRIDE..bytes.len()).step_by(STRIDE) {
-            hasher.write(&bytes[start..(start + CHUNK).min(bytes.len())]);
+        hasher.write(&(length as u64).to_le_bytes());
+        hasher.write(&chunk(0..CHUNK.min(length))?);
+        for start in (STRIDE..length).step_by(STRIDE) {
+            hasher.write(&chunk(start..(start + CHUNK).min(length))?);
         }
-        hasher.write(&bytes[bytes.len().saturating_sub(CHUNK)..]);
-        FastHash(hasher.finish128().as_bytes())
+        hasher.write(&chunk(length.saturating_sub(CHUNK)..length)?);
+        Ok(FastHash(hasher.finish128().as_bytes()))
     }
 }
 
@@ -130,7 +155,7 @@ pub struct Listed {
     pub id: DocumentId,
     pub identity: Identity,
     pub notebook: Notebook,
-    pub position: PageIndex,
+    pub position: Place,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +183,7 @@ pub enum LibraryError {
 pub enum Malformed {
     Id,
     Kind,
-    Page,
+    Part,
     Span,
     Quote,
 }
@@ -245,11 +270,13 @@ impl Library {
     pub fn identify(
         &self,
         path: &LibPath,
-        document: &Arc<Document>,
+        hash: FastHash,
+        size: u64,
+        texts: &dyn Texts,
     ) -> Result<Listed, LibraryError> {
-        let hash = FastHash::of(&document.bytes);
-        let size = document.bytes.len() as i64;
-        let pages = document.pages.sizes().len() as i64;
+        let size = size as i64;
+        let parts = texts.parts() as i64;
+        let last = Part(texts.parts().saturating_sub(1));
         self.with(|connection| {
             let tx = connection.transaction()?;
             let at_path = (tx.query_row(
@@ -280,8 +307,8 @@ impl Library {
                         }
                         None => {
                             tx.execute(
-                                "INSERT INTO documents (path, hash, size, pages) VALUES (?1, ?2, ?3, ?4)",
-                                params![path.0, &hash.0[..], size, pages],
+                                "INSERT INTO documents (path, hash, size, parts) VALUES (?1, ?2, ?3, ?4)",
+                                params![path.0, &hash.0[..], size, parts],
                             )?;
                             (tx.last_insert_rowid(), Identity::New)
                         }
@@ -296,23 +323,29 @@ impl Library {
                     .map(|row| row?)
                     .collect::<Result<Vec<_>, _>>()?
             };
-            let last = document.pages.last();
-            let at: i64 = tx.query_row(
-                "SELECT position FROM documents WHERE id = ?1",
+            let (part, char): (i64, i64) = tx.query_row(
+                "SELECT position_part, position_char FROM documents WHERE id = ?1",
                 [id.0],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            let position = usize::try_from(at)
-                .map(|page| PageIndex(page.min(last.0)))
-                .map_err(|_| LibraryError::Malformed(Malformed::Page))?;
+            let position = match (usize::try_from(part), usize::try_from(char)) {
+                (Ok(part), Ok(char)) => Place {
+                    part: Part(part).min(last),
+                    char,
+                },
+                (Err(_), _) | (_, Err(_)) => return Err(LibraryError::Malformed(Malformed::Part)),
+            };
             let notebook = match identity {
                 Identity::Changed => {
                     let reanchored: Vec<Annotation> = (stored.into_iter())
                         .map(|annotation| match annotation {
-                            Annotation::Highlight(highlight) => highlight.reanchor(document),
-                            Annotation::Lost(lost) => lost.reanchor(document),
+                            Annotation::Highlight(highlight) => highlight.reanchor(texts),
+                            Annotation::Lost(lost) => lost.reanchor(texts),
                             Annotation::Bookmark(bookmark) => Annotation::Bookmark(Bookmark {
-                                page: PageIndex(bookmark.page.0.min(last.0)),
+                                at: Place {
+                                    part: bookmark.at.part.min(last),
+                                    ..bookmark.at
+                                },
                                 ..bookmark
                             }),
                         })
@@ -321,8 +354,8 @@ impl Library {
                         put(&tx, id, annotation)?;
                     }
                     tx.execute(
-                        "UPDATE documents SET hash = ?1, size = ?2, pages = ?3 WHERE id = ?4",
-                        params![&hash.0[..], size, pages, id.0],
+                        "UPDATE documents SET hash = ?1, size = ?2, parts = ?3 WHERE id = ?4",
+                        params![&hash.0[..], size, parts, id.0],
                     )?;
                     reanchored.into_iter().collect()
                 }
@@ -369,7 +402,7 @@ impl Library {
         };
         self.with(|connection| {
             connection.execute(
-                "UPDATE documents SET hash = ?1, size = ?2, pages = ?3, markup = ?4 WHERE id = ?5",
+                "UPDATE documents SET hash = ?1, size = ?2, parts = ?3, markup = ?4 WHERE id = ?5",
                 params![
                     &hash.0[..],
                     written.bytes.len() as i64,
@@ -397,11 +430,11 @@ impl Library {
         })
     }
 
-    pub fn keep_place(&self, document: DocumentId, page: PageIndex) -> Result<(), LibraryError> {
+    pub fn keep_place(&self, document: DocumentId, at: Place) -> Result<(), LibraryError> {
         self.with(|connection| {
             connection.execute(
-                "UPDATE documents SET position = ?1 WHERE id = ?2",
-                params![page.0 as i64, document.0],
+                "UPDATE documents SET position_part = ?1, position_char = ?2 WHERE id = ?3",
+                params![at.part.0 as i64, at.char as i64, document.0],
             )?;
             Ok(())
         })
@@ -439,9 +472,9 @@ fn annotation(row: &Row<'_>, from: usize) -> Result<Annotation, LibraryError> {
     let id = Uuid::from_slice(&row.get::<_, Vec<u8>>(from)?)
         .map(AnnotationId)
         .map_err(|_| LibraryError::Malformed(Malformed::Id))?;
-    let page = PageIndex(
+    let part = Part(
         usize::try_from(row.get::<_, i64>(from + 2)?)
-            .map_err(|_| LibraryError::Malformed(Malformed::Page))?,
+            .map_err(|_| LibraryError::Malformed(Malformed::Part))?,
     );
     let index = |at: usize| -> Result<Option<usize>, LibraryError> {
         (row.get::<_, Option<i64>>(from + at)?)
@@ -465,7 +498,7 @@ fn annotation(row: &Row<'_>, from: usize) -> Result<Annotation, LibraryError> {
                 (Some(start), Some(end)) if start < end => Ok(Annotation::Highlight(Highlight {
                     id,
                     span: TextSpan {
-                        page,
+                        part,
                         chars: start..end,
                     },
                     quote,
@@ -473,7 +506,7 @@ fn annotation(row: &Row<'_>, from: usize) -> Result<Annotation, LibraryError> {
                 })),
                 (None, None) => Ok(Annotation::Lost(Lost {
                     id,
-                    page,
+                    part,
                     quote,
                     comment,
                 })),
@@ -482,7 +515,13 @@ fn annotation(row: &Row<'_>, from: usize) -> Result<Annotation, LibraryError> {
                 }
             }
         }
-        BOOKMARK => Ok(Annotation::Bookmark(Bookmark { id, page })),
+        BOOKMARK => Ok(Annotation::Bookmark(Bookmark {
+            id,
+            at: Place {
+                part,
+                char: index(3)?.unwrap_or(0),
+            },
+        })),
         _ => Err(LibraryError::Malformed(Malformed::Kind)),
     }
 }
@@ -492,7 +531,7 @@ fn put(
     document: DocumentId,
     annotation: &Annotation,
 ) -> Result<(), LibraryError> {
-    let (kind, page, span, quote, comment) = match annotation {
+    let (kind, part, (start, end), quote, comment) = match annotation {
         Annotation::Highlight(Highlight {
             span,
             quote,
@@ -500,23 +539,31 @@ fn put(
             ..
         }) => (
             HIGHLIGHT,
-            span.page,
-            Some(&span.chars),
+            span.part,
+            (Some(span.chars.start), Some(span.chars.end)),
             Some(quote),
             comment.as_ref(),
         ),
         Annotation::Lost(Lost {
-            page,
+            part,
             quote,
             comment,
             ..
-        }) => (HIGHLIGHT, *page, None, Some(quote), comment.as_ref()),
-        Annotation::Bookmark(Bookmark { page, .. }) => (BOOKMARK, *page, None, None, None),
+        }) => (
+            HIGHLIGHT,
+            *part,
+            (None, None),
+            Some(quote),
+            comment.as_ref(),
+        ),
+        Annotation::Bookmark(Bookmark { at, .. }) => {
+            (BOOKMARK, at.part, (Some(at.char), None), None, None)
+        }
     };
     tx.execute(
         &format!(
             "INSERT INTO annotations (document, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, page = excluded.page,
+             ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, part = excluded.part,
                 start = excluded.start, end = excluded.end, exact = excluded.exact,
                 prefix = excluded.prefix, suffix = excluded.suffix, comment = excluded.comment"
         ),
@@ -524,9 +571,9 @@ fn put(
             document.0,
             &annotation.id().0.as_bytes()[..],
             kind,
-            page.0 as i64,
-            span.map(|span| span.start as i64),
-            span.map(|span| span.end as i64),
+            part.0 as i64,
+            start.map(|start| start as i64),
+            end.map(|end| end as i64),
             quote.map(Quote::exact),
             quote.map(|quote| quote.prefix.as_str()),
             quote.map(|quote| quote.suffix.as_str()),

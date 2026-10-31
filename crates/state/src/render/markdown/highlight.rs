@@ -4,13 +4,13 @@ use helix_core::syntax::{HighlightEvent, Loader};
 use helix_core::{Rope, Syntax};
 use model::theme::{self};
 
-use super::{BlockKind, Markdown, Run};
+use super::{BlockKind, Flow, Markdown, Run};
 
 /// Highlights code blocks missing from the cache, by their fence language.
 pub fn highlight(markdown: &mut Markdown, loader: &Loader) {
-    let Markdown {
+    let Flow {
         blocks, highlights, ..
-    } = markdown;
+    } = &mut markdown.flow;
     for block in blocks.iter() {
         let BlockKind::Code(code) = &block.kind else {
             continue;

@@ -4,14 +4,13 @@ use gpui::{
     AnyElement, Context, Div, ElementId, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PenEvent, Pixels, ScrollWheelEvent, canvas, div, prelude::*, px,
 };
-use library::Comment;
-use model::command::{Annotate, Command, DrawingCommand, PdfCommand};
+
 use model::window::Axis;
 use slotmap::Key as _;
-use state::apply;
 use state::drawing::frame;
 use state::drawing::pen::{PenPhase, Stylus};
-use state::drawing::{InkTabs, PdfMode, Reading};
+use state::drawing::{InkTabs, PdfMode};
+use state::git::diffview::DiffShown;
 
 use state::view::layout::{Node, Pane, SplitPath};
 use state::view::mode;
@@ -21,6 +20,7 @@ use state::view::tab::{Beside, Share, Showing, Tab};
 use super::{Drag, Workspace};
 use crate::drawing::{self, DrawingElement};
 use crate::fonts::hsla;
+use crate::reading::{self, Offer};
 use crate::sheet::SheetElement;
 use crate::text::TextElement;
 use state::view::draws::Part;
@@ -63,122 +63,52 @@ impl Workspace {
                     (Some(tabs), Some(scroll)) => Some(self.tab_bar(pane, tabs, scroll, cx)),
                     (Some(_) | None, _) => None,
                 };
-                let element = |part: Part| TextElement {
-                    workspace: cx.entity(),
-                    pane,
-                    part,
-                };
                 let popup = match target.and_then(Pane::active) {
                     Some(Tab::Ink(InkTabs::Pdf(tab))) => {
                         let file = &self.state.pdfs[tab.file()];
-                        let offer = match &tab.mode {
-                            PdfMode::Read(Reading::Selected(span)) => {
-                                Some((span, Offer::Selection))
+                        let shown = match &tab.mode {
+                            PdfMode::Read(reading) => {
+                                Offer::of(reading).zip(reading.shown(file.document()))
                             }
-                            PdfMode::Read(Reading::OnHighlight(highlight)) => Some((
-                                &highlight.span,
-                                Offer::Highlight(highlight.comment.as_ref()),
-                            )),
-                            PdfMode::Read(Reading::Idle | Reading::Selecting { .. })
-                            | PdfMode::Markup => None,
+                            PdfMode::Markup => None,
                         };
-                        let corner = offer.as_ref().and_then(|(span, _)| {
-                            let text = file.document().text(span.page.0)?;
+                        let corner = shown.as_ref().and_then(|(_, span)| {
+                            let text = file.document().text(span.part.0)?;
                             let last = text.chars.get(span.chars.end.checked_sub(1)?)?;
-                            Some((span.page, last.quad[0]))
+                            Some((model::sheet::PageIndex(span.part.0), last.quad[0]))
                         });
-                        match (offer, corner, tab.hand.last) {
-                            (Some((_, offer)), Some((page, corner)), Some(measure)) => {
+                        match (shown, corner, tab.hand.last) {
+                            (Some((offer, _)), Some((page, corner)), Some(measure)) => {
                                 let paged = file.ink.edited.drawing();
                                 let frame = frame::paged(paged, &tab.view, measure.viewport);
                                 frame.on(page).map(|shown| {
                                     let at = shown.to_pane.apply(corner);
-                                    let theme = &self.theme;
-                                    let button = |label: &'static str, command: PdfCommand| {
-                                        div()
-                                            .id(label)
-                                            .px(self.fonts.ui_size * 0.6)
-                                            .rounded_sm()
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(hsla(theme.chrome.hover)))
-                                            .child(label)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(
-                                                    move |this, _: &MouseDownEvent, _, cx| {
-                                                        cx.stop_propagation();
-                                                        apply::apply(
-                                                            &mut this.state,
-                                                            Command::Drawing(DrawingCommand::Pdf(
-                                                                command,
-                                                            )),
-                                                            &mut this.effects,
-                                                        );
-                                                        this.changed(cx);
-                                                    },
-                                                ),
-                                            )
-                                    };
-                                    let buttons = div()
-                                        .h(self.fonts.ui_line * 1.2)
-                                        .flex()
-                                        .items_center()
-                                        .gap(self.fonts.ui_size * 0.2);
-                                    let (comment, buttons) = match offer {
-                                        Offer::Selection => (
-                                            None,
-                                            buttons
-                                                .child(button(
-                                                    "Highlight",
-                                                    PdfCommand::Annotate(Annotate::Highlight),
-                                                ))
-                                                .child(button(
-                                                    "Comment",
-                                                    PdfCommand::Annotate(Annotate::Comment),
-                                                ))
-                                                .child(button("Copy", PdfCommand::Copy))
-                                                .child(button("Search", PdfCommand::FindSelection)),
-                                        ),
-                                        Offer::Highlight(comment) => (
-                                            comment,
-                                            buttons
-                                                .child(button(
-                                                    "Edit comment",
-                                                    PdfCommand::Annotate(Annotate::Comment),
-                                                ))
-                                                .child(button(
-                                                    "Delete",
-                                                    PdfCommand::Annotate(Annotate::Remove),
-                                                )),
-                                        ),
-                                    };
-                                    div()
+                                    reading::popup(self, offer, cx)
                                         .absolute()
                                         .left(px(at.x))
                                         .top(px(at.y) + self.fonts.ui_line * 0.3)
-                                        .max_w(self.fonts.ui_size * 28.0)
-                                        .flex()
-                                        .flex_col()
-                                        .px(self.fonts.ui_size * 0.2)
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(hsla(theme.chrome.border))
-                                        .bg(hsla(theme.surface))
-                                        .text_color(hsla(theme.text))
-                                        .text_size(self.fonts.ui_size)
-                                        .children(comment.map(|comment| {
-                                            div()
-                                                .px(self.fonts.ui_size * 0.6)
-                                                .py(self.fonts.ui_size * 0.3)
-                                                .child(comment.as_str().to_owned())
-                                        }))
-                                        .child(buttons)
                                 })
                             }
                             (_, _, _) => None,
                         }
                     }
+                    Some(Tab::Book(tab)) => Offer::of(&tab.reading).map(|offer| {
+                        div()
+                            .absolute()
+                            .bottom(self.fonts.ui_line)
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .child(reading::popup(self, offer, cx))
+                    }),
                     Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => None,
+                };
+                let entity = cx.entity();
+                let element = |part: Part| TextElement {
+                    workspace: entity.clone(),
+                    pane,
+                    part,
                 };
                 let body = match target.and_then(Pane::active) {
                     Some(Tab::Ink(_)) => div().flex_1().min_h_0().overflow_hidden().child(
@@ -285,113 +215,74 @@ impl Workspace {
                         workspace: cx.entity(),
                         pane,
                     }),
-                    Some(Tab::Text(view)) => {
-                        match view.showing() {
-                            Showing::Source(_) => div()
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .child(element(Part::Text)),
-                            // Equal halves, so both sides wrap at the same width.
-                            Showing::Diff(..) => div()
-                                .flex_1()
-                                .min_h_0()
-                                .flex()
-                                .flex_row()
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(element(Part::Head)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(1.))
-                                        .bg(hsla(self.theme.chrome.border)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(element(Part::Buffer)),
-                                ),
-                            Showing::Document(_, _, Beside::Source(_, share))
-                            | Showing::Pages(_, _, Beside::Source(_, share)) => {
-                                let least = self.fonts.cell.width * SPLIT_MIN_COLUMNS;
-                                let areas = self.areas.clone();
-                                let side = |grow: f32| {
-                                    let mut side =
-                                        div().min_w(least).flex_basis(px(0.)).overflow_hidden();
-                                    side.style().flex_grow = Some(grow);
-                                    side
-                                };
+                    Some(Tab::Book(_)) => div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .bg(hsla(self.theme.background))
+                        .child(crate::rendered::body(self, pane, cx)),
+                    Some(Tab::Text(view)) => match view.showing() {
+                        Showing::Source(_) => div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(element(Part::Text)),
+                        Showing::Diff(text, sides) => {
+                            let buffer = &self.state.buffers[text.buffer()];
+                            let whole = |part: Part| {
                                 div()
                                     .flex_1()
                                     .min_h_0()
-                                    .relative()
-                                    .flex()
-                                    .flex_row()
                                     .overflow_hidden()
-                                    .child(
-                                        canvas(
-                                            move |bounds, _, _| {
-                                                areas.splits.borrow_mut().insert(pane, bounds);
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .absolute()
-                                        .size_full(),
-                                    )
-                                    .child(side(share.get()).child(element(Part::Text)))
-                                    .child(
-                                        divider(Axis::Row, hsla(self.theme.chrome.border))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(
-                                                    move |this, event: &MouseDownEvent, _, cx| {
-                                                        match event.click_count {
-                                                            2 => mode::drag(
-                                                                &mut this.state,
-                                                                pane,
-                                                                Share::EVEN,
-                                                            ),
-                                                            _ => this.drag = Drag::Split { pane },
-                                                        }
-                                                        cx.stop_propagation();
-                                                        cx.notify();
-                                                    },
-                                                ),
-                                            ),
-                                    )
-                                    .child(
-                                        side(1.0 - share.get())
-                                            .flex()
-                                            .flex_col()
-                                            .overflow_hidden()
-                                            .bg(hsla(self.theme.background))
-                                            .child(crate::rendered::body(self, pane, cx)),
-                                    )
+                                    .child(element(part))
+                            };
+                            match sides.shown(buffer) {
+                                DiffShown::Both => self.split_body(
+                                    pane,
+                                    sides.share,
+                                    element(Part::Head).into_any_element(),
+                                    element(Part::Buffer).into_any_element(),
+                                    cx,
+                                ),
+                                DiffShown::Head => whole(Part::Head),
+                                DiffShown::Buffer => whole(Part::Buffer),
                             }
-                            Showing::Document(_, _, Beside::Alone)
-                            | Showing::Pages(_, _, Beside::Alone) => div()
-                                .flex_1()
-                                .min_h_0()
+                        }
+                        Showing::Document(_, _, Beside::Source(_, share))
+                        | Showing::Pages(_, _, Beside::Source(_, share)) => {
+                            let rendered = div()
                                 .flex()
                                 .flex_col()
+                                .size_full()
                                 .overflow_hidden()
                                 .bg(hsla(self.theme.background))
-                                .child(crate::rendered::body(self, pane, cx)),
+                                .child(crate::rendered::body(self, pane, cx))
+                                .into_any_element();
+                            self.split_body(
+                                pane,
+                                share,
+                                element(Part::Text).into_any_element(),
+                                rendered,
+                                cx,
+                            )
                         }
-                    }
+                        Showing::Document(_, _, Beside::Alone)
+                        | Showing::Pages(_, _, Beside::Alone) => div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .bg(hsla(self.theme.background))
+                            .child(crate::rendered::body(self, pane, cx)),
+                    },
                     None => div().flex_1(),
                 };
                 let body = body
                     .relative()
-                    .children(crate::sheet_bar::sheet_bar(self, pane, cx));
+                    .children(crate::scroll_bar::pane_bar(self, pane, cx));
                 div()
                     .flex_1()
                     .flex()
@@ -461,7 +352,53 @@ impl Workspace {
     }
 }
 
-enum Offer<'a> {
-    Selection,
-    Highlight(Option<&'a Comment>),
+impl Workspace {
+    fn split_body(
+        &self,
+        pane: state::view::layout::PaneId,
+        share: Share,
+        left: AnyElement,
+        right: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let least = self.fonts.cell.width * SPLIT_MIN_COLUMNS;
+        let areas = self.areas.clone();
+        let side = |grow: f32| {
+            let mut side = div().min_w(least).flex_basis(px(0.)).overflow_hidden();
+            side.style().flex_grow = Some(grow);
+            side
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .flex_row()
+            .overflow_hidden()
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        areas.splits.borrow_mut().insert(pane, bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(side(share.get()).child(left))
+            .child(
+                divider(Axis::Row, hsla(self.theme.chrome.border)).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        match event.click_count {
+                            2 => mode::drag(&mut this.state, pane, Share::EVEN),
+                            _ => this.drag = Drag::Split { pane },
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(side(1.0 - share.get()).flex().flex_col().child(right))
+    }
 }

@@ -74,8 +74,6 @@ pub enum Read {
     Gone,
 }
 
-const MAX_LINE: usize = 240;
-
 /// Appends the wikilinks, embeds and relative links of markdown `src` to `out`.
 pub fn extract(src: &str, out: &mut Vec<OutLink>) {
     let mut line = 0u32;
@@ -130,7 +128,7 @@ pub fn extract(src: &str, out: &mut Vec<OutLink>) {
             key,
             line,
             column: src[line_start..range.start].chars().count() as u32,
-            text: src[line_start..end].trim().chars().take(MAX_LINE).collect(),
+            text: crate::input::picker::line_text(&src[line_start..end]),
             dest,
         });
     }

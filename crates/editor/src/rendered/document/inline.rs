@@ -1,30 +1,31 @@
 //! Text within a block: styled runs, links, and math flowing on a shared baseline.
 
 use gpui::{
-    AnyElement, App, ClickEvent, InteractiveText, IntoElement, SharedString, StrikethroughStyle,
-    StyledText, TextRun, UnderlineStyle, WeakEntity, Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, InteractiveText, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, SharedString, StrikethroughStyle, StyledText, TextRun,
+    UnderlineStyle, WeakEntity, Window, div, prelude::*, px,
 };
+use helix_core::SmallVec;
 use model::theme::{Modifiers, Theme};
 use model::typeset::{Display, Svg};
 use model::units::Px;
-use state::project::links::{self, Origin as LinkOrigin};
+use state::book::Pressed;
+use state::reading::Press;
 use state::render::markdown::{Emphasis, Figure, FigureKind, Inline, Span, SpanKind};
 use state::render::typeset::Render;
-use state::text::buffer::BufferId;
 use state::view::layout::PaneId;
 
 use super::super::update;
-use super::Draw;
 use super::Ink;
 use super::media::figure_element;
+use super::{Draw, Drawable};
 use crate::fonts::{Fonts, hsla};
 use crate::pictures::picture_canvas;
 use crate::workspace::Workspace;
 
-/// Follows link `link` of block `index`'s text, looked up again at click time.
-fn follow_link(
+fn follow_link<O: Drawable>(
     workspace: &WeakEntity<Workspace>,
-    buffer: BufferId,
+    key: O::Key,
     pane: PaneId,
     index: usize,
     link: usize,
@@ -32,50 +33,106 @@ fn follow_link(
     cx: &mut App,
 ) {
     update(workspace, window, cx, |this| {
-        let state = &this.state;
-        let target = (state.buffers.get(buffer).map(|buffer| &buffer.doc))
-            .and_then(|doc| state::render::document::markdown(&state.documents, buffer, doc))
-            .and_then(|parsed| parsed.blocks.get(index))
+        let target = O::flow(&this.state, key)
+            .and_then(|flow| flow.blocks.get(index))
             .and_then(|block| block.inline())
             .and_then(|text| text.links.get(link))
             .map(|link| link.target.clone());
         match target {
-            Some(target) => links::follow(
-                &mut this.state,
-                buffer,
-                &target,
-                LinkOrigin::Document(pane),
-                &mut this.effects,
-            ),
+            Some(target) => O::follow(this, key, pane, &target),
             None => {}
         }
     });
 }
 
 /// Styled text with clickable links; with math it flows as words and formulas on one baseline.
-pub fn inline(draw: &Draw, text: &Inline, index: usize, ink: Ink, base: Modifiers) -> AnyElement {
+pub fn inline<O: Drawable>(
+    draw: &Draw<O>,
+    text: &Inline<O::Target>,
+    index: usize,
+    ink: Ink,
+    base: Modifiers,
+) -> AnyElement {
     let theme = draw.theme;
     let fonts = draw.fonts;
     let flows = (text.spans.iter()).any(|span| matches!(span.kind, SpanKind::Math(_)));
     match flows {
         false => {
-            let runs: Vec<TextRun> = (text.spans.iter())
-                .map(|span| run(theme, fonts, span, ink, base))
-                .collect();
+            let tints = (draw.marked)(index);
+            let mut runs: Vec<TextRun> = Vec::with_capacity(text.spans.len() + 2 * tints.len());
+            for span in text.spans.iter() {
+                let whole = run(theme, fonts, span, ink, base);
+                let mut cuts: SmallVec<[usize; 8]> = (tints.iter())
+                    .flat_map(|(range, _)| [range.start, range.end])
+                    .filter(|cut| span.range.start < *cut && *cut < span.range.end)
+                    .collect();
+                cuts.push(span.range.end);
+                cuts.sort_unstable();
+                cuts.dedup();
+                let mut from = span.range.start;
+                for cut in cuts {
+                    let tinted = (tints.iter().rev())
+                        .find(|(range, _)| range.start <= from && from < range.end)
+                        .map(|(_, color)| *color);
+                    runs.push(TextRun {
+                        len: cut - from,
+                        background_color: tinted.or(whole.background_color),
+                        ..whole.clone()
+                    });
+                    from = cut;
+                }
+            }
             let styled = StyledText::new(SharedString::from(text.text.clone())).with_runs(runs);
-            match text.links.is_empty() {
+            let layout = styled.layout().clone();
+            let shown = match text.links.is_empty() {
                 true => styled.into_any_element(),
                 false => {
                     let ranges = text.links.iter().map(|link| link.range.clone()).collect();
-                    let (workspace, buffer, pane) =
-                        (draw.workspace.clone(), draw.buffer, draw.pane);
+                    let (workspace, key, pane) = (draw.workspace.clone(), draw.key, draw.pane);
                     InteractiveText::new(("links", index), styled)
                         .on_click(ranges, move |link, window, cx| {
                             cx.stop_propagation();
-                            follow_link(&workspace, buffer, pane, index, link, window, cx);
+                            follow_link::<O>(&workspace, key, pane, index, link, window, cx);
                         })
                         .into_any_element()
                 }
+            };
+            match O::book(draw.key) {
+                Some(book) => {
+                    let (workspace, pane) = (draw.workspace.clone(), draw.pane);
+                    let pressed = move |press: Press,
+                                        at: Point<Pixels>,
+                                        window: &mut Window,
+                                        cx: &mut App| {
+                        let byte = layout
+                            .index_for_position(at)
+                            .unwrap_or_else(|nearest| nearest);
+                        update(&workspace, window, cx, |this| {
+                            let at = Pressed { block: index, byte };
+                            state::book::press(&mut this.state, pane, book, Some(at), press)
+                        });
+                    };
+                    let moved = pressed.clone();
+                    div()
+                        .id(("text", index))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                pressed(Press::Down, event.position, window, cx)
+                            },
+                        )
+                        .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                            match event.pressed_button {
+                                Some(MouseButton::Left) => {
+                                    moved(Press::Move, event.position, window, cx)
+                                }
+                                Some(_) | None => {}
+                            }
+                        })
+                        .child(shown)
+                        .into_any_element()
+                }
+                None => shown,
             }
         }
         true => {
@@ -110,14 +167,13 @@ pub fn inline(draw: &Draw, text: &Inline, index: usize, ink: Ink, base: Modifier
                 {
                     None => piece.child(styled).into_any_element(),
                     Some(link) => {
-                        let (workspace, buffer, pane) =
-                            (draw.workspace.clone(), draw.buffer, draw.pane);
+                        let (workspace, key, pane) = (draw.workspace.clone(), draw.key, draw.pane);
                         piece
                             .id(("link", range.start))
                             .cursor_pointer()
                             .on_click(move |_: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
-                                follow_link(&workspace, buffer, pane, index, link, window, cx);
+                                follow_link::<O>(&workspace, key, pane, index, link, window, cx);
                             })
                             .child(styled)
                             .into_any_element()
@@ -230,13 +286,21 @@ fn run(theme: &Theme, fonts: &Fonts, span: &Span, ink: Ink, base: Modifiers) -> 
         font,
         color,
         background_color: background,
-        underline: match style.contains(Emphasis::LINK) {
-            true => Some(UnderlineStyle {
+        underline: match (
+            style.contains(Emphasis::LINK),
+            style.contains(Emphasis::UNDERLINE),
+        ) {
+            (true, _) => Some(UnderlineStyle {
                 thickness: px(1.),
                 color: Some(link),
                 wavy: false,
             }),
-            false => None,
+            (false, true) => Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
+            (false, false) => None,
         },
         strikethrough: match struck {
             true => Some(StrikethroughStyle {

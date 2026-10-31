@@ -1,3 +1,4 @@
+mod book;
 mod clipboard;
 mod conflict;
 mod diffview;
@@ -18,3 +19,5 @@ mod vault;
 mod viewer;
 mod window;
 mod workspace;
+#[path = "../../../reader/tests/support/zip.rs"]
+mod zip_writer;

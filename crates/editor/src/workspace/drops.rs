@@ -5,9 +5,6 @@ use gpui::{
     Bounds, Context, Div, DragMoveEvent, ExternalPaths, Hsla, Pixels, Stateful, Window, div,
     prelude::*, relative,
 };
-use model::geom::Point;
-use model::sheet::Viewport;
-use model::units::Px;
 use model::window::Side;
 use slotmap::Key as _;
 use state::view::layout::PaneId;
@@ -16,6 +13,7 @@ use state::view::panes::{self, Dragged, DropOn, PanePoint, Zone};
 use super::Workspace;
 use super::sidebar::DraggedEntry;
 use crate::fonts::hsla;
+use crate::pane_space;
 
 /// A tab being dragged to another place in its bar, another pane, or a pane's edge.
 pub struct DraggedTab {
@@ -61,7 +59,15 @@ impl Workspace {
             )
             .on_drop(
                 cx.listener(move |this, dragged: &DraggedEntry, window, cx| {
-                    this.drop_on_pane(pane, Dragged::File(dragged.path.clone()), window, cx)
+                    this.drop_on_pane(
+                        pane,
+                        Dragged::File {
+                            file: dragged.path.clone(),
+                            arrive: dragged.arrive,
+                        },
+                        window,
+                        cx,
+                    )
                 }),
             )
             .on_drop(
@@ -92,15 +98,9 @@ impl Workspace {
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let viewport = Viewport::new(
-            Px(f32::from(bounds.size.width)),
-            Px(f32::from(bounds.size.height)),
-        );
-        let over = (viewport.filter(|_| bounds.contains(&position))).map(|viewport| {
-            let at = Point::new(
-                f32::from(position.x - bounds.origin.x),
-                f32::from(position.y - bounds.origin.y),
-            );
+        let viewport = pane_space::viewport(bounds).filter(|_| bounds.contains(&position));
+        let over = viewport.map(|viewport| {
+            let at = pane_space::pane_point(bounds, position);
             (pane, Zone::at(PanePoint { at, viewport }))
         });
         let before = self.drop_zone;

@@ -1,4 +1,4 @@
-use gpui::{Font, Hsla, Pixels, Rgba, Size, font, px};
+use gpui::{Font, Hsla, Pixels, Rgba, Size, TextRun, font, px};
 use model::config::FontConfig;
 use model::theme::{Color, Modifiers};
 
@@ -58,6 +58,17 @@ impl Fonts {
 
     pub fn mono_font(&self, modifiers: Modifiers) -> &Font {
         &self.mono[(modifiers & (Modifiers::BOLD | Modifiers::ITALIC)).bits() as usize]
+    }
+
+    pub fn mono_run(&self, len: usize, color: Hsla) -> TextRun {
+        TextRun {
+            len,
+            font: self.mono[0].clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
     }
 }
 

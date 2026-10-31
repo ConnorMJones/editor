@@ -253,3 +253,24 @@ fn a_drawing_over_a_pdf_has_its_pages_and_keeps_them() {
     };
     assert!(matches!(blank.apply(pdf_page), Err(ChangeError::PdfPages)));
 }
+
+#[test]
+fn a_pattern_stays_on_the_surface_wherever_the_area_begins() {
+    use ink::doc::{Pattern, Spacing};
+    use ink::geom::{Point, Rect, Surface};
+    let spacing = Spacing::new(10.0).unwrap();
+    let rows = |from: f32| -> Vec<f32> {
+        let area =
+            Rect::<Surface>::spanning(Point::new(from, from), Point::new(from + 35.0, from + 35.0));
+        (Pattern::Lines.rects(spacing, area).iter())
+            .map(|line| (line.min().y + line.max().y) / 2.0)
+            .collect()
+    };
+    assert_eq!(rows(0.0), [10.0, 20.0, 30.0]);
+    assert_eq!(
+        rows(3.0),
+        [10.0, 20.0, 30.0],
+        "panning keeps the lines where they were"
+    );
+    assert_eq!(rows(-7.0), [0.0, 10.0, 20.0]);
+}

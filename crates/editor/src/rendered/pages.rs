@@ -40,9 +40,7 @@ pub fn header(
                 ..
             } => format!(
                 "{}:{}:{}: ",
-                path.strip_prefix(state.project.root.path())
-                    .unwrap_or(path)
-                    .display(),
+                state.project.root.label(path),
                 start.line + 1,
                 start.column + 1
             ),

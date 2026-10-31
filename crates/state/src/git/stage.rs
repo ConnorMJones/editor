@@ -9,7 +9,7 @@ use model::notice::Notice;
 
 use crate::apply::{edit, exit_select_mode};
 use crate::git::diff::{Bases, Hunk, Side, intersecting, splice};
-use crate::git::{IndexError, IndexOp, locate};
+use crate::git::{Files, InRepo, IndexError, IndexOp, locate};
 use crate::job::{FsOp, Job};
 use crate::project::path::RelPath;
 use crate::project::watch;
@@ -26,22 +26,41 @@ pub enum Discard {
     Delete(RelPath),
 }
 
-/// Queues `op` on the index entry of `path`; `None` with a notice outside the repository.
-fn index_job(state: &mut State, path: &Path, op: IndexOp) -> Option<Job> {
-    match locate(&state.project.git, path) {
-        Some((git_dir, file)) => Some(Job::GitIndex {
-            git_dir,
-            file,
-            path: path.to_owned(),
-            op,
-        }),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staging {
+    Stage,
+    Unstage,
+}
+
+fn in_repo(state: &mut State, path: PathBuf) -> Option<(PathBuf, InRepo)> {
+    match locate(&state.project.git, &path) {
+        Some((git_dir, file)) => Some((git_dir, InRepo { file, path })),
         None => {
-            state.notice = Some(Notice::NotTracked {
-                path: path.to_owned(),
-            });
+            state.notice = Some(Notice::NotTracked { path });
             None
         }
     }
+}
+
+pub fn stage_files(
+    state: &mut State,
+    paths: impl IntoIterator<Item = PathBuf>,
+    staging: Staging,
+    out: &mut Vec<Effect>,
+) {
+    let mut found = paths.into_iter().filter_map(|path| in_repo(state, path));
+    let Some((git_dir, first)) = found.next() else {
+        return;
+    };
+    let files = Files {
+        first,
+        rest: found.map(|(_, at)| at).collect(),
+    };
+    let op = match staging {
+        Staging::Stage => IndexOp::Stage(files),
+        Staging::Unstage => IndexOp::Unstage(files),
+    };
+    out.push(Effect::Job(Job::GitIndex { git_dir, op }))
 }
 
 /// Stages, unstages or reverts the hunks touched by the focused view's selections.
@@ -91,21 +110,27 @@ pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
         }
     };
     let path = entry.path.clone();
-    let write = |onto: &Rope, side: Side| IndexOp::Write {
-        expected: tracked.index.oid(),
-        text: splice(&tracked.index.text(), onto, picked.iter(), side),
+    let expected = tracked.index.oid();
+    let write = |onto: &Rope, side: Side| splice(&tracked.index.text(), onto, picked.iter(), side);
+    let write_job = |state: &mut State, text: Rope| {
+        in_repo(state, path).map(|(git_dir, at)| {
+            Effect::Job(Job::GitIndex {
+                git_dir,
+                op: IndexOp::Write { at, expected, text },
+            })
+        })
     };
     match (op, picked.as_slice()) {
         (HunkOp::Stage | HunkOp::Unstage | HunkOp::Revert, []) => {
             state.notice = Some(Notice::NoHunks)
         }
         (HunkOp::Stage, _) => {
-            let write = write(&doc.text, Side::Before);
-            out.extend(index_job(state, &path, write).map(Effect::Job))
+            let text = write(&doc.text, Side::Before);
+            out.extend(write_job(state, text))
         }
         (HunkOp::Unstage, _) => {
-            let write = write(&tracked.head.text(), Side::After);
-            out.extend(index_job(state, &path, write).map(Effect::Job))
+            let text = write(&tracked.head.text(), Side::After);
+            out.extend(write_job(state, text))
         }
         (HunkOp::Revert, _) => {
             let head = tracked.head.text();
@@ -134,14 +159,8 @@ pub fn hunk_op(state: &mut State, op: HunkOp, out: &mut Vec<Effect>) {
 pub fn file_op(state: &mut State, op: FileOp, out: &mut Vec<Effect>) {
     let resolve = |path: &Path| helix_stdx::path::normalize(state.project.root.path().join(path));
     match op {
-        FileOp::Stage(path) => {
-            let path = resolve(&path);
-            out.extend(index_job(state, &path, IndexOp::Stage).map(Effect::Job))
-        }
-        FileOp::Unstage(path) => {
-            let path = resolve(&path);
-            out.extend(index_job(state, &path, IndexOp::Unstage).map(Effect::Job))
-        }
+        FileOp::Stage(path) => stage_files(state, [resolve(&path)], Staging::Stage, out),
+        FileOp::Unstage(path) => stage_files(state, [resolve(&path)], Staging::Unstage, out),
         FileOp::Discard(path) => {
             let path = resolve(&path);
             let change = match (
@@ -183,9 +202,12 @@ pub fn file_op(state: &mut State, op: FileOp, out: &mut Vec<Effect>) {
 /// Runs a confirmed discard.
 pub fn discard(state: &mut State, path: PathBuf, how: Discard, out: &mut Vec<Effect>) {
     match how {
-        Discard::Checkout => {
-            out.extend(index_job(state, &path, IndexOp::Checkout).map(Effect::Job))
-        }
+        Discard::Checkout => out.extend(in_repo(state, path).map(|(git_dir, at)| {
+            Effect::Job(Job::GitIndex {
+                git_dir,
+                op: IndexOp::Checkout(at),
+            })
+        })),
         Discard::Delete(file) => out.push(Effect::Job(Job::Fs {
             root: state.project.root.path().to_owned(),
             op: FsOp::Remove {
@@ -199,14 +221,14 @@ pub fn discard(state: &mut State, path: PathBuf, how: Discard, out: &mut Vec<Eff
 /// A finished index change refreshes git; a checkout also reloads the file like a disk change.
 pub fn indexed(
     state: &mut State,
-    path: PathBuf,
     op: IndexOp,
     result: Result<(), IndexError>,
     out: &mut Vec<Effect>,
 ) {
+    let path = op.path().to_owned();
     match (result, op) {
-        (Ok(()), IndexOp::Checkout) => watch::changed(state, vec![path], out),
-        (Ok(()), IndexOp::Write { .. } | IndexOp::Stage | IndexOp::Unstage) => {
+        (Ok(()), IndexOp::Checkout(at)) => watch::changed(state, vec![at.path], out),
+        (Ok(()), IndexOp::Write { .. } | IndexOp::Stage(_) | IndexOp::Unstage(_)) => {
             request_git(state, out)
         }
         (Err(IndexError::Changed), _) => {

@@ -1,7 +1,7 @@
 //! Markdown rendered as a flow of blocks.
 
 use helix_core::{Selection, SmallVec, Transaction};
-use model::command::{Direction, DocumentCommand, ReadMove};
+use model::command::{DocumentCommand, ReadMove};
 use model::notice::Notice;
 use model::units::Px;
 use slotmap::SecondaryMap;
@@ -10,12 +10,12 @@ use crate::apply::map_views;
 use crate::project::Project;
 use crate::project::files::FileIndex;
 use crate::project::path::RelPath;
-use crate::render::markdown::{self, Base, BlockKind, Callout, CalloutFold, Markdown};
+use crate::render::markdown::{self, Base, Markdown};
 use crate::render::{Opening, Rendering, step, typeset};
 use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::panes;
-use crate::view::tab::{Beside, BesideMut, Opened, Showing, TextTabs};
+use crate::view::tab::{Beside, BesideMut, Opened, Showing, Tab, TextTabs};
 use crate::{Effect, State};
 
 pub type Documents = SecondaryMap<BufferId, Parsed>;
@@ -40,16 +40,17 @@ pub struct DocumentState {
 pub enum DocumentScroll {
     /// Source line to bring to the top once the buffer is parsed.
     Line(usize),
-    At(DocumentAt),
-    Moved {
-        from: DocumentAt,
-        by: DocumentMotion,
-    },
+    Placed(Placed),
 }
 
-/// The top of a document view: `offset` below the top of root block `item`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Placed {
+    At(TopItem),
+    Moved { from: TopItem, by: DocumentMotion },
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DocumentAt {
+pub struct TopItem {
     pub item: usize,
     pub offset: Px,
 }
@@ -81,34 +82,57 @@ impl Rendering for DocumentState {
     }
 }
 
-impl DocumentState {
-    /// The callout's fold as shown, after the reader's toggles.
-    pub fn fold(&self, callout: &Callout) -> CalloutFold {
-        match (
-            callout.fold,
-            self.toggled.binary_search(&callout.index).is_ok(),
-        ) {
-            (CalloutFold::Static, _) => CalloutFold::Static,
-            (fold, false) => fold,
-            (CalloutFold::Open, true) => CalloutFold::Closed,
-            (CalloutFold::Closed, true) => CalloutFold::Open,
+impl DocumentScroll {
+    pub fn item(item: usize) -> DocumentScroll {
+        DocumentScroll::Placed(Placed::item(item))
+    }
+
+    pub fn anchor(self) -> Option<TopItem> {
+        match self {
+            DocumentScroll::Line(_) => None,
+            DocumentScroll::Placed(placed) => Some(placed.at()),
         }
     }
 }
 
-impl DocumentScroll {
-    pub fn item(item: usize) -> DocumentScroll {
-        DocumentScroll::At(DocumentAt {
+impl Placed {
+    pub fn item(item: usize) -> Placed {
+        Placed::At(TopItem {
             item,
             offset: Px(0.0),
         })
     }
 
-    /// The place moves start from, once the line is resolved.
-    pub fn anchor(self) -> Option<DocumentAt> {
+    pub fn at(self) -> TopItem {
         match self {
-            DocumentScroll::Line(_) => None,
-            DocumentScroll::At(at) | DocumentScroll::Moved { from: at, .. } => Some(at),
+            Placed::At(at) | Placed::Moved { from: at, .. } => at,
+        }
+    }
+
+    pub fn at_mut(&mut self) -> &mut TopItem {
+        match self {
+            Placed::At(at) | Placed::Moved { from: at, .. } => at,
+        }
+    }
+
+    pub fn moved(self, motion: ReadMove, items: usize) -> Placed {
+        match motion {
+            ReadMove::Scroll(direction, by) => {
+                let (lines, half_pages) = step(direction, by);
+                let (from, before) = match self {
+                    Placed::At(at) => (at, DocumentMotion::default()),
+                    Placed::Moved { from, by } => (from, by),
+                };
+                Placed::Moved {
+                    from,
+                    by: DocumentMotion {
+                        lines: before.lines + lines,
+                        half_pages: before.half_pages + half_pages,
+                    },
+                }
+            }
+            ReadMove::Top => Placed::item(0),
+            ReadMove::Bottom => Placed::item(items.saturating_sub(1)),
         }
     }
 }
@@ -155,6 +179,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         },
         figures,
         documents,
+        books,
         ..
     } = state;
     let before = documents.len();
@@ -229,7 +254,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
     match parses {
         Parses::Kept => {}
-        Parses::Changed => typeset::mark(figures, documents, out),
+        Parses::Changed => typeset::mark(figures, documents, books, out),
     }
     for entry in &shown {
         let doc = &buffers[entry.buffer].doc;
@@ -246,10 +271,11 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             (DocumentScroll::Line(line), _, _) => {
                 view.scroll = DocumentScroll::item(markdown.item_at_line(*line).min(last))
             }
-            (DocumentScroll::At(at) | DocumentScroll::Moved { from: at, .. }, true, Some(line)) => {
-                at.item = markdown.item_at_line(line).min(last)
+            (DocumentScroll::Placed(placed), true, Some(line)) => {
+                placed.at_mut().item = markdown.item_at_line(line).min(last)
             }
-            (DocumentScroll::At(at) | DocumentScroll::Moved { from: at, .. }, _, _) => {
+            (DocumentScroll::Placed(placed), _, _) => {
+                let at = placed.at_mut();
                 at.item = at.item.min(last)
             }
         }
@@ -284,7 +310,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
 /// The host measured `pane`'s document at `to`; reported after the frame, so the tab may have
 /// left the mode since. Beside the source, a move to another item scrolls the source to it,
 /// leaving its cursor.
-pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
+pub fn scrolled(state: &mut State, pane: PaneId, to: TopItem) {
     let State {
         layout,
         buffers,
@@ -294,7 +320,7 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
     let Some((text, view, beside)) = layout.document_mut(pane) else {
         return;
     };
-    view.scroll = DocumentScroll::At(to);
+    view.scroll = DocumentScroll::Placed(Placed::At(to));
     let seen = match beside {
         BesideMut::Source(Some(seen), _) if seen.item != to.item => seen,
         BesideMut::Source(..) | BesideMut::Alone => return,
@@ -317,68 +343,44 @@ pub fn scrolled(state: &mut State, pane: PaneId, to: DocumentAt) {
 
 /// A scroll key on the focused document view; moves wait for the line to resolve into a place.
 pub fn moved(view: &mut DocumentState, parsed: Option<&Parsed>, motion: ReadMove) {
-    let Some(from) = view.scroll.anchor() else {
-        return;
-    };
-    view.scroll = match motion {
-        ReadMove::Scroll(direction, by) => {
-            let (lines, half_pages) = step(direction, by);
-            let before = match view.scroll {
-                DocumentScroll::Moved { by, .. } => by,
-                DocumentScroll::At(_) | DocumentScroll::Line(_) => DocumentMotion::default(),
-            };
-            DocumentScroll::Moved {
-                from,
-                by: DocumentMotion {
-                    lines: before.lines + lines,
-                    half_pages: before.half_pages + half_pages,
-                },
-            }
-        }
-        ReadMove::Top => DocumentScroll::item(0),
-        ReadMove::Bottom => {
+    match view.scroll {
+        DocumentScroll::Line(_) => {}
+        DocumentScroll::Placed(placed) => {
             let items = parsed.map_or(0, |parsed| parsed.markdown.roots.len());
-            DocumentScroll::item(items.saturating_sub(1))
+            view.scroll = DocumentScroll::Placed(placed.moved(motion, items))
         }
-    };
+    }
 }
 
 /// Keys only document views have.
 pub fn command(state: &mut State, command: DocumentCommand) {
+    let DocumentCommand::Heading(direction) = command;
     let focus = state.layout.focus();
     let State {
         layout,
         documents,
+        books,
         notice,
         ..
     } = state;
-    let Some((text, view, _)) = layout.document_mut(focus) else {
-        return;
-    };
-    let DocumentCommand::Heading(direction) = command;
-    let (Some(at), Some(Parsed { markdown, .. })) =
-        (view.scroll.anchor(), documents.get(text.buffer()))
-    else {
-        return;
-    };
-    let heading = |item: &usize| {
-        matches!(
-            markdown.blocks[markdown.roots[*item]].kind,
-            BlockKind::Heading { .. }
-        )
-    };
-    let found = match direction {
-        Direction::Forward => (at.item + 1..markdown.roots.len()).find(heading),
-        Direction::Backward => {
-            let before = match at.offset > Px(0.0) {
-                true => at.item + 1,
-                false => at.item,
+    let found = match layout.focused_mut().active_mut() {
+        Some(Tab::Book(tab)) => (books[tab.file()].flow.flow)
+            .heading(tab.scroll.at(), direction)
+            .map(|item| tab.scroll = Placed::item(item)),
+        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None => {
+            let Some((text, view, _)) = layout.document_mut(focus) else {
+                return;
             };
-            (0..before.min(markdown.roots.len())).rev().find(heading)
+            let (Some(at), Some(Parsed { markdown, .. })) =
+                (view.scroll.anchor(), documents.get(text.buffer()))
+            else {
+                return;
+            };
+            (markdown.heading(at, direction)).map(|item| view.scroll = DocumentScroll::item(item))
         }
     };
     match found {
-        Some(item) => view.scroll = DocumentScroll::item(item),
+        Some(()) => {}
         None => *notice = Some(Notice::NoHeading),
     }
 }

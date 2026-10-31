@@ -11,15 +11,16 @@ use helix_core::regex::bytes::Regex;
 use helix_core::syntax::HighlighterError;
 use helix_core::syntax::Loader;
 use helix_core::{Language, Rope, Syntax};
-use ink::doc::{Board, PageIndex, PageSize, Paged};
+use ink::doc::{Board, PageSize, Paged};
 use ink::format::FormatError;
 use ink::text::Fonts;
 use model::command::Dirs;
 use model::picture::Encoding;
 use model::sheet::Stack;
 
+use crate::book::{self, BookError, BookId, BookRead};
 use crate::drawing::embed::{self, Destination};
-use crate::drawing::{BoardId, Listed, Notes, PagedId, PdfId, PdfRead, TextSpan, Unlisted};
+use crate::drawing::{BoardId, PagedId, PdfId, PdfRead};
 use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
@@ -27,6 +28,8 @@ use crate::input::picker::{self, Hit, Preview, Search};
 use crate::project::files::{self, Rescan, Walked};
 use crate::project::path::{FileKind, TextKind};
 use crate::project::path::{Folder, RelPath};
+use crate::reading::ReaderId;
+use crate::render::flow::ImagePlace;
 use crate::render::markdown::LocalImage;
 use crate::sidebar::tree::{self, Entry, EntryKind};
 use crate::text::buffer::{BufferId, Disk, ReadId, TextDoc};
@@ -36,7 +39,8 @@ use crate::viewer::{self, ImageId, ProbeError, Probed};
 use crate::{Effect, State, apply, git::stage, git::track, project::backlinks, render::typeset};
 use ink::history::Revision;
 use library::{
-    Change, DocumentId, Identity, Library, LibraryError, Markup, SearchHit, SearchQuery,
+    Change, DocumentId, FastHash, Library, LibraryError, Markup, Part, Place, SearchHit,
+    SearchQuery, TextSpan, Texts,
 };
 use model::notice::Notice;
 use reader::pdf::{Document, PdfError, TextClaim};
@@ -66,14 +70,14 @@ pub enum Job {
         path: PathBuf,
     },
     PdfText(TextClaim),
-    PdfFind {
-        file: PdfId,
-        document: Arc<Document>,
+    Find {
+        file: ReaderId,
+        texts: Arc<dyn Texts>,
         query: String,
     },
     Annotate {
         library: Library,
-        file: PdfId,
+        file: ReaderId,
         document: DocumentId,
         change: Change,
     },
@@ -85,7 +89,7 @@ pub enum Job {
     KeepPlace {
         library: Library,
         document: DocumentId,
-        page: PageIndex,
+        at: Place,
     },
     WritePdf(PdfWrite),
     Rewritten {
@@ -168,9 +172,6 @@ pub enum Job {
     },
     GitIndex {
         git_dir: PathBuf,
-        file: RepoPath,
-        /// The buffer path, for notices and reloads.
-        path: PathBuf,
         op: IndexOp,
     },
     Parse {
@@ -260,13 +261,13 @@ pub enum JobResult {
         page: usize,
         result: Result<(), PdfError>,
     },
-    PdfFound {
-        file: PdfId,
+    Found {
+        file: ReaderId,
         query: String,
         hits: Vec<TextSpan>,
     },
     Annotated {
-        file: PdfId,
+        file: ReaderId,
         document: DocumentId,
         change: Change,
         result: Result<(), LibraryError>,
@@ -335,7 +336,6 @@ pub enum JobResult {
         outcome: Outcome,
     },
     GitIndexed {
-        path: PathBuf,
         op: IndexOp,
         result: Result<(), IndexError>,
     },
@@ -443,6 +443,10 @@ pub enum OpenRead {
         stack: Stack,
         modified: SystemTime,
     },
+    Book {
+        read: BookRead,
+        disk: Disk,
+    },
     NotUtf8,
     NotAFile,
     Failed(io::Error),
@@ -459,6 +463,8 @@ pub enum Unreadable {
     Pdf(#[from] PdfError),
     #[error(transparent)]
     Markup(#[from] export::markup::MarkupError),
+    #[error(transparent)]
+    Book(#[from] BookError),
 }
 
 #[derive(Clone, Debug)]
@@ -468,6 +474,7 @@ pub enum Reload {
     Board(BoardId, Fonts),
     Pdf(PdfId, Library, Fonts),
     Image(ImageId, Encoding),
+    Book(BookId, Library),
 }
 
 pub enum Reloaded {
@@ -476,6 +483,7 @@ pub enum Reloaded {
     Board(BoardId, DiskRead<Board, FormatError>),
     Pdf(PdfId, DiskRead<PdfRead, Unreadable>),
     Image(ImageId, DiskRead<PageSize, ProbeError>),
+    Book(BookId, DiskRead<BookRead, BookError>),
 }
 
 pub enum DiskRead<T, E> {
@@ -492,18 +500,19 @@ pub enum Missed {
 
 pub struct NotUtf8;
 
-fn read_again<T, E>(
+fn read_again<B, T, E>(
     path: &Path,
     when: ReloadIf,
-    parse: impl FnOnce(Vec<u8>) -> Result<T, E>,
+    open: impl FnOnce(&Path) -> io::Result<B>,
+    parse: impl FnOnce(B) -> Result<T, E>,
 ) -> DiskRead<T, E> {
     match modified(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => DiskRead::Missed(Missed::Missing),
         Err(error) => DiskRead::Missed(Missed::Failed(error)),
         Ok(now) => match when {
             ReloadIf::ChangedSince(known) if now == known => DiskRead::Missed(Missed::Unchanged),
-            ReloadIf::ChangedSince(_) | ReloadIf::Always => match std::fs::read(path) {
-                Ok(bytes) => match parse(bytes) {
+            ReloadIf::ChangedSince(_) | ReloadIf::Always => match open(path) {
+                Ok(opened) => match parse(opened) {
                     Ok(content) => DiskRead::Changed {
                         content,
                         mtime: now,
@@ -530,7 +539,7 @@ pub fn run(job: Job) -> JobResult {
         Job::Export { .. } => "export",
         Job::ExportDrawing { .. } => "export drawing",
         Job::PdfText(_) => "pdf text",
-        Job::PdfFind { .. } => "pdf find",
+        Job::Find { .. } => "find",
         Job::Annotate { .. } => "annotate",
         Job::SearchAnnotations { .. } => "search annotations",
         Job::KeepPlace { .. } => "keep place",
@@ -607,35 +616,24 @@ pub fn run(job: Job) -> JobResult {
                 .map_err(ExportFailed::Write),
             path,
         },
-        Job::PdfFind {
-            file,
-            document,
-            query,
-        } => {
+        Job::Find { file, texts, query } => {
             let pattern = RegexBuilder::new(&helix_core::regex::escape(&query))
                 .case_insensitive(true)
                 .build()
                 .expect("an escaped query is a valid pattern");
             let mut hits = Vec::new();
-            for page in 0..document.pages.sizes().len() {
-                let text = match document.read_text(page) {
-                    Ok(text) => text,
-                    Err(error) => {
-                        tracing::warn!(page, %error, "searching a page");
-                        continue;
-                    }
+            for part in (0..texts.parts()).map(Part) {
+                let Some(text) = texts.part(part) else {
+                    continue;
                 };
                 hits.extend(
-                    (pattern.find_iter(&text.text))
+                    (pattern.find_iter(text.text()))
                         .map(|found| text.chars_in(found.range()))
                         .filter(|chars| !chars.is_empty())
-                        .map(|chars| TextSpan {
-                            page: PageIndex(page),
-                            chars,
-                        }),
+                        .map(|chars| TextSpan { part, chars }),
                 );
             }
-            JobResult::PdfFound { file, query, hits }
+            JobResult::Found { file, query, hits }
         }
         Job::Annotate {
             library,
@@ -659,8 +657,8 @@ pub fn run(job: Job) -> JobResult {
         Job::KeepPlace {
             library,
             document,
-            page,
-        } => JobResult::PlaceKept(library.keep_place(document, page)),
+            at,
+        } => JobResult::PlaceKept(library.keep_place(document, at)),
         Job::WritePdf(PdfWrite {
             path,
             file,
@@ -738,27 +736,57 @@ pub fn run(job: Job) -> JobResult {
             let read = match file {
                 Reload::Text(buffer) => Reloaded::Text(
                     buffer,
-                    read_again(&path, when, |bytes| {
-                        (String::from_utf8(bytes).map(Rope::from)).map_err(|_| NotUtf8)
-                    }),
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::read(path),
+                        |bytes| (String::from_utf8(bytes).map(Rope::from)).map_err(|_| NotUtf8),
+                    ),
                 ),
                 Reload::Paged(id, fonts) => Reloaded::Paged(
                     id,
-                    read_again(&path, when, |bytes| ink::format::read_paged(&bytes, &fonts)),
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::read(path),
+                        |bytes| ink::format::read_paged(&bytes, &fonts),
+                    ),
                 ),
                 Reload::Board(id, fonts) => Reloaded::Board(
                     id,
-                    read_again(&path, when, |bytes| ink::format::read_board(&bytes, &fonts)),
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::read(path),
+                        |bytes| ink::format::read_board(&bytes, &fonts),
+                    ),
                 ),
                 Reload::Pdf(id, library, fonts) => Reloaded::Pdf(
                     id,
-                    read_again(&path, when, |bytes| {
-                        read_pdf(&path, bytes, &library, &fonts)
-                    }),
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::read(path),
+                        |bytes| read_pdf(&path, bytes, &library, &fonts),
+                    ),
                 ),
                 Reload::Image(id, encoding) => Reloaded::Image(
                     id,
-                    read_again(&path, when, |bytes| viewer::probe(&bytes, encoding)),
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::read(path),
+                        |bytes| viewer::probe(&bytes, encoding),
+                    ),
+                ),
+                Reload::Book(id, library) => Reloaded::Book(
+                    id,
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::File::open(path),
+                        |file| book::read(&path, file, &library),
+                    ),
                 ),
             };
             JobResult::Reloaded { read, policy }
@@ -860,7 +888,14 @@ pub fn run(job: Job) -> JobResult {
             into,
         },
         Job::Probe(image) => JobResult::Probed {
-            result: viewer::read(&image.path, image.encoding),
+            result: match &image.place {
+                ImagePlace::File(path) => viewer::read(path, image.encoding),
+                ImagePlace::Zipped { archive, name } => (|| {
+                    let modified = std::fs::metadata(archive)?.modified()?;
+                    let opened = reader::zip::Archive::open(File::open(archive)?)?;
+                    viewer::probe_zipped(&opened, name, image.encoding, modified)
+                })(),
+            },
             image,
         },
         Job::Links { root, paths, stamp } => JobResult::Linked {
@@ -893,14 +928,8 @@ pub fn run(job: Job) -> JobResult {
                 outcome,
             }
         }
-        Job::GitIndex {
-            git_dir,
-            file,
-            path,
-            op,
-        } => JobResult::GitIndexed {
-            result: git::change_index(&git_dir, &file, &op),
-            path,
+        Job::GitIndex { git_dir, op } => JobResult::GitIndexed {
+            result: git::change_index(&git_dir, &op),
             op,
         },
         Job::Parse {
@@ -935,7 +964,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Written { .. } => "written",
         JobResult::Exported { .. } => "exported",
         JobResult::PdfText { .. } => "pdf text",
-        JobResult::PdfFound { .. } => "pdf found",
+        JobResult::Found { .. } => "found",
         JobResult::Annotated { .. } => "annotated",
         JobResult::AnnotationsFound { .. } => "annotations found",
         JobResult::PlaceKept(_) => "place kept",
@@ -969,15 +998,13 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             result,
         } => apply::written(state, saving, path, result, out),
         JobResult::Exported { path, result } => crate::export::exported(state, path, result),
-        JobResult::PdfFound { file, query, hits } => {
-            crate::drawing::reading::found(state, file, query, hits)
-        }
+        JobResult::Found { file, query, hits } => crate::reading::found(state, file, query, hits),
         JobResult::Annotated {
             file,
             document,
             change,
             result,
-        } => crate::drawing::reading::annotated(state, file, document, change, result),
+        } => crate::reading::annotated(state, file, document, change, result),
         JobResult::PdfWritten { write, result } => {
             crate::drawing::markup::written(state, write, result, out)
         }
@@ -1033,7 +1060,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
             lines,
             outcome,
         } => track::diffed(state, buffer, stamp, lines, outcome),
-        JobResult::GitIndexed { path, op, result } => stage::indexed(state, path, op, result, out),
+        JobResult::GitIndexed { op, result } => stage::indexed(state, op, result, out),
         JobResult::Parsed {
             buffer,
             version,
@@ -1073,6 +1100,17 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts, library: &Libra
             (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
             (Err(error), _) | (Ok(_), Err(error)) => OpenRead::Failed(error),
         },
+        FileKind::Book => match (std::fs::File::open(path), modified(path)) {
+            (Ok(file), Ok(mtime)) => match book::read(path, file, library) {
+                Ok(read) => OpenRead::Book {
+                    read,
+                    disk: Disk::Synced { mtime },
+                },
+                Err(error) => OpenRead::Unreadable(error.into()),
+            },
+            (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
+            (Err(error), _) | (Ok(_), Err(error)) => OpenRead::Failed(error),
+        },
         FileKind::Image(encoding) => match viewer::read(path, encoding) {
             Ok(Probed { size, modified }) => OpenRead::Image {
                 encoding,
@@ -1100,37 +1138,9 @@ fn read_pdf(
         Some(blob) => ink::format::read_markup(&blob, drawn.clone(), fonts)?,
         None => Paged::over_pdf(drawn.clone()),
     };
-    let (notes, said) = match library
-        .place(path)
-        .map(|place| library.identify(&place, &document))
-    {
-        None => (Notes::Unlisted(Unlisted::Outside), None),
-        Some(Ok(found)) => {
-            let lost = found.notebook.lost.len();
-            let said = match (found.identity, lost) {
-                (Identity::Changed, 1..) => Some(Notice::HighlightsLost { lost }),
-                (
-                    Identity::Changed | Identity::Known | Identity::Moved { .. } | Identity::New,
-                    _,
-                ) => None,
-            };
-            let listed = Listed {
-                library: library.clone(),
-                document: found.id,
-                notebook: found.notebook,
-                position: found.position,
-            };
-            (Notes::Listed(listed), said)
-        }
-        Some(Err(error)) => {
-            tracing::warn!(?path, %error, "library");
-            let reason = error.to_string();
-            (
-                Notes::Unlisted(Unlisted::Failed(reason.clone())),
-                Some(Notice::LibraryFailed { reason }),
-            )
-        }
-    };
+    let hash = FastHash::of(&document.bytes);
+    let (notes, said) =
+        crate::reading::notes(library, path, hash, document.bytes.len() as u64, &document);
     Ok(PdfRead {
         on_disk: document,
         drawn,

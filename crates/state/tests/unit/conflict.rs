@@ -5,7 +5,7 @@ use model::theme::Background;
 use state::git::conflict::{self, Conflict, Conflicts, Label, Sections, Side};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, RowKind, Shade};
-use state::view::layout::{Scroll, Viewport};
+use state::view::layout::{Scroll, Sideways, Viewport};
 
 fn parse(text: &str) -> Conflicts {
     let mut conflicts = Conflicts::EMPTY;
@@ -255,6 +255,7 @@ fn rows(text: &str, rows: u16) -> Vec<(usize, RowKind, Option<Background>, Strin
             anchor: 0,
             rows: 0,
             viewport: Viewport { rows, cols: 60 },
+            sideways: Sideways::Wrapped,
         },
         &loader,
         Focus::Unfocused,

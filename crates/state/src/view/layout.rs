@@ -1044,6 +1044,16 @@ pub struct Scroll {
     pub anchor: usize,
     pub rows: isize,
     pub viewport: Viewport,
+    pub sideways: Sideways,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sideways {
+    #[default]
+    Wrapped,
+    Unwrapped {
+        left: u16,
+    },
 }
 
 /// Text area size in cells as last drawn; zero before the first frame.

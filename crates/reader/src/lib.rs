@@ -1,3 +1,3 @@
-//! Documents read but not edited as text: PDFs now, EPUBs later.
-
+pub mod epub;
 pub mod pdf;
+pub mod zip;

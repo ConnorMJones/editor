@@ -7,6 +7,7 @@ use helix_core::visual_offset_from_anchor;
 use state::git::conflict;
 use state::git::diffview::{Left, RIGHT};
 use state::input;
+use state::view::layout::Sideways;
 
 use state::view::display::{self, Gutter, Indent};
 use state::view::scroll;
@@ -107,7 +108,7 @@ impl EntityInputHandler for Workspace {
             ),
         };
         let viewport = view.scroll.viewport;
-        let format = display::text_format(viewport, Indent::of(doc, &state.languages));
+        let format = display::text_format(view.scroll, Indent::of(doc, &state.languages));
         let (pos, _) = visual_offset_from_anchor(
             text,
             view.scroll.anchor,
@@ -119,7 +120,11 @@ impl EntityInputHandler for Workspace {
         .ok()?;
         let row = pos.row as isize - view.scroll.rows;
         let cell = self.fonts.cell;
-        let col = Gutter::new(gutter_lines).cols as usize + pos.col;
+        let shown = match view.scroll.sideways {
+            Sideways::Wrapped => pos.col,
+            Sideways::Unwrapped { left } => pos.col.saturating_sub(left as usize),
+        };
+        let col = Gutter::new(gutter_lines).cols as usize + shown;
         Some(Bounds::new(
             point(
                 element_bounds.origin.x + cell.width * col as f32,

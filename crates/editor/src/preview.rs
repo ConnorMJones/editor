@@ -11,7 +11,7 @@ use state::Overlay;
 use state::input::picker::{self, Preview, PreviewSource};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, CursorShape, Focus, Frame};
-use state::view::layout::{Pane, Scroll, Viewport};
+use state::view::layout::{Pane, Scroll, Sideways, Viewport};
 use state::view::tab::TextTabs;
 
 use crate::fonts::hsla;
@@ -156,6 +156,7 @@ impl Element for PreviewElement {
                             .line_to_char(line.saturating_sub(viewport.rows as usize / 3)),
                         rows: 0,
                         viewport,
+                        sideways: Sideways::Wrapped,
                     };
                     let frame = &mut cache.frame;
                     display::layout(
@@ -188,14 +189,7 @@ impl Element for PreviewElement {
                 Shown::Message(message) => {
                     cache.frame.rows.clear();
                     cache.frame.cursors.clear();
-                    let run = TextRun {
-                        len: message.len(),
-                        font: fonts.mono[0].clone(),
-                        color: hsla(theme.muted),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
+                    let run = fonts.mono_run(message.len(), hsla(theme.muted));
                     cache.lines.push(text_system.shape_line(
                         SharedString::new_static(message),
                         fonts.mono_size,

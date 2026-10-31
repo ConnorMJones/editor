@@ -3,9 +3,9 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Deferred, Div, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, SharedString, Stateful, Window, anchored, canvas, deferred, div,
-    prelude::*, uniform_list,
+    AnyElement, ClickEvent, Context, Deferred, Div, Hsla, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, SharedString, Stateful, Window, anchored, canvas,
+    deferred, div, prelude::*, uniform_list,
 };
 use model::command::ChangesCommand;
 use model::config::SidebarSide;
@@ -14,9 +14,10 @@ use model::theme::Theme;
 use model::window::Axis;
 use state::git::{Entry, Work};
 use state::project::path::RelPath;
-use state::sidebar::changes::{self, ListRow};
+use state::sidebar::changes::{self, ListRow, Pick};
 use state::sidebar::tree::{Fold, RowKind, TreeAction, TreeTarget};
-use state::{Focus, Repo, Sidebar, SidebarWidth, view::panes};
+use state::view::panes::{self, Arrive};
+use state::{Focus, Repo, Sidebar, SidebarWidth};
 
 use super::pane_tree::{DIVIDER, divider};
 use super::{Drag, Workspace};
@@ -38,6 +39,7 @@ pub struct TreeMenu {
 /// A file tree entry being dragged to another folder.
 pub struct DraggedEntry {
     pub path: RelPath,
+    pub arrive: Arrive,
 }
 
 /// What follows the pointer while dragging a tree entry.
@@ -226,8 +228,16 @@ impl Workspace {
                     .skip(range.start)
                     .zip(range)
                     .map(|(list_row, row)| {
-                        let base = list_row_base(theme, fonts, row, Picked::of(row, cursor, focus))
-                            .group("change-row");
+                        let picked = match (Picked::of(row, cursor, focus), list_row) {
+                            (Picked::No, ListRow::Entry(index))
+                                if (state.changes.selected.iter())
+                                    .any(|key| key.is(&entries[index])) =>
+                            {
+                                Picked::Resting
+                            }
+                            (picked, _) => picked,
+                        };
+                        let base = list_row_base(theme, fonts, row, picked).group("change-row");
                         match list_row {
                             ListRow::Header { group, count, fold } => {
                                 let label = match group {
@@ -266,6 +276,7 @@ impl Workspace {
                                                 &mut this.state,
                                                 row,
                                                 panes::Click::Single,
+                                                Pick::Only,
                                                 &mut this.effects,
                                             );
                                             window.focus(&this.focus, cx);
@@ -366,6 +377,7 @@ impl Workspace {
                                     .on_drag(
                                         DraggedEntry {
                                             path: changed.path.clone(),
+                                            arrive: changed.arrive(),
                                         },
                                         move |dragged, _, _, cx| {
                                             cx.new(|_| DragPreview {
@@ -381,6 +393,14 @@ impl Workspace {
                                                 &mut this.state,
                                                 row,
                                                 panes::Click::of(event.click_count()),
+                                                match event.modifiers() {
+                                                    Modifiers { shift: true, .. } => Pick::Extend,
+                                                    Modifiers { control: true, .. }
+                                                    | Modifiers { platform: true, .. } => {
+                                                        Pick::Toggle
+                                                    }
+                                                    _ => Pick::Only,
+                                                },
                                                 &mut this.effects,
                                             );
                                             window.focus(&this.focus, cx);
@@ -495,6 +515,7 @@ impl Workspace {
                                     .on_drag(
                                         DraggedEntry {
                                             path: row.path.clone(),
+                                            arrive: Arrive::AsIs,
                                         },
                                         move |dragged, _, _, cx| {
                                             cx.new(|_| DragPreview {

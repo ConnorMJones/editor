@@ -108,7 +108,8 @@ fn a_primary_selection_that_does_not_exist_is_rejected() {
             SessionView::Paged { .. }
             | SessionView::Board { .. }
             | SessionView::Pdf { .. }
-            | SessionView::Image { .. } => {
+            | SessionView::Image { .. }
+            | SessionView::Book { .. } => {
                 panic!("a.txt is text")
             }
         },

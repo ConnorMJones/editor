@@ -2,127 +2,96 @@
 
 Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference`.
 
-## Custom bindings (not helix defaults)
-
-Source view keys are listed in their own section below.
+## Custom bindings
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `C-k C-s` | normal, insert, select, tree | Save all modified buffers. Shadows helix's insert-mode `C-k` (kill to line end). |
-| `g left` / `g right` | normal, select | Line start / end (aliases of `gh` / `gl`). |
-| `g up` / `g down` | normal, select | File start / last line (aliases of `gg` / `ge`). |
-| `space e` | normal, select, tree | Toggle the file tree sidebar (helix opens an explorer picker). |
-| `j k l h a r d esc` | tree | Move, open or expand, collapse, add, rename, delete (type `y`), back to the editor. |
-| mouse | tree | Click to open, double-click to keep the tab. Right-click a row (or the empty area for the root): New File, New Folder, Rename, Delete. Drag a file or folder onto a folder (or onto a file, for its folder; the empty area for the root) to move it; open buffers follow. |
-| `g n` / `g p` | normal, select | Next / previous tab in the focused pane (helix: buffers). |
+| `C-k C-s` | normal, insert, select, tree | Save all |
+| `g left` / `g right` | normal, select | Line start / end |
+| `g up` / `g down` | normal, select | File start / last line |
+| `g n` / `g p` | normal, select | Next / previous tab |
+| `space e` | normal, select, tree | Toggle the file tree |
+| `j` / `k` | tree | Move |
+| `l` / `h` | tree | Open or expand / collapse |
+| `a` / `r` / `d` | tree | Add / rename / delete |
+| `esc` | tree | Back to the editor |
 
 ## Source view (git)
 
-Diffs and gutter marks compare against HEAD; staged changes are dimmed. Colours are set under
-`[theme.diff]` in the config (`added`, `removed`, `modified`, `ours`, `theirs`, `base`).
-
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space g` | normal, select, tree, changes | Toggle the Changes sidebar: Conflicts / Staged Changes / Changes (helix: changed-file picker). |
-| `j` / `k` | changes | Move between files and group headers. |
-| `l` / enter | changes | On a file: open its diff as a preview tab (conflicted files open as text; focus stays in the sidebar). On a header: collapse or expand the group. |
-| `h` / left | changes | Collapse the group (from a file, move to its header). |
-| `s` / `u` | changes | Stage / unstage the file, or the whole group on a header. |
-| `d` | changes | Discard the file's changes (asks `y` / `n`; untracked files are deleted). |
-| `esc` | changes | Back to the editor. |
-| mouse | changes | Click a file to open its diff, double-click to keep the tab, click a header to collapse it. Hover a row for `+` stage, `−` unstage and `↶` discard. |
-| `y` / `n` / `esc` | confirm | Answer a pending discard (or note creation, below). |
-| `space d` | normal, select, document, pages | Toggle the tab between its source and its side-by-side diff (helix: diagnostics picker). The right side is the live buffer and takes every key. |
-| `space tab` / `space S-tab` | normal, select, document, pages | Next / previous mode of the tab: source, then for `.md` and `.typ` files the split and the rendering, then the diff. |
-| `]g` / `[g` | normal, select | Next / previous change; past the file's last / first change, continue into the next / previous changed file (its diff when in a diff; conflicted files open as text). Helix stops at the file's ends. |
-| `]G` / `[G` | normal, select | Last / first change of the file, as helix. |
-| `space h s` | normal, select | Stage the changes touched by the selections. |
-| `space h u` | normal, select | Unstage the staged changes under the selections. |
-| `space h r` | normal, select | Revert the changes under the selections to HEAD, as one undoable edit. |
-| `]m` / `[m` | normal, select | Next / previous merge conflict, selecting it whole; select mode extends; takes a count. |
-| `space m o` / `space m t` | normal, select | Resolve the conflicts touched by the selections with ours (HEAD) / theirs (incoming), as one undoable edit. Also `:conflict-ours` / `:conflict-theirs`. |
-| `space m b` | normal, select | Resolve with both sides, ours then theirs. Also `:conflict-both`. |
-| `space m r` | normal, select | Resolve with the base section of a diff3 conflict. Also `:conflict-base`. |
+| `space g` | normal, select, tree, changes | Toggle the Changes sidebar |
+| `j` / `k` | changes | Move |
+| `l` / enter | changes | Open the diff / fold the group |
+| `h` / left | changes | Fold the group |
+| `s` / `u` | changes | Stage / unstage |
+| `d` | changes | Discard |
+| `esc` | changes | Back to the editor |
+| `y` / `n` / `esc` | confirm | Yes / no |
+| `space d` | normal, select, document, pages | Toggle the diff |
+| `space tab` / `space S-tab` | normal, select, document, pages | Next / previous mode |
+| `]g` / `[g` | normal, select | Next / previous change, across files |
+| `]G` / `[G` | normal, select | Last / first change |
+| `space h s` / `space h u` / `space h r` | normal, select | Stage / unstage / revert the change |
+| `]m` / `[m` | normal, select | Next / previous conflict |
+| `space m o` / `space m t` | normal, select | Take ours / theirs |
+| `space m b` / `space m r` | normal, select | Take both / base |
 
 ## Markdown and typst
 
-`.md` and `.typ` files have a rendered view: an Obsidian-like reading view of headings, lists,
-task checkboxes, callouts (`> [!note]`, folded with `[!tip]-`, foldable with `[!tip]+`),
-highlighted code, tables, images, wikilinks, math and mermaid. LaTeX math (`$inline$`,
-`$$display$$`, ```` ```math ````) and ```` ```mermaid ```` diagrams are typeset in the
-background in the theme's colours; until then, or when they fail, a muted box shows the source
-(and the error). Inline math sits on the text baseline; its paragraph wraps between words.
-Typst files show their pages, recompiled on every edit (imports and images resolve from the
-project root). Errors show in a strip above the pages with the first error's
-`file:line:col` and a count, and in the status line when they appear; the last good pages stay,
-dimmed. Clicking the strip puts the text cursor on the error.
+| Keys | Context | Action |
+| --- | --- | --- |
+| `space v` | normal, select, document, pages | Toggle the split |
+| `space V` | normal, select, document, pages | Toggle the rendering |
+| `C-w <` / `C-w >` / `C-w =` | normal, select | Narrow / widen / even the split |
+| `j` / `k`, down / up | document, pages | Scroll |
+| `C-d` / `C-u` | document, pages | Half page |
+| `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Page |
+| `gg` / `ge` / `G`, home / end | document, pages | Top / bottom |
+| `]]` / `[[` | document | Next / previous heading |
+| `esc` | document, pages | Back to the source |
+| `h` / `l`, left / right | pages | Pan |
+| `gf` | normal, select | Follow the link |
+| `space l` | normal, select, document, pages | Backlinks |
+| `:export-pdf` | typst | Export to PDF |
+
+## Drawings, images, PDFs and books
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space v` | normal, select, document, pages | Toggle the tab between its source and a split: the source on the left takes the keys, the rendering on the right follows its cursor. Scrolling the rendering scrolls the source; clicking it moves the cursor. |
-| `C-w <` / `C-w >` / `C-w =` | normal, select | Narrow, widen or even out the source side of a split; dragging the divider between the sides resizes too, and double-clicking it evens them out. |
-| `space V` | normal, select, document, pages | Toggle the tab between its source and its rendering, keeping the position. |
-| `j` / `k`, down / up | document, pages | Scroll a little. |
-| `C-d` / `C-u` | document, pages | Scroll half a page. |
-| `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Scroll a page. |
-| `gg` / `ge` / `G`, home / end | document, pages | Top / bottom. |
-| `]]` / `[[` | document | Next / previous top-level heading. |
-| `esc` | document, pages | Back to the source. |
-| `f` | pages | Fit pages to the pane width, or each page whole. |
-| `+` / `-` / `=` | pages | Zoom pages in / out from the fit, or back to it. |
-| `h` / `l`, left / right | pages | Pan sideways across pages wider than the pane. |
-| `:export-pdf` | typst file | Compile the focused typst file to `<file>.pdf` beside it (also in the `space ?` palette). Markdown export is not supported yet. |
-| mouse | document, pages | Wheel scrolls. Click a block, or a spot on a typst page, to put the text cursor there. Click a checkbox to toggle `[ ]` / `[x]` in the source (one undo step), a callout header to fold it, a link or a `![[note]]` embed to follow it (see links below). |
-| `gf` | normal, select | Follow the link under the cursor: a wikilink, a markdown link or a URL in a markdown file; elsewhere the URL or file path under the cursor (or the selected text), relative to the file's folder, then the root, as in helix. |
-| `space l` | normal, select, document, pages | Backlinks: notes linking to the focused note, with the line of each link. Enter opens the note at that line; the preview shows it. Also `backlinks` in the `space ?` palette. |
-| `y` / `n` / `esc` | confirm | Create the note an unresolved link names, or not. |
-
-A following view scrolls to the block under the text cursor, or under the text's top line
-when it scrolls; scrolling the rendered view scrolls the text (not its cursor). A typst
-preview scrolls to where the text cursor landed on the pages, and its strip shows the
-first error or warning; clicking the strip opens it.
-
-Links resolve the way Obsidian does, with the project root as the vault. `[[name]]` names
-`name.md`, or a file named exactly `name` (`[[photo.png]]`), anywhere in the vault, ignoring
-case; `[[folder/name]]` matches a path ending in it. When several files match, an exact-case
-match wins, then the shallowest path, then one in the note's folder. Markdown links
-(`[text](path.md)`) resolve against the note's folder, then the root, then by name.
-`#heading` puts the cursor (or the rendered view) on that heading; `#^block` just opens the
-note; `|alias` changes only the text shown. Links are followed into a rendered view when
-followed from one, else into the text. Unresolved links render dimmed and in italics;
-following one asks `create <path>? y/n` and creates an empty note next to the linking note
-(or at the vault path the link names). `![[image.png]]` embeds images from anywhere in the
-vault; `![[note]]` shows a box naming the resolved note that opens it when clicked.
-
-## Drawings
-
-`.pdt` files are paged documents and `.bdt` files are boards; both open into panes like any file.
-The pen draws and its eraser end erases on the tab's active layer; a pen-down focuses the pane.
-Pages fit the pane's width at first; the page at the pane's centre is the page in focus.
-Image files (png, jpeg, webp, gif, bmp, svg) open as one page fitted whole to the pane, read only.
-PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg` / `ge` move through them. Dragging across text selects it, with a bar offering Highlight, Comment, Copy and Search; `v` highlights it, `i` highlights it with a comment, `y` copies it and `esc` lets it go. Tapping a highlight shows its comment; `i` edits the comment and `d` removes the highlight. `m` bookmarks the page in view, `space a` lists the PDF's highlights and bookmarks, and `space A` searches every annotation in the library. Annotations live in `.edt/library.db`, in the nearest folder above the project that has one, else the git repository's top, else the project. `/` finds text in the whole PDF, `n` / `N` step through the hits, and `space t` lists the table of contents. `space tab` or `space d` switches to marking the PDF up, where the tool keys (`b`, `e`, `s`, `S`, `t…`) pick tools; `space tab`, `space d` or `esc` go back to reading. A PDF's pages can't be added or removed, and markup isn't written into the PDF yet.
-
-| Keys | Context | Action |
-| --- | --- | --- |
-| `b` / `e` | drawing | The pen's tip draws / erases whole strokes. |
-| `s` / `S` | drawing | The tip selects with a box / a lasso; a tap picks the mark under it. Drag the selection to move it, a corner to resize it keeping its shape, a side to stretch it (on text, to set where it wraps), the dot above to rotate. A tap on picked text types in it. |
-| `tl` / `ta` / `tr` / `to` | drawing | The tip drags out a line / arrow / rectangle / ellipse. |
-| `tt` | drawing | The tip places text: a tap starts it, a drag sets its wrap width, a press on text edits it. Typing uses helix keys in insert, normal and select mode; a press inside the text moves the cursor. |
-| `esc` | text in normal mode | Keep the text and pick it, with the tip on box select; a press outside the text does the same and nothing more. Blank text is dropped. |
-| `:image <path>`, `space i` | drawing, note | Put an image in: a drawing embeds it in the middle of the view, at its pixel size in points and no wider than most of the page, and it moves, turns and scales like any mark; a note links it as `![[name]]` on the cursor's line, or a new line below. `space i` picks from the project's images. |
-| drop a file | drawing, note | An image dropped in the middle of a drawing lands where it was let go; on a note it is linked, copied beside the note first (lowercase, dashed name) when it comes from outside the project. Other files, and drops near an edge, open as before. |
-| `space p`, `:paste-image` | drawing, note | Put the clipboard's image in. A note keeps it beside itself as `pasted-image-<date>.png` (UTC); `space p` in a note does the same when the clipboard holds an image and no text. |
-| `dd`, `del` | drawing | Delete the selection. |
-| `u` / `U` | drawing | Undo / redo the drawing. |
-| `+` / `-` / `=` | pages, drawing, image | Zoom in / out around the centre / back to the fit. Ctrl+wheel zooms around the cursor. |
-| `zf` | pages, drawing, image | Swap between fitting the pane's width and its height; an image, which opens fitted whole, goes to the one that fills more. |
-| `h j k l`, arrows, wheel | pages, drawing, image | Pan; pages stay on screen. On typst pages `j`/`k` scroll and only `h`/`l` pan. |
-| `pn` / `pb`, `gg` / `ge` | drawing | Next / previous page, first / last page. |
-| `po` / `pO` | drawing | A blank page below / above the page in focus. |
-| `pd` | drawing | Remove the page in focus. |
-| `]l` / `[l` | drawing | Next / previous layer becomes active. |
-| `space l h` / `space l n` | drawing | Hide or show the active layer / add a layer. |
-| `:export-pdf` / `:export-svg` / `:export-png` | drawing | Write the drawing beside its file: a paged drawing's every page as PDF, or the page in focus as `<name>-<page>.svg` or `.png`; a board's picked marks, or all of it, with a margin. Hidden layers are left out; PDF text stays text, SVG and PNG text is drawn as outlines, and PNG is 2 pixels to the point. |
+| `b` / `e` | drawing | Brush / eraser |
+| `s` / `S` | drawing | Box / lasso select |
+| `tl` / `ta` / `tr` / `to` | drawing | Line / arrow / rectangle / ellipse |
+| `tt` | drawing | Text |
+| `esc` | drawing text | Finish the text |
+| `dd`, `del` | drawing | Delete the selection |
+| `u` / `U` | drawing | Undo / redo |
+| `pn` / `pb` | drawing, PDF | Next / previous page |
+| `gg` / `ge` | drawing, PDF, book | First / last page |
+| `po` / `pO` | drawing | New page below / above |
+| `pd` | drawing | Remove the page |
+| `]l` / `[l` | drawing | Next / previous layer |
+| `space l h` / `space l n` | drawing | Hide / add a layer |
+| `space i`, `:image <path>` | drawing, note | Insert an image |
+| `space p`, `:paste-image` | drawing, note | Paste an image |
+| `+` / `-` / `=` | pages, drawing, image, PDF | Zoom in / out / fit |
+| `zf` | pages, drawing, image, PDF | Fit width / height |
+| `h j k l`, arrows | pages, drawing, image, PDF | Pan |
+| `:export-pdf` / `:export-svg` / `:export-png` | drawing | Export |
+| `v` | PDF, book | Highlight |
+| `i` | PDF, book | Highlight with a comment / edit the comment |
+| `d` | PDF, book | Delete the highlight |
+| `y` | PDF, book | Copy |
+| `esc` | PDF, book | Clear the selection |
+| `m` | PDF, book | Toggle a bookmark |
+| `/` | PDF, book | Find |
+| `n` / `N` | PDF, book | Next / previous hit |
+| `space a` | PDF, book | Notebook |
+| `space A` | PDF, book | Search annotations |
+| `space t` | PDF, book | Contents |
+| `space tab`, `space d` | PDF | Read / markup |
+| `:flatten` | PDF | Flatten the markup |
+| `]]` / `[[` | book | Next / previous heading |
 
 ## Typed commands (`:`)
 
@@ -859,9 +828,9 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | `g e` | `Read(Move(Bottom))` |
 | `G` | `Read(Move(Bottom))` |
 | `end` | `Read(Move(Bottom))` |
-| `esc` | `Read(Leave)` |
 | `:` | `CommandMode` |
 | `C-k C-s` | `WriteAll` |
+| `esc` | `Read(Leave)` |
 | `] ]` | `Document(Heading(Forward))` |
 | `[ [` | `Document(Heading(Backward))` |
 | `space d` | `ToggleMode(Diff)` |
@@ -929,9 +898,9 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | `g e` | `Read(Move(Bottom))` |
 | `G` | `Read(Move(Bottom))` |
 | `end` | `Read(Move(Bottom))` |
-| `esc` | `Read(Leave)` |
 | `:` | `CommandMode` |
 | `C-k C-s` | `WriteAll` |
+| `esc` | `Read(Leave)` |
 | `+` | `View(Zoom(In))` |
 | `-` | `View(Zoom(Out))` |
 | `=` | `View(Zoom(Reset))` |
@@ -1346,18 +1315,18 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | `space tab` | `Drawing(Pdf(Markup))` |
 | `space d` | `Drawing(Pdf(Markup))` |
 | `C-k C-s` | `WriteAll` |
-| `y` | `Drawing(Pdf(Copy))` |
-| `/` | `Drawing(Pdf(Find))` |
+| `y` | `Reading(Copy)` |
+| `/` | `Reading(Find)` |
 | `space t` | `Picker(Open(Outline))` |
 | `space a` | `Picker(Open(Notebook))` |
 | `space A` | `Picker(Open(Annotations))` |
-| `v` | `Drawing(Pdf(Annotate(Highlight)))` |
-| `i` | `Drawing(Pdf(Annotate(Comment)))` |
-| `d` | `Drawing(Pdf(Annotate(Remove)))` |
-| `m` | `Drawing(Pdf(Annotate(Bookmark)))` |
-| `n` | `Drawing(Pdf(FindNext(Forward)))` |
-| `N` | `Drawing(Pdf(FindNext(Backward)))` |
-| `esc` | `Drawing(Pdf(Read))` |
+| `v` | `Reading(Annotate(Highlight))` |
+| `i` | `Reading(Annotate(Comment))` |
+| `d` | `Reading(Annotate(Remove))` |
+| `m` | `Reading(Annotate(Bookmark))` |
+| `n` | `Reading(FindNext(Forward))` |
+| `N` | `Reading(FindNext(Backward))` |
+| `esc` | `Reading(Clear)` |
 | `p n` | `Drawing(Page(Go(Next)))` |
 | `p b` | `Drawing(Page(Go(Previous)))` |
 | `g g` | `Drawing(Page(Go(First)))` |
@@ -1453,6 +1422,78 @@ PDFs open to be read, over their own pages: the sheet keys, `pn` / `pb` and `gg`
 | `up` | `View(Pan(Up))` |
 | `j` | `View(Pan(Down))` |
 | `down` | `View(Pan(Down))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space i` | `Picker(Open(Images))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |
+
+## Book
+
+| Keys | Command |
+| --- | --- |
+| `j` | `Read(Move(Scroll(Forward, Lines)))` |
+| `down` | `Read(Move(Scroll(Forward, Lines)))` |
+| `k` | `Read(Move(Scroll(Backward, Lines)))` |
+| `up` | `Read(Move(Scroll(Backward, Lines)))` |
+| `C-d` | `Read(Move(Scroll(Forward, HalfPageCursor)))` |
+| `C-u` | `Read(Move(Scroll(Backward, HalfPageCursor)))` |
+| `C-f` | `Read(Move(Scroll(Forward, Page)))` |
+| `pagedown` | `Read(Move(Scroll(Forward, Page)))` |
+| `space space` | `Read(Move(Scroll(Forward, Page)))` |
+| `C-b` | `Read(Move(Scroll(Backward, Page)))` |
+| `pageup` | `Read(Move(Scroll(Backward, Page)))` |
+| `g g` | `Read(Move(Top))` |
+| `home` | `Read(Move(Top))` |
+| `g e` | `Read(Move(Bottom))` |
+| `G` | `Read(Move(Bottom))` |
+| `end` | `Read(Move(Bottom))` |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `] ]` | `Document(Heading(Forward))` |
+| `[ [` | `Document(Heading(Backward))` |
+| `y` | `Reading(Copy)` |
+| `/` | `Reading(Find)` |
+| `space t` | `Picker(Open(Outline))` |
+| `space a` | `Picker(Open(Notebook))` |
+| `space A` | `Picker(Open(Annotations))` |
+| `v` | `Reading(Annotate(Highlight))` |
+| `i` | `Reading(Annotate(Comment))` |
+| `d` | `Reading(Annotate(Remove))` |
+| `m` | `Reading(Annotate(Bookmark))` |
+| `n` | `Reading(FindNext(Forward))` |
+| `N` | `Reading(FindNext(Backward))` |
+| `esc` | `Reading(Clear)` |
 | `space e` | `Tree(Toggle)` |
 | `space f` | `Picker(Open(Files))` |
 | `space i` | `Picker(Open(Images))` |

@@ -5,10 +5,15 @@ pub use model::sheet::{InvalidPageSize, PageIndex, PageSize};
 use model::sheet::{Stack, StackError};
 use reader::pdf::Document;
 
+use crate::geom::{Point, Rect, Surface};
+
 use crate::doc::{
     ChangeError, Drawing, LayerChange, LayerIndex, LayerMarks, Layers, Mark, MarkChange, MarkId,
     Marks, apply_marks,
 };
+
+pub const RULE: f32 = 0.5;
+pub const DOT: f32 = 1.5;
 
 /// Pages in reading order, each with its own size, background and marks; never empty.
 #[derive(Clone, Debug)]
@@ -64,6 +69,35 @@ pub struct Spacing(f32); // private: checked by its constructor
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[error("pattern spacing {0} is not positive")]
 pub struct InvalidSpacing(pub f32);
+
+impl Pattern {
+    pub fn rects(self, spacing: Spacing, area: Rect<Surface>) -> Vec<Rect<Surface>> {
+        let (min, max) = (area.min(), area.max());
+        let step = spacing.get();
+        let lines = |from: f32, to: f32| {
+            ((from / step).floor() as i64 + 1..)
+                .map(move |n| n as f32 * step)
+                .take_while(move |at| *at < to)
+        };
+        let rect = |x: f32, y: f32, width: f32, height: f32| {
+            Rect::spanning(Point::new(x, y), Point::new(x + width, y + height))
+        };
+        let across = |y: f32| rect(min.x, y - RULE * 0.5, max.x - min.x, RULE);
+        match self {
+            Pattern::Lines => lines(min.y, max.y).map(across).collect(),
+            Pattern::Grid => (lines(min.y, max.y).map(across))
+                .chain(
+                    lines(min.x, max.x).map(|x| rect(x - RULE * 0.5, min.y, RULE, max.y - min.y)),
+                )
+                .collect(),
+            Pattern::Dots => lines(min.y, max.y)
+                .flat_map(|y| {
+                    lines(min.x, max.x).map(move |x| rect(x - DOT * 0.5, y - DOT * 0.5, DOT, DOT))
+                })
+                .collect(),
+        }
+    }
+}
 
 impl Spacing {
     pub fn new(spacing: f32) -> Result<Spacing, InvalidSpacing> {

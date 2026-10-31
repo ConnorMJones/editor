@@ -126,10 +126,7 @@ pub fn read(state: &mut State, register: Register) -> Values {
                 .focused()
                 .active_text()
                 .map(|view| &state.buffers[view.buffer()])
-                .map(|buffer| {
-                    let path = buffer.path.strip_prefix(state.project.root.path());
-                    path.unwrap_or(&buffer.path).display().to_string()
-                });
+                .map(|buffer| state.project.root.label(&buffer.path));
             Values::Ready(path.into_iter().collect())
         }
         Register::Clipboard(clipboard) => Values::Clipboard(clipboard),

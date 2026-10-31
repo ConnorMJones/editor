@@ -147,6 +147,7 @@ pub enum Command {
     Read(ReadCommand),
     Document(DocumentCommand),
     Drawing(DrawingCommand),
+    Reading(ReadingCommand),
     View(ViewCommand),
     Export(ExportAs),
 }
@@ -583,11 +584,16 @@ pub enum PdfCommand {
     Read,
     Markup,
     Flatten,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadingCommand {
     Copy,
     Find,
     FindSelection,
     FindNext(Direction),
     Annotate(Annotate),
+    Clear,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

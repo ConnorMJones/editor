@@ -8,6 +8,7 @@ use gpui::{
 use model::command::PickerCommand;
 use state::input::keymap::{self, Context as KeyContext};
 use state::input::picker::{Grep, Items, PALETTE, Referrers, Search};
+use state::reading::ReaderKind;
 use state::{Overlay, view::panes};
 
 use super::Workspace;
@@ -92,13 +93,17 @@ impl Workspace {
                                     .unwrap_or_default();
                                 ((*name).to_owned(), keys)
                             }
-                            Items::Outline(headings) => {
-                                let heading = &headings[index as usize];
+                            Items::Outline(outline) => {
+                                let entry = &outline.entries[index as usize];
+                                let page = match outline.file.kind() {
+                                    ReaderKind::Pdf => {
+                                        entry.at.map(|at| (at.part.0 + 1).to_string())
+                                    }
+                                    ReaderKind::Book => None,
+                                };
                                 (
-                                    format!("{}{}", "  ".repeat(heading.depth), heading.title),
-                                    heading
-                                        .page
-                                        .map_or(String::new(), |page| (page + 1).to_string()),
+                                    format!("{}{}", "  ".repeat(entry.depth), entry.title),
+                                    page.unwrap_or_default(),
                                 )
                             }
                             Items::Grep(Grep { hits, .. })

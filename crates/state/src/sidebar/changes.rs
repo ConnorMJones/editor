@@ -2,17 +2,16 @@
 
 use std::path::PathBuf;
 
-use model::command::{ChangesCommand, FileOp, Shown};
+use model::command::{ChangesCommand, FileOp};
 use model::config::OpenAs;
 use model::git::{Group, WhenEmpty};
 use model::notice::Notice;
 
 use crate::git::Changed;
-use crate::git::stage::file_op;
+use crate::git::stage::{Staging, file_op, stage_files};
 use crate::project::path::RelPath;
 use crate::sidebar::tree::Fold;
 use crate::view::panes;
-use crate::view::panes::Arrive;
 use crate::{Effect, Focus, Sidebar, State};
 
 /// Entries of each sidebar group in `changes`, which is sorted by group.
@@ -42,6 +41,33 @@ pub struct ChangesList {
     pub cursor: Option<ListCursor>,
     /// Per `Group`, whether the sidebar shows its entries.
     pub folds: [Fold; Group::COUNT],
+    pub selected: Vec<EntryKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryKey {
+    pub group: Group,
+    pub path: RelPath,
+}
+
+impl EntryKey {
+    pub fn of(changed: &Changed) -> EntryKey {
+        EntryKey {
+            group: changed.entry.group(),
+            path: changed.path.clone(),
+        }
+    }
+
+    pub fn is(&self, changed: &Changed) -> bool {
+        self.group == changed.entry.group() && self.path == changed.path
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Only,
+    Toggle,
+    Extend,
 }
 
 /// What the Changes sidebar cursor rests on, by value so it survives refreshes.
@@ -154,12 +180,8 @@ pub fn open_entry(state: &mut State, index: usize, open: OpenAs, out: &mut Vec<E
         return;
     };
     let path = changed.path.to_path(state.project.root.path());
-    let arrive = match changed.entry.group() {
-        Group::Conflicts => Arrive::In(Shown::Source),
-        Group::Staged | Group::Changes => Arrive::In(Shown::Diff),
-    };
     state.changes.cursor = Some(ListCursor::on(&changed));
-    crate::apply::open(state, path, arrive, None, open, out);
+    crate::apply::open(state, path, changed.arrive(), None, open, out);
 }
 
 pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
@@ -178,6 +200,19 @@ pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
             .iter()
             .map(|changed| changed.path.to_path(root))
             .collect()
+    };
+    let selected: Vec<PathBuf> = (changes.iter())
+        .filter(|changed| state.changes.selected.iter().any(|key| key.is(changed)))
+        .map(|changed| changed.path.to_path(root))
+        .collect();
+    // A selected entry stands for the whole selection; a header for its group.
+    let targets = |row: ListRow| match row {
+        ListRow::Entry(index)
+            if (state.changes.selected.iter()).any(|key| key.is(&changes[index])) =>
+        {
+            selected
+        }
+        row => paths(row),
     };
     match (command, at, row) {
         (ChangesCommand::Toggle, ..) => {
@@ -214,21 +249,23 @@ pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
             state.changes.cursor = Some(ListCursor::Header(changes[index].entry.group()))
         }
         (ChangesCommand::Stage, _, Some(row)) => {
-            for path in paths(row) {
-                file_op(state, FileOp::Stage(path), out);
-            }
+            let paths = targets(row);
+            state.changes.selected.clear();
+            stage_files(state, paths, Staging::Stage, out)
         }
         (ChangesCommand::Unstage, _, Some(row)) => {
-            for path in paths(row) {
-                file_op(state, FileOp::Unstage(path), out);
-            }
+            let paths = targets(row);
+            state.changes.selected.clear();
+            stage_files(state, paths, Staging::Unstage, out)
         }
         (ChangesCommand::Discard, _, Some(ListRow::Header { .. })) => {
             state.notice = Some(Notice::DiscardGroup)
         }
         (ChangesCommand::Discard, _, Some(ListRow::Entry(index))) => {
-            let path = changes[index].path.to_path(root);
-            file_op(state, FileOp::Discard(path), out)
+            match targets(ListRow::Entry(index)).as_slice() {
+                [path] => file_op(state, FileOp::Discard(path.clone()), out),
+                _ => state.notice = Some(Notice::DiscardGroup),
+            }
         }
         (
             ChangesCommand::Open

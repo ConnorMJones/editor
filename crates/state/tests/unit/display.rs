@@ -10,7 +10,7 @@ use state::text::buffer::TextDoc;
 use state::view::display::{
     self, CursorShape, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
-use state::view::layout::{Scroll, Viewport};
+use state::view::layout::{Scroll, Sideways, Viewport};
 
 fn loader() -> Loader {
     let loader = helix_core::config::default_lang_loader();
@@ -28,6 +28,7 @@ fn scroll(rows: u16, cols: u16) -> Scroll {
         anchor: 0,
         rows: 0,
         viewport: Viewport { rows, cols },
+        sideways: Sideways::Wrapped,
     }
 }
 

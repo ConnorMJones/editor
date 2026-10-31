@@ -21,6 +21,8 @@ pub enum RgbError {
 }
 
 impl Rgb {
+    pub const WHITE: Rgb = Rgb::hex(0xffffff);
+
     pub const fn hex(value: u32) -> Rgb {
         Rgb {
             r: (value >> 16) as u8,

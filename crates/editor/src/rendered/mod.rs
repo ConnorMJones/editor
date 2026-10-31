@@ -5,32 +5,41 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
     WeakEntity, Window, div, list, prelude::*, px,
 };
+use gpui::{MouseButton, MouseUpEvent};
 use helix_core::SmallVec;
+use model::scroll_bar::Thumb;
 use model::units::Px;
-use state::render::document::{DocumentAt, DocumentScroll};
+use slotmap::SecondaryMap;
+use state::book::{BookFile, BookId, BookTab};
+use state::reading::Press;
+use state::render::document::{DocumentScroll, DocumentState, Parsed, Placed, TopItem};
+use state::render::flow::{Flow, Origin};
 use state::render::markdown::LocalImage;
 use state::render::typeset::{Figures, each_figure, each_image};
 use state::text::buffer::BufferId;
-use state::view::layout::{Pane, PaneId};
-use state::view::tab::{Showing, TextTabs};
+use state::view::layout::PaneId;
+use state::view::tab::{Showing, Tab};
 
 use crate::fonts::PROSE_LINE;
 use crate::workspace::Workspace;
 
 mod document;
+
+use document::Tints;
 mod pages;
 
-/// A document pane's list and what its measured items describe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flowing {
+    Note(BufferId),
+    Book(BookId),
+}
+
 pub struct RenderedPane {
     pub list: ListState,
-    pub buffer: BufferId,
-    /// Document version the list was spliced to.
+    pub shows: Flowing,
     pub version: u64,
-    /// Block source hashes.
     pub hashes: Vec<u64>,
-    /// What else the items were measured with.
     pub measured: Measured,
-    /// Scroll last exchanged between the list and the state.
     pub applied: Applied,
 }
 
@@ -44,9 +53,8 @@ pub struct Measured {
     pub generation: u64,
 }
 
-/// Where a list stands: `offset` into item `item`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ListAt {
+pub struct ListTop {
     pub item: usize,
     pub offset: Pixels,
 }
@@ -56,9 +64,9 @@ pub struct ListAt {
 enum Want {
     /// A line not yet resolved into a place.
     Wait,
-    At(ListAt),
+    At(ListTop),
     Moved {
-        from: ListAt,
+        from: ListTop,
         lines: i32,
         half_pages: i32,
     },
@@ -66,7 +74,7 @@ enum Want {
 
 /// A place needs no report when the list lands there; a motion always does.
 enum Asked {
-    At(ListAt),
+    At(ListTop),
     Move,
 }
 
@@ -74,82 +82,149 @@ enum Asked {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Applied {
     Stale,
-    At(ListAt),
+    At(ListTop),
 }
 
-/// Tells the state where `pane`'s list stands.
-fn report(state: &mut state::State, pane: PaneId, at: ListAt) {
-    state::render::document::scrolled(
-        state,
-        pane,
-        DocumentAt {
-            item: at.item,
-            offset: Px(at.offset.into()),
-        },
-    )
-}
-
-/// Brings each document pane's list in line with the state and carries out its scroll.
-pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
-    let _span = tracing::trace_span!("rendered sync").entered();
-    let Workspace {
-        state,
-        rendered,
-        fonts,
-        window_height,
-        ..
-    } = workspace;
-    rendered.retain(|pane, cache| {
-        match (state.layout.panes().get(pane))
-            .and_then(Pane::active_text)
-            .map(TextTabs::showing)
-        {
-            Some(Showing::Document(text, ..)) => text.buffer() == cache.buffer,
-            Some(Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..)) | None => false,
-        }
-    });
-    let shown: SmallVec<[PaneId; 4]> = (state.layout.panes().iter())
-        .filter(|(_, target)| {
-            matches!(
-                target.active_text().map(TextTabs::showing),
-                Some(Showing::Document(..))
-            )
+impl RenderedPane {
+    pub fn thumb(&self) -> Option<Thumb> {
+        let count = self.list.item_count() as f32;
+        let top = self.list.logical_scroll_top();
+        let bottom = self.list.viewport_bounds().bottom();
+        let first = self.list.bounds_for_item(top.item_ix)?;
+        let past = (top.offset_in_item / first.size.height).clamp(0.0, 1.0);
+        let shown: f32 = (top.item_ix..self.list.item_count())
+            .map_while(|item| self.list.bounds_for_item(item))
+            .take_while(|item| item.top() < bottom)
+            .map(|item| ((bottom - item.top()) / item.size.height).min(1.0))
+            .sum();
+        let top = (top.item_ix as f32 + past) / count;
+        Some(Thumb {
+            top,
+            length: ((shown - past) / count).clamp(0.0, 1.0 - top),
         })
-        .map(|(pane, _)| pane)
-        .collect();
-    let line = fonts.prose_size * PROSE_LINE;
-    let list_at = |item: usize, offset: Px| ListAt {
-        item,
-        offset: px(offset.0),
-    };
-    for pane in shown {
-        let Some(Showing::Document(text, view, _)) = state.layout.panes()[pane]
-            .active_text()
-            .map(TextTabs::showing)
-        else {
-            continue;
-        };
-        let buffer = text.buffer();
-        let Some(parsed) = state.documents.get(buffer) else {
-            continue;
-        };
-        let want = match view.scroll {
-            DocumentScroll::Line(_) => Want::Wait,
-            DocumentScroll::At(at) => Want::At(list_at(at.item, at.offset)),
-            DocumentScroll::Moved { from, by } => Want::Moved {
-                from: list_at(from.item, from.offset),
-                lines: by.lines,
-                half_pages: by.half_pages,
+    }
+
+    pub fn at_fraction(&self, top: f32) -> Option<ListTop> {
+        let last = self.list.item_count().checked_sub(1)?;
+        let along = top.clamp(0.0, 1.0) * self.list.item_count() as f32;
+        let item = (along.floor() as usize).min(last);
+        let height = (self.list.bounds_for_item(item)).map_or(px(0.), |bounds| bounds.size.height);
+        Some(ListTop {
+            item,
+            offset: height * along.fract(),
+        })
+    }
+}
+
+enum Shown<'a> {
+    Note {
+        buffer: BufferId,
+        view: &'a DocumentState,
+        parsed: Option<&'a Parsed>,
+    },
+    Book {
+        book: BookId,
+        tab: &'a BookTab,
+        file: &'a BookFile,
+    },
+}
+
+struct Laid<'a, O: Origin> {
+    shows: Flowing,
+    flow: &'a Flow<O>,
+    version: u64,
+    toggled: &'a [u32],
+    generation: u64,
+    want: Want,
+}
+
+struct Lists<'a> {
+    rendered: &'a mut SecondaryMap<PaneId, RenderedPane>,
+    figures: &'a Figures,
+    window_height: Pixels,
+    line: Pixels,
+}
+
+impl Shown<'_> {
+    fn of(state: &state::State, pane: PaneId) -> Option<Shown<'_>> {
+        match state.layout.panes().get(pane)?.active()? {
+            Tab::Text(text) => match text.showing() {
+                Showing::Document(text, view, _) => Some(Shown::Note {
+                    buffer: text.buffer(),
+                    view,
+                    parsed: state.documents.get(text.buffer()),
+                }),
+                Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..) => None,
             },
-        };
-        let (version, hashes, markdown) =
-            (parsed.version, &parsed.markdown.hashes, &parsed.markdown);
-        let toggled = view.toggled.clone();
-        let generation = parsed.generation;
+            Tab::Book(tab) => Some(Shown::Book {
+                book: tab.file(),
+                tab,
+                file: &state.books[tab.file()],
+            }),
+            Tab::Ink(_) | Tab::Image(_) => None,
+        }
+    }
+
+    fn flowing(&self) -> Flowing {
+        match self {
+            Shown::Note { buffer, .. } => Flowing::Note(*buffer),
+            Shown::Book { book, .. } => Flowing::Book(*book),
+        }
+    }
+}
+
+pub fn report(state: &mut state::State, pane: PaneId, shows: Flowing, at: ListTop) {
+    let to = TopItem {
+        item: at.item,
+        offset: Px(at.offset.into()),
+    };
+    match shows {
+        Flowing::Note(_) => state::render::document::scrolled(state, pane, to),
+        Flowing::Book(book) => state::book::scrolled(state, pane, book, to),
+    }
+}
+
+fn want(placed: Placed) -> Want {
+    let list_top = |at: TopItem| ListTop {
+        item: at.item,
+        offset: px(at.offset.0),
+    };
+    match placed {
+        Placed::At(at) => Want::At(list_top(at)),
+        Placed::Moved { from, by } => Want::Moved {
+            from: list_top(from),
+            lines: by.lines,
+            half_pages: by.half_pages,
+        },
+    }
+}
+
+impl Lists<'_> {
+    fn follow<O: Origin>(
+        self,
+        pane: PaneId,
+        laid: Laid<O>,
+        cx: &mut Context<Workspace>,
+    ) -> Option<ListTop> {
+        let Lists {
+            rendered,
+            figures,
+            window_height,
+            line,
+        } = self;
+        let Laid {
+            shows,
+            flow,
+            version,
+            toggled,
+            generation,
+            want,
+        } = laid;
+        let hashes = &flow.hashes;
         let cache = match rendered.get_mut(pane) {
             Some(cache) => cache,
             None => {
-                let list = ListState::new(hashes.len(), ListAlignment::Top, *window_height);
+                let list = ListState::new(hashes.len(), ListAlignment::Top, window_height);
                 let workspace = cx.weak_entity();
                 // The list scrolls itself on the wheel; the state hears once the list lets go.
                 list.set_scroll_handler(move |_, window, cx| {
@@ -160,12 +235,12 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                                 return;
                             };
                             let top = cache.list.logical_scroll_top();
-                            let at = ListAt {
+                            let at = ListTop {
                                 item: top.item_ix,
                                 offset: top.offset_in_item,
                             };
                             cache.applied = Applied::At(at);
-                            report(&mut this.state, pane, at);
+                            report(&mut this.state, pane, cache.shows, at);
                             this.flush(cx);
                         });
                     });
@@ -174,12 +249,12 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                     pane,
                     RenderedPane {
                         list,
-                        buffer,
+                        shows,
                         version,
                         hashes: hashes.clone(),
                         measured: Measured {
-                            figures: state.figures.generation,
-                            toggled: toggled.clone(),
+                            figures: figures.generation,
+                            toggled: toggled.to_vec(),
                             generation,
                         },
                         applied: Applied::Stale,
@@ -207,12 +282,12 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
             }
         }
         let measured = &mut cache.measured;
-        let since = std::mem::replace(&mut measured.figures, state.figures.generation);
-        let arrived = (since != state.figures.generation).then_some(since);
+        let since = std::mem::replace(&mut measured.figures, figures.generation);
+        let arrived = (since != figures.generation).then_some(since);
         let shaped = measured.toggled == toggled && measured.generation == generation;
         match (shaped, arrived) {
             (false, _) => {
-                measured.toggled = toggled;
+                measured.toggled = toggled.to_vec();
                 measured.generation = generation;
                 cache.list.remeasure();
             }
@@ -220,12 +295,12 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
             (true, Some(since)) => {
                 let Figures {
                     entries, images, ..
-                } = &state.figures;
+                } = figures;
                 let filled = |figure| entries.get(&figure).map_or(0, |e| e.filled);
                 let sized = |image: &LocalImage| images.get(image).map_or(0, |e| e.filled);
-                for (item, &root) in markdown.roots.iter().enumerate() {
+                for (item, &root) in flow.roots.iter().enumerate() {
                     let mut newest = 0;
-                    let blocks = &markdown.blocks[root..markdown.blocks[root].end];
+                    let blocks = &flow.blocks[root..flow.blocks[root].end];
                     each_figure(blocks, |figure, _| newest = newest.max(filled(figure)));
                     each_image(blocks, |image| newest = newest.max(sized(image)));
                     match newest > since {
@@ -238,8 +313,8 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         }
         let viewport = cache.list.viewport_bounds().size;
         let (from, down, asked) = match (want, cache.applied) {
-            (Want::Wait, _) => continue,
-            (Want::At(at), Applied::At(applied)) if at == applied => continue,
+            (Want::Wait, _) => return None,
+            (Want::At(at), Applied::At(applied)) if at == applied => return None,
             (Want::At(at), Applied::At(_) | Applied::Stale) => (at, px(0.), Asked::At(at)),
             (
                 Want::Moved {
@@ -260,14 +335,83 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         });
         cache.list.scroll_by(from.offset + down);
         let top = cache.list.logical_scroll_top();
-        let landed = ListAt {
+        let landed = ListTop {
             item: top.item_ix,
             offset: top.offset_in_item,
         };
         cache.applied = Applied::At(landed);
         match asked {
-            Asked::At(at) if at == landed => {}
-            Asked::At(_) | Asked::Move => report(state, pane, landed),
+            Asked::At(at) if at == landed => None,
+            Asked::At(_) | Asked::Move => Some(landed),
+        }
+    }
+}
+
+pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let _span = tracing::trace_span!("rendered sync").entered();
+    let Workspace {
+        state,
+        rendered,
+        fonts,
+        window_height,
+        ..
+    } = workspace;
+    rendered.retain(|pane, cache| {
+        Shown::of(state, pane).map(|shown| shown.flowing()) == Some(cache.shows)
+    });
+    let panes: SmallVec<[PaneId; 4]> = (state.layout.panes().keys())
+        .filter(|pane| Shown::of(state, *pane).is_some())
+        .collect();
+    let line = fonts.prose_size * PROSE_LINE;
+    for pane in panes {
+        let (shows, landed) = match Shown::of(state, pane) {
+            Some(Shown::Note {
+                buffer,
+                view,
+                parsed: Some(parsed),
+            }) => {
+                let want = match view.scroll {
+                    DocumentScroll::Line(_) => Want::Wait,
+                    DocumentScroll::Placed(placed) => want(placed),
+                };
+                let laid = Laid {
+                    shows: Flowing::Note(buffer),
+                    flow: &parsed.markdown.flow,
+                    version: parsed.version,
+                    toggled: &view.toggled,
+                    generation: parsed.generation,
+                    want,
+                };
+                let lists = Lists {
+                    rendered: &mut *rendered,
+                    figures: &state.figures,
+                    window_height: *window_height,
+                    line,
+                };
+                (laid.shows, lists.follow(pane, laid, cx))
+            }
+            Some(Shown::Book { book, tab, file }) => {
+                let laid = Laid {
+                    shows: Flowing::Book(book),
+                    flow: &file.flow.flow,
+                    version: file.version,
+                    toggled: &[],
+                    generation: 0,
+                    want: want(tab.scroll),
+                };
+                let lists = Lists {
+                    rendered: &mut *rendered,
+                    figures: &state.figures,
+                    window_height: *window_height,
+                    line,
+                };
+                (laid.shows, lists.follow(pane, laid, cx))
+            }
+            Some(Shown::Note { parsed: None, .. }) | None => continue,
+        };
+        match landed {
+            Some(at) => report(state, pane, shows, at),
+            None => {}
         }
     }
 }
@@ -292,13 +436,33 @@ pub fn body(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) ->
                 .into_any_element()
         }
         None => match workspace.rendered.get(pane) {
-            Some(cache) => list(
-                cache.list.clone(),
-                cx.processor(move |this, index: usize, _window, cx| item(this, pane, index, cx)),
-            )
-            .flex_1()
-            .min_h_0()
-            .into_any_element(),
+            Some(cache) => {
+                let shown = list(
+                    cache.list.clone(),
+                    cx.processor(move |this, index: usize, _window, cx| {
+                        item(this, pane, index, cx)
+                    }),
+                )
+                .flex_1()
+                .min_h_0();
+                match cache.shows {
+                    Flowing::Book(book) => div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                                state::book::press(&mut this.state, pane, book, None, Press::Up);
+                                this.changed(cx);
+                            }),
+                        )
+                        .child(shown)
+                        .into_any_element(),
+                    Flowing::Note(_) => shown.into_any_element(),
+                }
+            }
             None => div().flex_1().into_any_element(),
         },
     }
@@ -310,17 +474,45 @@ fn item(
     index: usize,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    match (this.state.layout.panes().get(pane))
-        .and_then(Pane::active_text)
-        .map(TextTabs::showing)
-    {
-        Some(Showing::Document(text, view, _)) => {
-            document::item(this, pane, text.buffer(), view, index, cx)
+    match Shown::of(&this.state, pane) {
+        Some(Shown::Note {
+            buffer,
+            view,
+            parsed: Some(parsed),
+        }) => {
+            let from = document::From {
+                flow: &parsed.markdown.flow,
+                key: buffer,
+                version: parsed.version,
+                toggled: &view.toggled,
+                marked: &|_| Tints::new(),
+            };
+            document::item(this, pane, from, index, cx)
         }
-        // The list closes with the document view, so these show only for a frame.
-        Some(Showing::Pages(..) | Showing::Source(_) | Showing::Diff(..)) | None => {
-            div().into_any_element()
+        Some(Shown::Book { book, tab, file }) => {
+            let marks = crate::reading::marks(
+                &this.theme.reader,
+                &file.notes,
+                &tab.found,
+                &tab.reading,
+                &*file.flow.texts,
+            );
+            let marked = |block: usize| -> Tints {
+                (marks.iter())
+                    .filter_map(|(span, color)| Some((file.flow.within(block, span)?, *color)))
+                    .collect()
+            };
+            let from = document::From {
+                flow: &file.flow.flow,
+                key: book,
+                version: file.version,
+                toggled: &[],
+                marked: &marked,
+            };
+            document::item(this, pane, from, index, cx)
         }
+        // The list closes with the document view, so this shows only for a frame.
+        Some(Shown::Note { parsed: None, .. }) | None => div().into_any_element(),
     }
 }
 

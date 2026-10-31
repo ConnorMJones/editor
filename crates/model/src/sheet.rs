@@ -4,6 +4,7 @@
 use std::ops::Range;
 
 use crate::geom::{Affine, Pane, Point, Sheet, Surface, Vector};
+use crate::scroll_bar::Thumb;
 use crate::units::{Positive, Px};
 
 /// Space between stacked pages, in points.
@@ -256,12 +257,6 @@ pub struct SheetFrame {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Thumb {
-    pub top: f32,
-    pub length: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageFrame {
     pub index: PageIndex,
     pub size: PageSize,
@@ -330,22 +325,7 @@ impl SheetView {
         let scale = self.scale(stack, viewport);
         let centre = clamp(stack, viewport, scale, self.sheet_centre(stack));
         let half = viewport.centre();
-        let to_pane = Affine::new([
-            scale,
-            0.0,
-            0.0,
-            scale,
-            half.x - centre.x * scale,
-            half.y - centre.y * scale,
-        ]);
-        let from_pane = Affine::new([
-            1.0 / scale,
-            0.0,
-            0.0,
-            1.0 / scale,
-            centre.x - half.x / scale,
-            centre.y - half.y / scale,
-        ]);
+        let (to_pane, from_pane) = centred(centre, scale, viewport);
         SheetFrame {
             scale,
             to_pane,
@@ -379,8 +359,7 @@ impl SheetView {
         let under = frame.from_pane.apply(at);
         self.zoom = self.zoom.by(factor);
         let scale = self.scale(stack, viewport);
-        let off = at - Point::new(0.0, 0.0) - viewport.centre();
-        let centre = under - Vector::new(off.x / scale, off.y / scale);
+        let centre = kept_under(under, at, scale, viewport);
         self.centre = spot(stack, clamp(stack, viewport, scale, centre));
     }
 
@@ -500,25 +479,11 @@ impl PlaneView {
 
     pub fn frame(&self, viewport: Viewport) -> PlaneFrame {
         let scale = self.zoom.get();
-        let (centre, half) = (self.centre, viewport.centre());
+        let (to_pane, from_pane) = centred(self.centre, scale, viewport);
         PlaneFrame {
             scale,
-            to_pane: Affine::new([
-                scale,
-                0.0,
-                0.0,
-                scale,
-                half.x - centre.x * scale,
-                half.y - centre.y * scale,
-            ]),
-            from_pane: Affine::new([
-                1.0 / scale,
-                0.0,
-                0.0,
-                1.0 / scale,
-                centre.x - half.x / scale,
-                centre.y - half.y / scale,
-            ]),
+            to_pane,
+            from_pane,
         }
     }
 
@@ -531,9 +496,7 @@ impl PlaneView {
     pub fn zoom_about(&mut self, viewport: Viewport, at: Point<Pane>, factor: f32) {
         let under = self.frame(viewport).from_pane.apply(at);
         self.zoom = self.zoom.by(factor);
-        let scale = self.zoom.get();
-        let off = at - Point::new(0.0, 0.0) - viewport.centre();
-        self.centre = under - Vector::new(off.x / scale, off.y / scale);
+        self.centre = kept_under(under, at, self.zoom.get(), viewport);
     }
 }
 
@@ -542,4 +505,34 @@ impl PlaneView {
 pub struct Measure {
     pub viewport: Viewport,
     pub line: Px,
+}
+
+fn centred<S>(
+    centre: Point<S>,
+    scale: f32,
+    viewport: Viewport,
+) -> (Affine<S, Pane>, Affine<Pane, S>) {
+    let half = viewport.centre();
+    let to_pane = Affine::new([
+        scale,
+        0.0,
+        0.0,
+        scale,
+        half.x - centre.x * scale,
+        half.y - centre.y * scale,
+    ]);
+    let from_pane = Affine::new([
+        1.0 / scale,
+        0.0,
+        0.0,
+        1.0 / scale,
+        centre.x - half.x / scale,
+        centre.y - half.y / scale,
+    ]);
+    (to_pane, from_pane)
+}
+
+fn kept_under<S>(under: Point<S>, at: Point<Pane>, scale: f32, viewport: Viewport) -> Point<S> {
+    let off = at - Point::new(0.0, 0.0) - viewport.centre();
+    under - Vector::new(off.x / scale, off.y / scale)
 }

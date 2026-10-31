@@ -102,9 +102,9 @@ pub fn resize(state: &mut State, resize: Resize) {
             ShowingMut::Document(_, _, BesideMut::Source(_, share))
             | ShowingMut::Pages(_, _, BesideMut::Source(_, share)),
         ) => *share = share.resized(resize),
+        Some(ShowingMut::Diff(_, sides)) => sides.share = sides.share.resized(resize),
         Some(
             ShowingMut::Source(_)
-            | ShowingMut::Diff(..)
             | ShowingMut::Document(_, _, BesideMut::Alone)
             | ShowingMut::Pages(_, _, BesideMut::Alone),
         )
@@ -122,9 +122,9 @@ pub fn drag(state: &mut State, pane: PaneId, share: Share) {
             ShowingMut::Document(_, _, BesideMut::Source(_, held))
             | ShowingMut::Pages(_, _, BesideMut::Source(_, held)),
         ) => *held = share,
+        Some(ShowingMut::Diff(_, sides)) => sides.share = share,
         Some(
             ShowingMut::Source(_)
-            | ShowingMut::Diff(..)
             | ShowingMut::Document(_, _, BesideMut::Alone)
             | ShowingMut::Pages(_, _, BesideMut::Alone),
         )

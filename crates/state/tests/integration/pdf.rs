@@ -14,10 +14,11 @@ use model::sheet::PageIndex as Page;
 use model::theme::Color;
 use state::Overlay;
 use state::drawing::pen::Stylus;
-use state::drawing::{Found, InkTabs, Notes, PdfMode, PdfTab, Reading, Unlisted};
+use state::drawing::{InkTabs, PdfMode, PdfTab};
 use state::input::picker::Items;
 use state::input::{self, keymap::Context};
 use state::project::session;
+use state::reading::{Found, Notes, Reading, Unlisted};
 use state::view::tab::Tab;
 
 use crate::drawing::{draw, line};
@@ -163,7 +164,7 @@ fn dragging_across_text_selects_it_and_y_copies_it() {
     h.keys(":o paper.pdf<ret>");
     draw(&mut h, Stylus::Tip, &line((101.0, 208.0), (128.0, 208.0)));
     match &tab(&h).mode {
-        PdfMode::Read(Reading::Selected(span)) => assert_eq!(span.page, PageIndex(0)),
+        PdfMode::Read(Reading::Selected(span)) => assert_eq!(span.part, library::Part(0)),
         other => panic!("{other:?}"),
     }
     h.keys("y");
@@ -188,8 +189,8 @@ fn slash_finds_text_and_n_steps_through_the_hits() {
         Found::Hits { hits, at, query } => {
             assert_eq!((query.as_str(), hits.len(), *at), ("PAGES", 1, 0));
             assert_eq!(
-                hits[0].page,
-                PageIndex(0),
+                hits[0].part,
+                library::Part(0),
                 "found on another page, wrapping"
             );
         }
@@ -304,9 +305,9 @@ fn m_bookmarks_the_page_and_the_notebook_goes_back_to_it() {
     assert!(matches!(h.state.notice, Some(Notice::NoAnnotations)));
     h.keys("pnmgg");
     let pages: Vec<_> = (notebook(&h).bookmarks.iter())
-        .map(|bookmark| bookmark.page)
+        .map(|bookmark| bookmark.at.part)
         .collect();
-    assert_eq!(pages, [PageIndex(1)]);
+    assert_eq!(pages, [library::Part(1)]);
     h.keys("<space>a<ret>");
     assert_eq!(tab(&h).view.centre.page, Page(1));
     h.keys("m");

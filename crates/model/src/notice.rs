@@ -48,6 +48,7 @@ pub enum Notice {
     },
     NotADrawing,
     NotAPdf,
+    NotReading,
     NotMarkingUp,
     NoHits {
         query: String,
@@ -271,11 +272,12 @@ impl std::fmt::Display for Notice {
                 )
             }
             Notice::NoSearch => f.write_str("nothing searched for yet"),
-            Notice::NoHits { query } => write!(f, "no {query:?} in the PDF"),
+            Notice::NoHits { query } => write!(f, "no {query:?} found"),
             Notice::PageTextFailed { page, reason } => {
                 write!(f, "the text of page {page} could not be read: {reason}")
             }
             Notice::NotAPdf => f.write_str("only a PDF is read rather than drawn on"),
+            Notice::NotReading => f.write_str("only a PDF or a book is read"),
             Notice::NotMarkingUp => f.write_str("space tab or space d marks the PDF up"),
             Notice::NotADrawing => f.write_str("not a drawing"),
             Notice::NoImagesHere => f.write_str("images go into drawings and notes"),

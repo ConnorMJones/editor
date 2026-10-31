@@ -9,7 +9,7 @@ use state::project::path::RelPath;
 use state::project::session;
 use state::render;
 use state::render::document::{
-    self, BlockClick, DocumentAt, DocumentMotion, DocumentScroll, DocumentState,
+    self, BlockClick, DocumentMotion, DocumentScroll, DocumentState, Placed, TopItem,
 };
 use state::render::markdown::{LinkTarget, WikiLink};
 
@@ -63,11 +63,6 @@ fn shown(h: &Harness) -> Shown {
         .active_text()
         .map(TextTabs::shown)
         .unwrap()
-}
-
-fn cursor_line(h: &Harness) -> usize {
-    let text = h.doc().text.slice(..);
-    h.view().selection.primary().cursor_line(text)
 }
 
 fn top_line(h: &Harness, pane: PaneId) -> usize {
@@ -135,7 +130,7 @@ fn space_capital_v_toggles_in_place_keeping_the_position() {
     h.keys("<space>V");
     assert_eq!(h.focused_tabs(), ["note.md"]);
     assert_eq!(top_line(&h, focus), 12);
-    assert_eq!(cursor_line(&h), 12);
+    assert_eq!(h.cursor_line(), 12);
     assert!(
         h.state.documents.get(buffer).is_none(),
         "the parse goes with the rendering"
@@ -165,18 +160,18 @@ fn clicking_a_block_puts_the_text_cursor_on_it() {
         let doc = &h.state.buffers[buffer].doc;
         let markdown = document::markdown(&h.state.documents, buffer, doc).unwrap();
         BlockClick {
-            line: markdown.blocks[markdown.roots[6]].lines.start,
+            line: markdown.blocks[markdown.roots[6]].origin.lines.start,
             version: doc.version,
         }
     };
     let drawn = click(&h);
     h.run(|state, _| document::click(state, pane, drawn));
-    assert_eq!(cursor_line(&h), 12);
+    assert_eq!(h.cursor_line(), 12);
 
     // A click drawn before an edit is ignored.
     h.keys("<space>VggOx<esc><space>V");
     h.run(|state, _| document::click(state, pane, drawn));
-    assert_eq!(cursor_line(&h), 0);
+    assert_eq!(h.cursor_line(), 0);
 }
 
 #[test]
@@ -184,35 +179,38 @@ fn rendered_keys_scroll_by_motions_for_the_host_to_measure() {
     let (_dir, mut h) = harness();
     h.keys("<space>V");
     let pane = h.state.layout.focus();
-    let from = DocumentAt {
+    let from = TopItem {
         item: 0,
         offset: Px(0.0),
     };
     h.keys("jj");
     assert_eq!(
         rendered_in(&h, pane).scroll,
-        DocumentScroll::Moved {
+        DocumentScroll::Placed(Placed::Moved {
             from,
             by: DocumentMotion {
                 lines: 2,
                 half_pages: 0,
             }
-        }
+        })
     );
     h.keys("k<C-d>");
     assert_eq!(
         rendered_in(&h, pane).scroll,
-        DocumentScroll::Moved {
+        DocumentScroll::Placed(Placed::Moved {
             from,
             by: DocumentMotion {
                 lines: 1,
                 half_pages: 1,
             }
-        }
+        })
     );
     // The host reports where the move landed.
     h.run(|state, _| document::scrolled(state, pane, from));
-    assert_eq!(rendered_in(&h, pane).scroll, DocumentScroll::At(from));
+    assert_eq!(
+        rendered_in(&h, pane).scroll,
+        DocumentScroll::Placed(Placed::At(from))
+    );
     // A report from a frame drawn before the tab left the rendering is ignored.
     h.keys("<esc>");
     assert_eq!(shown(&h), Shown::Source);
@@ -309,7 +307,7 @@ fn sessions_keep_rendered_tabs() {
         document::scrolled(
             state,
             pane,
-            DocumentAt {
+            TopItem {
                 item: 4,
                 offset: Px(0.0),
             },
@@ -385,16 +383,19 @@ fn scrolling_the_split_rendering_scrolls_the_source_not_its_cursor() {
     let (_dir, mut h) = harness();
     h.keys("<space>v");
     let pane = h.state.layout.focus();
-    let at = |item: usize, offset: f32| DocumentAt {
+    let at = |item: usize, offset: f32| TopItem {
         item,
         offset: Px(offset),
     };
     // The host reports the list now shows item 8 ("para six", line 16).
     h.run(|state, _| document::scrolled(state, pane, at(8, 3.0)));
     assert_eq!(top_line(&h, pane), 16);
-    assert_eq!(cursor_line(&h), 0, "the cursor stays");
+    assert_eq!(h.cursor_line(), 0, "the cursor stays");
     // The sync that follows does not bounce the rendering back to the cursor.
-    assert_eq!(rendered_in(&h, pane).scroll, DocumentScroll::At(at(8, 3.0)));
+    assert_eq!(
+        rendered_in(&h, pane).scroll,
+        DocumentScroll::Placed(Placed::At(at(8, 3.0)))
+    );
     // Within the same item the source is left alone.
     h.run(|state, _| state::view::scroll::scroll_to_line(state, pane, 0));
     h.run(|state, _| document::scrolled(state, pane, at(0, 0.0)));
@@ -412,12 +413,12 @@ fn clicking_a_split_rendering_moves_the_cursor_and_leaves_the_rendering() {
         let doc = &h.state.buffers[buffer].doc;
         let markdown = document::markdown(&h.state.documents, buffer, doc).unwrap();
         BlockClick {
-            line: markdown.blocks[markdown.roots[6]].lines.start,
+            line: markdown.blocks[markdown.roots[6]].origin.lines.start,
             version: doc.version,
         }
     };
     h.run(|state, _| document::click(state, pane, click));
-    assert_eq!(cursor_line(&h), 12);
+    assert_eq!(h.cursor_line(), 12);
     assert_eq!(rendered_in(&h, pane).scroll, DocumentScroll::item(0));
 }
 
@@ -430,7 +431,7 @@ fn sessions_keep_split_tabs() {
         document::scrolled(
             state,
             pane,
-            DocumentAt {
+            TopItem {
                 item: 4,
                 offset: Px(0.0),
             },

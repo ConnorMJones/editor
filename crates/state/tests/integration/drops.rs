@@ -1,12 +1,14 @@
 use std::fs;
 
+use model::command::Shown;
 use model::geom::Point;
 use model::sheet::Viewport;
 use model::units::Px;
 use model::window::{Axis, Side};
 use state::project::path::RelPath;
 use state::view::layout::{Node, PaneId};
-use state::view::panes::{self, Dragged, DropOn, PanePoint, Zone};
+use state::view::panes::{self, Arrive, Dragged, DropOn, PanePoint, Zone};
+use state::view::tab::TextTabs;
 
 use crate::harness::Harness;
 
@@ -22,13 +24,14 @@ fn three_files() -> (tempfile::TempDir, Harness) {
 }
 
 fn file(h: &Harness, name: &str) -> Dragged {
-    Dragged::File(
-        RelPath::new(
+    Dragged::File {
+        file: RelPath::new(
             h.state.project.root.path(),
             &h.state.project.root.path().join(name),
         )
         .unwrap(),
-    )
+        arrive: Arrive::AsIs,
+    }
 }
 
 /// The middle of an 800 by 600 pane.
@@ -381,4 +384,33 @@ fn a_pasted_image_is_kept_beside_the_note_or_embedded_in_a_drawing() {
         h.state.notice,
         Some(model::notice::Notice::NoImageOnClipboard)
     ));
+}
+
+#[test]
+fn a_changed_file_dragged_from_the_changes_list_opens_its_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::git::init(dir.path(), &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+    fs::write(dir.path().join("b.txt"), "B\n").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.txt<ret>");
+    let changed = (h.state.project.git.changes().iter())
+        .find(|changed| changed.path.as_str() == "b.txt")
+        .unwrap()
+        .clone();
+    let dragged = Dragged::File {
+        file: changed.path.clone(),
+        arrive: changed.arrive(),
+    };
+    let pane = h.state.layout.focus();
+    drop(
+        &mut h,
+        dragged,
+        DropOn::Pane {
+            pane,
+            zone: centre(),
+        },
+    );
+    assert_eq!(h.focused_tabs(), ["a.txt", "±b.txt"]);
+    let shown = h.state.layout.focused().active_text().map(TextTabs::shown);
+    assert_eq!(shown, Some(Shown::Diff));
 }

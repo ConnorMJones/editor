@@ -1,13 +1,16 @@
+mod budget;
 mod drawing;
 mod fonts;
 mod input;
 mod page_tiles;
+mod pane_space;
 mod pictures;
 mod preview;
 mod prompt;
+mod reading;
 mod rendered;
+mod scroll_bar;
 mod sheet;
-mod sheet_bar;
 mod tabs;
 mod text;
 mod workspace;

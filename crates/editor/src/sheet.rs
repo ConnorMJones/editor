@@ -6,22 +6,22 @@ use std::sync::Arc;
 use gpui::{
     App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, GlobalElementId, Hitbox,
     HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels,
-    RenderImage, ScrollWheelEvent, Style, Window, fill, point, px, relative, white,
+    RenderImage, ScrollWheelEvent, Style, Window, fill, point, px, relative,
 };
 use helix_core::SmallVec;
 use model::geom::{Point, Vector};
 use model::picture::Picture;
 use model::sheet::{Measure, PageIndex, SheetView, Stack, Viewport};
-use model::units::Px;
 use slotmap::Key as _;
 use state::State;
 use state::render::typeset::{Compiled, Outcome};
 use state::view::layout::PaneId;
 use state::view::sheet::Wheel;
-use state::view::tab::{Showing, Tab};
+use state::view::sheet::{Sheeted, Stacked};
 use state::viewer::ImageFile;
 
-use crate::fonts::{PROSE_LINE, hsla};
+use crate::fonts::hsla;
+use crate::pane_space;
 use crate::pictures::{Drawn, decoded, paint_picture};
 use crate::rendered::update;
 use crate::workspace::Workspace;
@@ -72,29 +72,23 @@ pub struct Sheet<'a> {
 }
 
 pub fn sheet(state: &State, pane: PaneId) -> Option<Sheet<'_>> {
-    match state.layout.panes().get(pane)?.active()? {
-        Tab::Image(tab) => Some(Sheet {
-            view: &tab.view,
-            pages: Pages::Image(&state.images[tab.file()]),
-            last: tab.last,
-        }),
-        Tab::Text(text) => match text.showing() {
-            Showing::Pages(source, pages, _) => {
-                let typst = state.compiles.get(source.buffer())?;
-                let look = match typst.outcome {
-                    Outcome::Failed(_) => Look::Stale,
-                    Outcome::Pending | Outcome::Compiled => Look::Current,
-                };
-                Some(Sheet {
-                    view: &pages.view,
-                    pages: Pages::Typst(typst.pages.as_ref()?, look),
-                    last: pages.last,
-                })
-            }
-            Showing::Source(_) | Showing::Diff(..) | Showing::Document(..) => None,
-        },
-        Tab::Ink(_) => None,
-    }
+    let Sheeted::Pages { view, last, of } = state.layout.panes().get(pane)?.active()?.sheet()?
+    else {
+        return None;
+    };
+    let pages = match of {
+        Stacked::Image(id) => Pages::Image(&state.images[id]),
+        Stacked::Typst(buffer) => {
+            let typst = state.compiles.get(buffer)?;
+            let look = match typst.outcome {
+                Outcome::Failed(_) => Look::Stale,
+                Outcome::Pending | Outcome::Compiled => Look::Current,
+            };
+            Pages::Typst(typst.pages.as_ref()?, look)
+        }
+        Stacked::Paged(_) | Stacked::Pdf(_) => return None,
+    };
+    Some(Sheet { view, pages, last })
 }
 
 pub struct Prepared {
@@ -170,20 +164,11 @@ impl Element for SheetElement {
         cx: &mut App,
     ) -> Option<Prepared> {
         let pane = self.pane;
-        let viewport = Viewport::new(
-            Px(f32::from(bounds.size.width)),
-            Px(f32::from(bounds.size.height)),
-        )?;
+        let viewport = pane_space::viewport(bounds)?;
+        let last = sheet(&self.workspace.read(cx).state, pane)?.last;
+        pane_space::report_measure(&self.workspace, pane, viewport, last, window, cx);
         let workspace = self.workspace.read(cx);
-        let Sheet { view, pages, last } = sheet(&workspace.state, pane)?;
-        let measure = Measure {
-            viewport,
-            line: Px(f32::from(workspace.fonts.prose_size) * PROSE_LINE),
-        };
-        let unreported = match last {
-            Some(seen) if seen == measure => None,
-            Some(_) | None => Some(measure),
-        };
+        let Sheet { view, pages, .. } = sheet(&workspace.state, pane)?;
         let frame = view.frame(pages.stack(), viewport);
         let shown: SmallVec<[PageWanted; 4]> = (frame.shown(pages.stack()))
             .map(|page| {
@@ -206,18 +191,6 @@ impl Element for SheetElement {
             Pages::Image(_) => (Look::Current, Clicks::Nothing),
         };
         let (pictures, entity) = (workspace.pictures.clone(), self.workspace.downgrade());
-        // Keys that move by lines or part of the pane hear of a new size after this frame.
-        match unreported {
-            Some(measure) => {
-                let entity = self.workspace.clone();
-                window.defer(cx, move |_, cx| {
-                    entity.update(cx, |workspace, _| {
-                        state::view::sheet::measured(&mut workspace.state, pane, measure)
-                    })
-                });
-            }
-            None => {}
-        }
         let pages = (shown.into_iter())
             .map(|PageWanted { area, picture }| PageShown {
                 area,
@@ -256,7 +229,7 @@ impl Element for SheetElement {
         let surface = hsla(self.workspace.read(cx).theme.surface);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for PageShown { area, image } in &prepared.pages {
-                window.paint_quad(fill(*area, white()));
+                window.paint_quad(fill(*area, crate::drawing::solid(model::color::Rgb::WHITE)));
                 match image {
                     Some(image) => paint_picture(*area, image.clone(), window),
                     None => {}
@@ -267,13 +240,8 @@ impl Element for SheetElement {
                 }
             }
         });
-        let (pane, viewport, origin) = (self.pane, prepared.viewport, bounds.origin);
-        let on_pane = move |position: gpui::Point<Pixels>| {
-            Point::new(
-                f32::from(position.x - origin.x),
-                f32::from(position.y - origin.y),
-            )
-        };
+        let (pane, viewport) = (self.pane, prepared.viewport);
+        let on_pane = move |position: gpui::Point<Pixels>| pane_space::pane_point(bounds, position);
         match prepared.clicks {
             Clicks::GoToSource => window.on_mouse_event({
                 let (workspace, hitbox) = (self.workspace.downgrade(), prepared.hitbox.clone());

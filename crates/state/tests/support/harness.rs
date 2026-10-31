@@ -84,7 +84,20 @@ fn slot(clipboard: Clipboard) -> usize {
     }
 }
 
+pub fn canonical(dir: &std::path::Path, rel: &str) -> std::path::PathBuf {
+    dir.canonicalize().unwrap().join(rel)
+}
+
+pub fn hunk(before: std::ops::Range<u32>, after: std::ops::Range<u32>) -> state::git::diff::Hunk {
+    state::git::diff::Hunk { before, after }
+}
+
 impl Harness {
+    pub fn cursor_line(&self) -> usize {
+        let text = self.doc().text.slice(..);
+        self.view().selection.primary().cursor_line(text)
+    }
+
     fn boot(root: &Path, watcher: Option<(Watcher, mpsc::Receiver<Vec<PathBuf>>)>) -> Harness {
         let root = Root::open(root).expect("temp dir is a directory");
         let state = State::new(
@@ -306,6 +319,7 @@ impl Harness {
                     },
                     Tab::Ink(_) => "✎",
                     Tab::Image(_) => "▣",
+                    Tab::Book(_) => "❧",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),

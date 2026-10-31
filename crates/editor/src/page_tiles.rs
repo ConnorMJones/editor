@@ -379,31 +379,18 @@ pub fn evict(tiles: &mut PageTiles, window: &mut Window, cx: &mut App) {
             (TileState::Queued | TileState::Failed, _) => false,
             (TileState::Ready(_), _) => true,
         });
-    let bytes = |image: &RenderImage| {
-        let size = image.size(0);
-        size.width.0 as usize * size.height.0 as usize * 4
-    };
-    let mut ready: SmallVec<[(u64, TileKey, usize); 64]> = (tiles.entries.iter())
-        .filter_map(|(key, entry)| match &entry.state {
-            TileState::Ready(image) => Some((since(entry), key.clone(), bytes(image))),
+    let trimmed = crate::budget::keep_within(
+        &mut tiles.entries,
+        TILE_BYTES_KEPT,
+        since,
+        |entry| match &entry.state {
+            TileState::Ready(image) => Some(image),
             TileState::Queued | TileState::Failed => None,
-        })
-        .collect();
-    let mut kept: usize = ready.iter().map(|(_, _, bytes)| bytes).sum();
-    ready.sort_by_key(|(since, ..)| std::cmp::Reverse(*since));
-    let mut dropped = 0;
-    for (_, key, bytes) in ready.into_iter().filter(|(since, ..)| *since > 0) {
-        match kept.checked_sub(TILE_BYTES_KEPT) {
-            Some(1..) => {}
-            Some(0) | None => break,
-        }
-        match tiles.entries.remove(&key).map(|entry| entry.state) {
-            Some(TileState::Ready(image)) => cx.drop_image(image, Some(window)),
-            Some(TileState::Queued | TileState::Failed) | None => {}
-        }
-        kept -= bytes;
-        dropped += 1;
-    }
+        },
+        window,
+        cx,
+    );
+    let (kept, dropped) = (trimmed.kept, trimmed.dropped);
     let _span = tracing::trace_span!("pdf tiles kept", bytes = kept, dropped).entered();
     tiles.frame.store(frame + 1, Ordering::Relaxed);
 }

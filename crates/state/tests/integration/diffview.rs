@@ -5,12 +5,12 @@ use model::command::{ChangesCommand, Shown};
 use model::git::Group;
 use model::notice::Notice;
 use state::Confirm;
-use state::git::diffview::{self, DiffSides, LEFT, Left, RIGHT, Right};
+use state::git::diffview::{self, DiffShown, DiffSides, LEFT, Left, RIGHT, Right};
 use state::git::stage::Discard;
 use state::input;
 use state::input::keymap::Context;
 use state::project::session::{self, SessionMode, SessionPane, SessionSidebar, SessionView};
-use state::sidebar::changes::{self, ListCursor, ListRow};
+use state::sidebar::changes::{self, ListCursor, ListRow, Pick};
 use state::sidebar::tree::Fold;
 use state::view::draws::{self, Draws, Part, Rows};
 use state::view::layout::Viewport;
@@ -59,11 +59,6 @@ fn show(h: &mut Harness, rows: u16) {
     h.run(|state, _| scroll::measured(state, focus, Viewport { rows, cols: 40 }));
 }
 
-fn cursor_line(h: &Harness) -> usize {
-    let text = h.doc().text.slice(..);
-    h.view().selection.primary().cursor_line(text)
-}
-
 fn changed(h: &Harness) -> Vec<(Group, String)> {
     match &h.state.project.git {
         Repo::Found { snapshot, .. } => snapshot
@@ -83,7 +78,7 @@ fn a_tab_toggles_between_its_file_and_its_diff() {
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>3gg<space>d");
     assert_eq!(h.focused_tabs(), ["±a.txt"]);
-    assert_eq!(cursor_line(&h), 2, "the selection carries over");
+    assert_eq!(h.cursor_line(), 2, "the selection carries over");
     show(&mut h, 20);
     let shown = diff(&h);
     assert!(matches!(shown.left, Left::Head { .. }));
@@ -93,7 +88,7 @@ fn a_tab_toggles_between_its_file_and_its_diff() {
     // Toggling back shows the file in the same tab, where the diff left it.
     h.keys("j<space>d");
     assert_eq!(h.focused_tabs(), ["a.txt"]);
-    assert_eq!(cursor_line(&h), 3);
+    assert_eq!(h.cursor_line(), 3);
 
     // The diff's buffer side edits the same buffer.
     h.keys("<space>dggiZ<esc>");
@@ -139,10 +134,10 @@ fn next_hunk_past_the_end_opens_the_next_diff() {
     fs::write(dir.path().join("b.txt"), "a\nb\nc\nD\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret><space>d]g");
-    assert_eq!(cursor_line(&h), 1);
+    assert_eq!(h.cursor_line(), 1);
     h.keys("]g");
     assert_eq!(h.focused_tabs(), ["±a.txt", "±b.txt*"]);
-    assert_eq!(cursor_line(&h), 3, "lands on the first change of b.txt");
+    assert_eq!(h.cursor_line(), 3, "lands on the first change of b.txt");
     // From a file it moves on to the next file, which shows as a file too.
     h.keys("<space>d]g");
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
@@ -168,22 +163,22 @@ fn hunk_keys_wrap_through_changed_files_visiting_each_once() {
     };
     // Sidebar order is staged b, then a and c; b's unstaged entry is not visited again.
     h.keys(":o a.txt<ret>]g");
-    assert_eq!((file(&h), cursor_line(&h)), ("a.txt".to_owned(), 2));
+    assert_eq!((file(&h), h.cursor_line()), ("a.txt".to_owned(), 2));
     h.keys("]g");
-    assert_eq!((file(&h), cursor_line(&h)), ("c.txt".to_owned(), 4));
+    assert_eq!((file(&h), h.cursor_line()), ("c.txt".to_owned(), 4));
     h.keys("]g");
-    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 1));
+    assert_eq!((file(&h), h.cursor_line()), ("b.txt".to_owned(), 1));
     h.keys("]g");
-    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 3));
+    assert_eq!((file(&h), h.cursor_line()), ("b.txt".to_owned(), 3));
     h.keys("]g");
-    assert_eq!((file(&h), cursor_line(&h)), ("a.txt".to_owned(), 2));
+    assert_eq!((file(&h), h.cursor_line()), ("a.txt".to_owned(), 2));
     // Backwards lands on each file's last hunk, and past the first file wraps to the last.
     h.keys("[g");
-    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 3));
+    assert_eq!((file(&h), h.cursor_line()), ("b.txt".to_owned(), 3));
     h.keys("[g");
-    assert_eq!((file(&h), cursor_line(&h)), ("b.txt".to_owned(), 1));
+    assert_eq!((file(&h), h.cursor_line()), ("b.txt".to_owned(), 1));
     h.keys("[g");
-    assert_eq!((file(&h), cursor_line(&h)), ("c.txt".to_owned(), 4));
+    assert_eq!((file(&h), h.cursor_line()), ("c.txt".to_owned(), 4));
 }
 
 #[test]
@@ -200,6 +195,11 @@ fn deleted_files_show_head_beside_an_inert_side() {
     assert!(matches!(shown.left, Left::Head { .. }));
     assert!(matches!(draws(&h, Part::Head), Draws::Head { .. }));
     assert!(matches!(draws(&h, Part::Buffer), Draws::Deleted { .. }));
+    assert_eq!(
+        shown.shown(&h.state.buffers[buffer]),
+        DiffShown::Head,
+        "only HEAD is drawn"
+    );
     assert!(matches!(draws(&h, Part::Text), Draws::Absent));
     // HEAD's three lines face filler rows above the empty buffer.
     assert_eq!(shown.align.sides[RIGHT].lead, 3);
@@ -227,6 +227,12 @@ fn untracked_files_show_a_blank_head_side() {
     show(&mut h, 10);
     let shown = diff(&h);
     assert!(matches!(shown.left, Left::Absent));
+    let buffer = h.view().buffer();
+    assert_eq!(
+        shown.shown(&h.state.buffers[buffer]),
+        DiffShown::Buffer,
+        "only the file is drawn"
+    );
     assert_eq!(shown.align.key, None);
     assert!(matches!(draws(&h, Part::Head), Draws::NoHead));
     assert!(matches!(
@@ -339,7 +345,7 @@ fn changes_sidebar_groups_files_and_acts_on_them() {
             (Group::Changes, "b.txt".to_owned()),
         ]
     );
-    h.run(|state, out| panes::click_changes(state, 3, Click::Double, out));
+    h.run(|state, out| panes::click_changes(state, 3, Click::Double, Pick::Only, out));
     assert_eq!(h.focused_tabs(), ["±a.txt*", "±b.txt"]);
 
     h.keys("<esc>");
@@ -380,7 +386,7 @@ fn session_restores_diff_tabs_and_the_changes_sidebar() {
     assert_eq!(session::snapshot(&after.state), saved);
     assert_eq!(after.state.sidebar, Sidebar::Changes(Focus::Editor));
     assert_eq!(after.focused_tabs(), ["±a.txt"]);
-    assert_eq!(cursor_line(&after), 2);
+    assert_eq!(after.cursor_line(), 2);
     assert!(matches!(diff(&after).left, Left::Head { .. }));
 }
 
@@ -397,7 +403,7 @@ fn clicking_the_head_side_moves_the_cursor_to_the_facing_line() {
     let focus = h.state.layout.focus();
     // Row 3 of the HEAD side is its second line, `b`, below two filler rows.
     h.run(|state, _| diffview::click_left(state, focus, 3, 0));
-    assert_eq!(cursor_line(&h), 3);
+    assert_eq!(h.cursor_line(), 3);
     assert_eq!(h.view().selection, Selection::point(6));
 }
 
@@ -463,7 +469,7 @@ fn changes_groups_collapse_and_act_as_a_whole() {
     h.run(|state, out| panes::changes_action(state, 3, ChangesCommand::Stage, out));
     assert_eq!(staged_text(&repo, "b.txt").unwrap(), "a\nb\nC\nd\ne\n");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), FIVE);
-    h.run(|state, out| panes::click_changes(state, 0, Click::Single, out));
+    h.run(|state, out| panes::click_changes(state, 0, Click::Single, Pick::Only, out));
     assert_eq!(
         h.state.changes.folds[Group::Staged as usize],
         Fold::Collapsed
@@ -509,9 +515,93 @@ fn a_clean_repository_still_lists_staged_and_unstaged_groups() {
         ]
     );
     // The cursor rests on the first header, and a click there folds it.
-    h.run(|state, out| panes::click_changes(state, 0, Click::Single, out));
+    h.run(|state, out| panes::click_changes(state, 0, Click::Single, Pick::Only, out));
     assert_eq!(
         h.state.changes.folds[Group::Staged as usize],
         Fold::Collapsed
     );
+}
+
+#[test]
+fn a_diff_does_not_wrap_and_scrolls_sideways_with_its_divider_where_it_was_left() {
+    use state::view::layout::Sideways;
+    use state::view::tab::Share;
+    let long = format!("{}end\n", "x".repeat(200));
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &[("a.txt", long.as_str())]);
+    fs::write(dir.path().join("a.txt"), format!("{long}more\n")).unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys(":o a.txt<ret>");
+    assert_eq!(h.view().scroll.sideways, Sideways::Wrapped);
+    h.keys("<space>d");
+    show(&mut h, 10);
+    assert_eq!(h.view().scroll.sideways, Sideways::Unwrapped { left: 0 });
+    h.keys("gggl");
+    match h.view().scroll.sideways {
+        Sideways::Unwrapped { left } => assert!(left > 100, "the cursor at the end is in view"),
+        Sideways::Wrapped => panic!("a diff wraps"),
+    }
+    let focus = h.state.layout.focus();
+    h.run(|state, _| scroll::wheel_sideways(state, focus, -1000));
+    assert_eq!(h.view().scroll.sideways, Sideways::Unwrapped { left: 0 });
+
+    let share = Share::new(0.3).unwrap();
+    h.run(|state, _| state::view::mode::drag(state, focus, share));
+    assert_eq!(diff(&h).share, share);
+    h.keys("<space>d");
+    assert_eq!(
+        h.view().scroll.sideways,
+        Sideways::Wrapped,
+        "the source wraps again"
+    );
+}
+
+#[test]
+fn picked_changes_stage_and_unstage_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+    let repo = init(dir.path(), &names.map(|name| (name, FIVE)));
+    for name in names {
+        fs::write(dir.path().join(name), "changed\n").unwrap();
+    }
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>g");
+    // Rows: Staged header 0, Changes header 1, then a, b, c, d at 2..=5.
+    let click = |h: &mut Harness, row, pick| {
+        h.run(|state, out| panes::click_changes(state, row, Click::Single, pick, out))
+    };
+    click(&mut h, 2, Pick::Only);
+    click(&mut h, 4, Pick::Toggle);
+    assert_eq!(
+        h.state.changes.selected.len(),
+        2,
+        "the cursor's file joins the first pick"
+    );
+    h.keys("s");
+    assert_eq!(staged_text(&repo, "a.txt").unwrap(), "changed\n");
+    assert_eq!(staged_text(&repo, "c.txt").unwrap(), "changed\n");
+    assert_eq!(staged_text(&repo, "b.txt").unwrap(), FIVE);
+    assert!(h.state.changes.selected.is_empty());
+
+    // Staged now holds a and c at rows 1 and 2; Changes b and d at 4 and 5.
+    click(&mut h, 4, Pick::Only);
+    click(&mut h, 5, Pick::Extend);
+    h.keys("s");
+    assert_eq!(staged_text(&repo, "b.txt").unwrap(), "changed\n");
+    assert_eq!(staged_text(&repo, "d.txt").unwrap(), "changed\n");
+
+    // Staged: a, b, c, d at 1..=4. A shift range unstages through the `−` key.
+    click(&mut h, 1, Pick::Only);
+    click(&mut h, 3, Pick::Extend);
+    h.keys("u");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        assert_eq!(staged_text(&repo, name).unwrap(), FIVE);
+    }
+    assert_eq!(staged_text(&repo, "d.txt").unwrap(), "changed\n");
+
+    // A discard of several files is refused.
+    click(&mut h, 2, Pick::Only);
+    click(&mut h, 3, Pick::Toggle);
+    h.keys("d");
+    assert!(matches!(h.state.notice, Some(Notice::DiscardGroup)));
 }

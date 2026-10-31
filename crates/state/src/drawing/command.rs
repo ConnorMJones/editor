@@ -9,24 +9,19 @@ use ink::history::HistoryError;
 use ink::text::Fonts;
 use ink::tool::{Gather, ToolKind};
 use model::command::{
-    Annotate, Direction, DrawingCommand, InkCommand, InkTool, PageCommand, PageSide, PageStep,
-    PdfCommand,
+    Direction, DrawingCommand, InkCommand, InkTool, PageCommand, PageSide, PageStep, PdfCommand,
 };
 use model::mode::Mode;
 use model::notice::Notice;
-use model::register::Clipboard;
 use model::sheet::{Measure, SheetView, Stack, StackEdit};
 
 use crate::drawing::typing::{self, Ended};
 use crate::drawing::{
-    BoardTab, Doing, Found, Hand, InkFile, InkTabs, PagedId, PagedTab, PdfFile, PdfMode, PdfTab,
-    Reading, TextSpan,
+    BoardTab, Doing, Hand, InkFile, InkTabs, PagedId, PagedTab, PdfFile, PdfMode, PdfTab, Reading,
 };
-use crate::input::prompt;
 use crate::view::layout::Layout;
 use crate::view::tab::Tab;
-use crate::{Commenting, Effect, Overlay, PromptKind, State};
-use library::{Annotation, AnnotationId, Bookmark, Change, Highlight};
+use crate::{Effect, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -41,9 +36,6 @@ enum After {
     Follow(PagedId, StackEdit),
     /// The text being typed was finished, so the keys leave its modes.
     Typed,
-    Find,
-    FindText(String),
-    Comment(Commenting),
 }
 
 pub fn command(state: &mut State, command: DrawingCommand, out: &mut Vec<Effect>) {
@@ -55,8 +47,6 @@ pub fn command(state: &mut State, command: DrawingCommand, out: &mut Vec<Effect>
         notice,
         input,
         fonts,
-        overlay,
-        project,
         ..
     } = state;
     let result = match layout.focused_mut().active_mut() {
@@ -72,24 +62,12 @@ pub fn command(state: &mut State, command: DrawingCommand, out: &mut Vec<Effect>
             let file = &mut pdfs[tab.file()];
             pdf(tab, file, command, fonts, out)
         }
-        Some(Tab::Text(_) | Tab::Image(_)) | None => Err(Notice::NotADrawing),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => Err(Notice::NotADrawing),
     };
     match result {
         Ok(After::Nothing) => {}
         Ok(After::Follow(file, edit)) => follow(layout, file, edit),
         Ok(After::Typed) => input.mode = Mode::Normal,
-        Ok(After::Find) => {
-            *overlay = Overlay::Prompt(prompt::open(PromptKind::FindInPdf, &project.index))
-        }
-        Ok(After::FindText(query)) => crate::drawing::reading::find(state, query, out),
-        Ok(After::Comment(commenting)) => {
-            let line = (commenting.highlight.comment.as_ref())
-                .map_or(String::new(), |comment| comment.as_str().to_owned());
-            let mut prompt = prompt::open(PromptKind::Comment(commenting), &project.index);
-            prompt.cursor = line.len();
-            prompt.line = line;
-            *overlay = Overlay::Prompt(prompt);
-        }
         Err(refused) => *notice = Some(refused),
     }
 }
@@ -178,7 +156,7 @@ fn pdf(
 ) -> Result<After, Notice> {
     match command {
         DrawingCommand::Page(PageCommand::Go(step)) => {
-            go(&mut tab.view, &file.document().pages, step, tab.hand.last);
+            go(&mut tab.view, file.pages(), step, tab.hand.last);
             Ok(After::Nothing)
         }
         DrawingCommand::Page(PageCommand::Insert(_) | PageCommand::Remove) => {
@@ -205,86 +183,6 @@ fn pdf(
             )));
             Ok(After::of(ended))
         }
-        DrawingCommand::Pdf(PdfCommand::Copy) => match &tab.mode {
-            PdfMode::Read(Reading::Selected(span)) => {
-                let text = (file.document().text(span.page.0))
-                    .map(|text| text.slice(span.chars.clone()).to_owned())
-                    .ok_or(Notice::NothingSelected)?;
-                out.push(Effect::WriteClipboard {
-                    clipboard: Clipboard::System,
-                    text,
-                });
-                Ok(After::Nothing)
-            }
-            _ => Err(Notice::NothingSelected),
-        },
-        DrawingCommand::Pdf(PdfCommand::Find) => Ok(After::Find),
-        DrawingCommand::Pdf(PdfCommand::Annotate(annotate)) => {
-            let listed = file.notes.listed()?;
-            let selected = |span: &TextSpan| {
-                Highlight::of(file.document(), span.clone()).ok_or(Notice::NothingSelected)
-            };
-            match (annotate, &tab.mode) {
-                (Annotate::Highlight, PdfMode::Read(Reading::Selected(span))) => {
-                    let highlight = selected(span)?;
-                    out.push(
-                        listed.write(tab.file(), Change::Put(Annotation::Highlight(highlight))),
-                    );
-                    Ok(After::Nothing)
-                }
-                (Annotate::Comment, PdfMode::Read(Reading::Selected(span))) => {
-                    Ok(After::Comment(Commenting {
-                        file: tab.file(),
-                        highlight: selected(span)?,
-                    }))
-                }
-                (Annotate::Comment, PdfMode::Read(Reading::OnHighlight(highlight))) => {
-                    Ok(After::Comment(Commenting {
-                        file: tab.file(),
-                        highlight: highlight.clone(),
-                    }))
-                }
-                (Annotate::Remove, PdfMode::Read(Reading::OnHighlight(highlight))) => {
-                    out.push(listed.write(tab.file(), Change::Remove(highlight.id)));
-                    Ok(After::Nothing)
-                }
-                (Annotate::Bookmark, _) => {
-                    let page = tab.view.centre.page;
-                    let marked = (listed.notebook.bookmarks.iter()).find(|mark| mark.page == page);
-                    let change = match marked {
-                        Some(bookmark) => Change::Remove(bookmark.id),
-                        None => Change::Put(Annotation::Bookmark(Bookmark {
-                            id: AnnotationId::new(),
-                            page,
-                        })),
-                    };
-                    out.push(listed.write(tab.file(), change));
-                    Ok(After::Nothing)
-                }
-                (Annotate::Highlight | Annotate::Comment, _) => Err(Notice::NothingSelected),
-                (Annotate::Remove, _) => Err(Notice::NoHighlightPicked),
-            }
-        }
-        DrawingCommand::Pdf(PdfCommand::FindSelection) => match &tab.mode {
-            PdfMode::Read(Reading::Selected(span)) => (file.document().text(span.page.0))
-                .map(|text| After::FindText(text.slice(span.chars.clone()).to_owned()))
-                .ok_or(Notice::NothingSelected),
-            _ => Err(Notice::NothingSelected),
-        },
-        DrawingCommand::Pdf(PdfCommand::FindNext(direction)) => match &mut tab.found {
-            Found::Hits { hits, at, .. } => {
-                let count = hits.len();
-                *at = match direction {
-                    Direction::Forward => (*at + 1) % count,
-                    Direction::Backward => (*at + count - 1) % count,
-                };
-                let viewport = tab.hand.last.map(|measure| measure.viewport);
-                tab.view
-                    .go_to(&file.document().pages, hits[*at].page, viewport);
-                Ok(After::Nothing)
-            }
-            Found::Nothing | Found::Searching { .. } => Err(Notice::NoSearch),
-        },
         DrawingCommand::Pdf(PdfCommand::Read) => {
             let ended = typing::finish(&mut tab.hand.doing, &mut file.ink, fonts);
             tab.hand.cancel_stroke();
@@ -320,7 +218,7 @@ fn follow(layout: &mut Layout, file: PagedId, edit: StackEdit) {
                 Tab::Ink(InkTabs::Paged(tab)) if tab.file() == file && pane != focus => {
                     tab.view.follow(edit)
                 }
-                Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => {}
+                Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => {}
             }
         }
     }
@@ -441,7 +339,7 @@ pub fn step(state: &mut State, step: Step) {
             tab.hand.cancel_stroke();
             history(&mut pdfs[tab.file()].ink, step)
         }
-        Some(Tab::Image(_)) => Err(Notice::ReadOnly),
+        Some(Tab::Image(_) | Tab::Book(_)) => Err(Notice::ReadOnly),
         Some(Tab::Text(_)) | None => Err(Notice::NotADrawing),
     };
     match result {

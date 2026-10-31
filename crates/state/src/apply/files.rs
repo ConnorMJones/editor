@@ -12,6 +12,7 @@ use model::notice::Notice;
 use ink::doc::Drawing;
 
 use super::map_views;
+use crate::book::BookFile;
 use crate::drawing::{InkFile, InkTabs, PdfFile};
 use crate::git::diff::Diff;
 use crate::git::navigate::{self, Landing};
@@ -21,6 +22,8 @@ use crate::job::{
     Saving, Written, read_file,
 };
 use crate::project::path::FileKind;
+use crate::reading::{self, ReaderId, Reading};
+use crate::render::typeset;
 use crate::text::buffer::{Buffer, BufferId, Disk, Position, Read, ReadId, Target, Waiter};
 use crate::view::layout::{Layout, PaneId, Tabs};
 use crate::view::panes::Arrive;
@@ -133,7 +136,11 @@ pub fn write_modified(state: &mut State, out: &mut Vec<Effect>) -> Vec<Opened> {
 pub fn reload_job(state: &mut State, opened: Opened) -> Job {
     match opened {
         Opened::Text(id) => state.buffers[id].doc.commit(&state.layout.selection_of(id)),
-        Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_) => {}
+        Opened::Paged(_)
+        | Opened::Board(_)
+        | Opened::Pdf(_)
+        | Opened::Image(_)
+        | Opened::Book(_) => {}
     }
     Job::Reload {
         file: state.reload_of(opened),
@@ -172,23 +179,7 @@ pub fn canonical(root: &Path, path: &Path) -> Result<PathBuf, Notice> {
 
 /// What already holds `path`, in the store its kind of file lives in.
 fn open_file(state: &State, path: &Path) -> Option<Opened> {
-    match FileKind::of(path) {
-        FileKind::Text(_) => (state.buffers.iter())
-            .find(|(_, buffer)| buffer.path == path)
-            .map(|(id, _)| Opened::Text(id)),
-        FileKind::Paged => (state.pageds.iter())
-            .find(|(_, file)| file.path == path)
-            .map(|(id, _)| Opened::Paged(id)),
-        FileKind::Board => (state.boards.iter())
-            .find(|(_, file)| file.path == path)
-            .map(|(id, _)| Opened::Board(id)),
-        FileKind::Pdf => (state.pdfs.iter())
-            .find(|(_, file)| file.ink.path == path)
-            .map(|(id, _)| Opened::Pdf(id)),
-        FileKind::Image(_) => (state.images.iter())
-            .find(|(_, file)| *file.path == *path)
-            .map(|(id, _)| Opened::Image(id)),
-    }
+    state.files().find(|opened| state.path_of(*opened) == path)
 }
 
 /// Puts a read file in its store, or says why it couldn't be read.
@@ -233,6 +224,13 @@ fn insert(
             modified,
             disk: Disk::Synced { mtime: modified },
         }))),
+        OpenRead::Book { mut read, disk } => {
+            state.notice = read.said.take().or(state.notice.take());
+            typeset::settle(&mut state.figures, std::mem::take(&mut read.images));
+            Ok(Opened::Book(
+                state.books.insert(BookFile::new(&path, read, disk)),
+            ))
+        }
         OpenRead::NotUtf8 => Err(Notice::NotUtf8 { path }),
         OpenRead::NotAFile => Err(Notice::NotAFile { path }),
         OpenRead::Failed(error) => Err(Notice::OpenFailed { path, error }),
@@ -316,10 +314,20 @@ fn show(state: &mut State, opened: Opened, waiter: Waiter) {
     panes::show(state, pane, opened, arrive, open);
     match (to, opened) {
         (Some(Target::Annotation(id)), Opened::Pdf(file)) => {
-            crate::drawing::reading::arrive(state, pane, file, id)
+            crate::reading::arrive(state, pane, ReaderId::Pdf(file), id)
+        }
+        (Some(Target::Annotation(id)), Opened::Book(file)) => {
+            crate::reading::arrive(state, pane, ReaderId::Book(file), id)
         }
         (Some(to), Opened::Text(buffer)) => place(state, pane, buffer, to),
-        (Some(_), Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_))
+        (
+            Some(_),
+            Opened::Paged(_)
+            | Opened::Board(_)
+            | Opened::Pdf(_)
+            | Opened::Image(_)
+            | Opened::Book(_),
+        )
         | (None, _) => {}
     }
 }
@@ -455,6 +463,8 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
         boards,
         pdfs,
         images,
+        books,
+        figures,
         layout,
         languages,
         notice,
@@ -568,6 +578,38 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
             },
             None => {}
         },
+        Reloaded::Book(id, read) => match books.get_mut(id) {
+            Some(file) => match read {
+                DiskRead::Changed { mut content, mtime } => {
+                    typeset::settle(figures, std::mem::take(&mut content.images));
+                    file.replace(content, Disk::Synced { mtime });
+                    let last = file.flow.flow.roots.len() - 1;
+                    for (_, pane) in layout.panes_mut() {
+                        for item in pane.items_mut() {
+                            match &mut item.tab {
+                                Tab::Book(tab) if tab.file() == id => {
+                                    let at = tab.scroll.at_mut();
+                                    at.item = at.item.min(last);
+                                    tab.reading = Reading::Idle;
+                                    tab.found = reading::Found::Nothing;
+                                }
+                                Tab::Book(_) | Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) => {}
+                            }
+                        }
+                    }
+                }
+                DiskRead::Unreadable(error) => {
+                    *notice = Some(Notice::Unreadable {
+                        path: file.path.to_path_buf(),
+                        reason: error.to_string(),
+                    })
+                }
+                DiskRead::Missed(missed_read) => {
+                    missed(missed_read, &file.path, &mut file.disk, notice)
+                }
+            },
+            None => {}
+        },
     }
 }
 
@@ -638,7 +680,7 @@ fn drawing_tabs(layout: &mut Layout, opened: Opened) -> impl Iterator<Item = &mu
         .flat_map(|(_, pane)| pane.items_mut())
         .filter_map(move |item| match &mut item.tab {
             Tab::Ink(ink) if ink.opened() == opened => Some(ink),
-            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => None,
+            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => None,
         })
 }
 
@@ -677,19 +719,31 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
         }
         (
             Writable::Text(_),
-            FileKind::Paged | FileKind::Board | FileKind::Pdf | FileKind::Image(_),
+            FileKind::Paged | FileKind::Board | FileKind::Pdf | FileKind::Book | FileKind::Image(_),
         )
         | (
             Writable::Paged(_),
-            FileKind::Text(_) | FileKind::Board | FileKind::Pdf | FileKind::Image(_),
+            FileKind::Text(_)
+            | FileKind::Board
+            | FileKind::Pdf
+            | FileKind::Book
+            | FileKind::Image(_),
         )
         | (
             Writable::Board(_),
-            FileKind::Text(_) | FileKind::Paged | FileKind::Pdf | FileKind::Image(_),
+            FileKind::Text(_)
+            | FileKind::Paged
+            | FileKind::Pdf
+            | FileKind::Book
+            | FileKind::Image(_),
         )
         | (
             Writable::Pdf(_),
-            FileKind::Text(_) | FileKind::Paged | FileKind::Board | FileKind::Image(_),
+            FileKind::Text(_)
+            | FileKind::Paged
+            | FileKind::Board
+            | FileKind::Book
+            | FileKind::Image(_),
         ) => {
             return Err(Notice::WrongExtension { path });
         }

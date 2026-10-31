@@ -9,11 +9,13 @@ use model::window::Axis;
 use serde::{Deserialize, Serialize};
 
 use crate::apply;
-use crate::drawing::{self, InkTabs, PdfMode, ResumeIn};
+use crate::book::BookTab;
+use crate::drawing::{self, InkTabs, ResumeIn};
 use crate::job::Job;
 use crate::project::path::{Folder, RelPath};
 use crate::render::Opening;
 use crate::render::document::DocumentScroll;
+use crate::render::document::Placed;
 use crate::render::pages::Locating;
 use crate::sidebar::tree::{self, Dir, Fold, Listing};
 use crate::text::buffer::{BufferId, Saved, Target};
@@ -62,6 +64,7 @@ enum Restoring {
 enum Reopen {
     Drawing(drawing::Saved),
     Image(SheetView),
+    Book(usize),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -94,35 +97,86 @@ pub enum SessionView {
     },
     Paged {
         layer: usize,
-        page: usize,
-        x: f32,
-        y: f32,
-        fit: Fit,
-        zoom: f32,
+        sheet: SessionSheet,
     },
     Pdf {
         layer: usize,
-        page: usize,
-        x: f32,
-        y: f32,
-        fit: Fit,
-        zoom: f32,
+        sheet: SessionSheet,
         mode: ResumeIn,
     },
-    // `x` and `y` are the board point at the pane's centre.
     Board {
         layer: usize,
-        x: f32,
-        y: f32,
-        zoom: f32,
+        plane: SessionPlane,
     },
-    // `x` and `y` are the point on the image at the pane's centre.
     Image {
-        x: f32,
-        y: f32,
-        fit: Fit,
-        zoom: f32,
+        sheet: SessionSheet,
     },
+    Book {
+        item: usize,
+    },
+}
+
+// `x` and `y` are the point at the pane's centre, on page `page`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSheet {
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub fit: Fit,
+    pub zoom: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPlane {
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+}
+
+impl From<SheetView> for SessionSheet {
+    fn from(view: SheetView) -> SessionSheet {
+        SessionSheet {
+            page: view.centre.page.0,
+            x: view.centre.at.x,
+            y: view.centre.at.y,
+            fit: view.fit,
+            zoom: view.zoom.get(),
+        }
+    }
+}
+
+impl From<SessionSheet> for SheetView {
+    fn from(sheet: SessionSheet) -> SheetView {
+        SheetView {
+            centre: Spot {
+                page: PageIndex(sheet.page),
+                at: Point::new(sheet.x, sheet.y),
+            },
+            fit: sheet.fit,
+            zoom: Zoom::clamped(sheet.zoom),
+        }
+    }
+}
+
+impl From<PlaneView> for SessionPlane {
+    fn from(view: PlaneView) -> SessionPlane {
+        SessionPlane {
+            x: view.centre.x,
+            y: view.centre.y,
+            zoom: view.zoom.get(),
+        }
+    }
+}
+
+impl From<SessionPlane> for PlaneView {
+    fn from(plane: SessionPlane) -> PlaneView {
+        PlaneView {
+            centre: Point::new(plane.x, plane.y),
+            zoom: Zoom::clamped(plane.zoom),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,35 +266,22 @@ pub fn snapshot(state: &State) -> Session {
                             Tab::Text(text) => text_view(text),
                             Tab::Ink(InkTabs::Paged(tab)) => SessionView::Paged {
                                 layer: tab.hand.layer.0,
-                                page: tab.view.centre.page.0,
-                                x: tab.view.centre.at.x,
-                                y: tab.view.centre.at.y,
-                                fit: tab.view.fit,
-                                zoom: tab.view.zoom.get(),
+                                sheet: tab.view.into(),
                             },
                             Tab::Ink(InkTabs::Pdf(tab)) => SessionView::Pdf {
                                 layer: tab.hand.layer.0,
-                                page: tab.view.centre.page.0,
-                                x: tab.view.centre.at.x,
-                                y: tab.view.centre.at.y,
-                                fit: tab.view.fit,
-                                zoom: tab.view.zoom.get(),
-                                mode: match tab.mode {
-                                    PdfMode::Read(_) => ResumeIn::Read,
-                                    PdfMode::Markup => ResumeIn::Markup,
-                                },
+                                sheet: tab.view.into(),
+                                mode: tab.mode.resume(),
                             },
                             Tab::Ink(InkTabs::Board(tab)) => SessionView::Board {
                                 layer: tab.hand.layer.0,
-                                x: tab.view.centre.x,
-                                y: tab.view.centre.y,
-                                zoom: tab.view.zoom.get(),
+                                plane: tab.view.into(),
                             },
                             Tab::Image(tab) => SessionView::Image {
-                                x: tab.view.centre.at.x,
-                                y: tab.view.centre.at.y,
-                                fit: tab.view.fit,
-                                zoom: tab.view.zoom.get(),
+                                sheet: tab.view.into(),
+                            },
+                            Tab::Book(tab) => SessionView::Book {
+                                item: tab.scroll.at().item,
                             },
                         },
                     })
@@ -356,63 +397,27 @@ pub fn restore(
                     primary,
                     scroll,
                 } => Restoring::Text(mode, ranges, primary, scroll),
-                SessionView::Paged {
-                    layer,
-                    page,
-                    x,
-                    y,
-                    fit,
-                    zoom,
-                } => Restoring::Reopen(Reopen::Drawing(drawing::Saved::Paged {
-                    layer: LayerIndex(layer),
-                    view: SheetView {
-                        centre: Spot {
-                            page: PageIndex(page),
-                            at: Point::new(x, y),
-                        },
-                        fit,
-                        zoom: Zoom::clamped(zoom),
-                    },
-                })),
-                SessionView::Pdf {
-                    layer,
-                    page,
-                    x,
-                    y,
-                    fit,
-                    zoom,
-                    mode,
-                } => Restoring::Reopen(Reopen::Drawing(drawing::Saved::Pdf {
-                    layer: LayerIndex(layer),
-                    view: SheetView {
-                        centre: Spot {
-                            page: PageIndex(page),
-                            at: Point::new(x, y),
-                        },
-                        fit,
-                        zoom: Zoom::clamped(zoom),
-                    },
-                    mode,
-                })),
-                SessionView::Board { layer, x, y, zoom } => {
+                SessionView::Paged { layer, sheet } => {
+                    Restoring::Reopen(Reopen::Drawing(drawing::Saved::Paged {
+                        layer: LayerIndex(layer),
+                        view: sheet.into(),
+                    }))
+                }
+                SessionView::Pdf { layer, sheet, mode } => {
+                    Restoring::Reopen(Reopen::Drawing(drawing::Saved::Pdf {
+                        layer: LayerIndex(layer),
+                        view: sheet.into(),
+                        mode,
+                    }))
+                }
+                SessionView::Board { layer, plane } => {
                     Restoring::Reopen(Reopen::Drawing(drawing::Saved::Board {
                         layer: LayerIndex(layer),
-                        view: PlaneView {
-                            centre: Point::new(x, y),
-                            zoom: Zoom::clamped(zoom),
-                        },
+                        view: plane.into(),
                     }))
                 }
-                SessionView::Image { x, y, fit, zoom } => {
-                    Restoring::Reopen(Reopen::Image(SheetView {
-                        centre: Spot {
-                            page: PageIndex(0),
-                            at: Point::new(x, y),
-                        },
-                        fit,
-                        zoom: Zoom::clamped(zoom),
-                    }))
-                }
+                SessionView::Image { sheet } => Restoring::Reopen(Reopen::Image(sheet.into())),
+                SessionView::Book { item } => Restoring::Reopen(Reopen::Book(item)),
             };
             let (mode, ranges, primary, scroll) = match restoring {
                 Restoring::Text(mode, ranges, primary, scroll) => (mode, ranges, primary, scroll),
@@ -429,12 +434,25 @@ pub fn restore(
                             (Reopen::Image(view), Opened::Image(id)) => {
                                 Some(Tab::Image(ImageTab::new(id, view)))
                             }
+                            (Reopen::Book(item), Opened::Book(id)) => {
+                                let last = state.books[id].flow.flow.roots.len() - 1;
+                                Some(Tab::Book(BookTab::new(id, Placed::item(item.min(last)))))
+                            }
                             (
                                 Reopen::Image(_),
                                 Opened::Text(_)
                                 | Opened::Paged(_)
                                 | Opened::Board(_)
-                                | Opened::Pdf(_),
+                                | Opened::Pdf(_)
+                                | Opened::Book(_),
+                            )
+                            | (
+                                Reopen::Book(_),
+                                Opened::Text(_)
+                                | Opened::Paged(_)
+                                | Opened::Board(_)
+                                | Opened::Pdf(_)
+                                | Opened::Image(_),
                             ) => None,
                         }
                         .ok_or(wrong_kind)?,
@@ -460,7 +478,11 @@ pub fn restore(
                     match apply::read_now(state, &path, out) {
                         Ok(Opened::Text(buffer)) => buffer,
                         Ok(
-                            Opened::Paged(_) | Opened::Board(_) | Opened::Pdf(_) | Opened::Image(_),
+                            Opened::Paged(_)
+                            | Opened::Board(_)
+                            | Opened::Pdf(_)
+                            | Opened::Image(_)
+                            | Opened::Book(_),
                         ) => {
                             return Err(wrong_kind);
                         }
@@ -600,9 +622,7 @@ fn text_view(text: &TextTabs) -> SessionView {
         Showing::Document(_, view, beside) => saved(
             match view.scroll {
                 DocumentScroll::Line(line) => Opening::Line(line),
-                DocumentScroll::At(at) | DocumentScroll::Moved { from: at, .. } => {
-                    Opening::Item(at.item)
-                }
+                DocumentScroll::Placed(placed) => Opening::Item(placed.at().item),
             },
             beside,
         ),

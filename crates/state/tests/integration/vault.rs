@@ -10,7 +10,7 @@ use state::project::backlinks::Build;
 use state::project::files::{FileIndex, Indexed, OnIndexed};
 use state::project::path::RelPath;
 use state::render::document::{self, DocumentScroll};
-use state::render::markdown::{BlockKind, EmbedKind, ImageFile, LocalImage};
+use state::render::markdown::{BlockKind, EmbedKind, ImageFile, ImagePlace, LocalImage};
 
 use state::view::tab::{Showing, TextTabs};
 use state::{Confirm, Overlay, input};
@@ -70,11 +70,6 @@ fn focused(h: &Harness) -> String {
         .into_owned()
 }
 
-fn cursor_line(h: &Harness) -> usize {
-    let text = h.doc().text.slice(..);
-    h.view().selection.primary().cursor_line(text)
-}
-
 fn backlinks(h: &Harness) -> Vec<(String, u32)> {
     match &h.state.overlay {
         Overlay::Picker(picker) => match &picker.items {
@@ -114,12 +109,12 @@ fn gf_follows_wikilinks_headings_and_urls() {
     open_at(&mut h, "notes/a.md", "c.md#");
     h.keys("gf");
     assert_eq!(focused(&h), "notes/sub/c.md");
-    assert_eq!(cursor_line(&h), 4);
+    assert_eq!(h.cursor_line(), 4);
     // A wikilink heading in an open note moves the cursor at once.
     open_at(&mut h, "notes/a.md", "b#Second");
     h.keys("gf");
     assert_eq!(focused(&h), "notes/b.md");
-    assert_eq!(cursor_line(&h), 4);
+    assert_eq!(h.cursor_line(), 4);
     open_at(&mut h, "notes/a.md", "x.org");
     h.keys("gf");
     assert_eq!(h.urls, ["https://x.org/p"]);
@@ -203,7 +198,7 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
                 DocumentScroll::item(2),
                 "the Part heading is the third block"
             );
-            assert_eq!(cursor_line(&h), 4);
+            assert_eq!(h.cursor_line(), 4);
         }
         Some(Showing::Source(_) | Showing::Diff(..) | Showing::Pages(..)) | None => {
             panic!("not rendered")
@@ -229,7 +224,9 @@ fn embedded_images_resolve_from_other_folders() {
             assert_eq!(
                 image.kind,
                 EmbedKind::Image(ImageFile::Local(LocalImage {
-                    path: h.state.project.root.path().join("assets/pic.png").into(),
+                    place: ImagePlace::File(
+                        h.state.project.root.path().join("assets/pic.png").into()
+                    ),
                     encoding: Encoding::Bitmap(Bitmap::Png),
                 }))
             );
@@ -265,7 +262,7 @@ fn backlinks_list_linking_notes_and_follow_edits() {
     // Enter opens the note at the link's line.
     h.keys("<down><down><ret>");
     assert_eq!(focused(&h), "notes/sub/d.md");
-    assert_eq!(cursor_line(&h), 2);
+    assert_eq!(h.cursor_line(), 2);
     // Unsaved edits count: a new link above the old one moves it down a line.
     h.keys("ggO[[b]] first<esc>");
     h.keys(":o notes/b.md<ret><space>l");

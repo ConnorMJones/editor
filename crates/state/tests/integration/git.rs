@@ -6,12 +6,12 @@ use model::command::{Answer, Command, FileOp};
 use model::notice::Notice;
 use state::Confirm;
 use state::apply::apply;
-use state::git::diff::{Base, BaseRead, Bases, Hunk, Stage, Tracked, stage};
+use state::git::diff::{Base, BaseRead, Bases, Stage, Tracked, stage};
 use state::git::stage::Discard;
 use state::git::{RepoPath, track};
 use state::project::path::RelPath;
 
-use crate::harness::Harness;
+use crate::harness::{Harness, hunk};
 
 pub fn init(dir: &Path, files: &[(&str, &str)]) -> Repository {
     let repo = Repository::init(dir).expect("init repo");
@@ -70,10 +70,6 @@ fn tracked(h: &Harness) -> &Tracked {
 
 fn fresh(h: &Harness) -> bool {
     tracked(h).is_fresh(h.doc().version)
-}
-
-fn hunk(before: std::ops::Range<u32>, after: std::ops::Range<u32>) -> Hunk {
-    Hunk { before, after }
 }
 
 fn stages(h: &Harness) -> Vec<Stage> {

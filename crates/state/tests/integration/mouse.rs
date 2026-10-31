@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use model::command::{Command, PickerCommand, PickerKind};
 use model::notice::Notice;
@@ -11,11 +10,7 @@ use state::sidebar::tree::{self, Fold, RowKind};
 use state::view::panes::{self, Click};
 use state::{Effect, Files, Overlay, Sidebar};
 
-use crate::harness::Harness;
-
-fn canonical(dir: &Path, rel: &str) -> std::path::PathBuf {
-    dir.canonicalize().unwrap().join(rel)
-}
+use crate::harness::{Harness, canonical};
 
 fn row(h: &Harness, path: &str) -> usize {
     h.state

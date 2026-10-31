@@ -79,7 +79,7 @@ pub fn focused<'a>(
 ) -> Focused<'a> {
     let tab = match layout.focused_mut().active_mut() {
         None => return Focused::Empty,
-        Some(Tab::Image(_)) => return Focused::NotText,
+        Some(Tab::Image(_) | Tab::Book(_)) => return Focused::NotText,
         Some(Tab::Ink(ink)) => {
             return match ink.text_box() {
                 Some(text) => Focused::Text(FocusedText {

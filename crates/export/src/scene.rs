@@ -1,20 +1,14 @@
 //! What an export shows: a page, or a region of a board, as paper with the marks over it.
 
-use ink::doc::{
-    Background, Board, Drawing, LayerIndex, Mark, MarkId, PageIndex, Paged, Pattern, Underlay,
-};
+use ink::doc::{Background, Board, Drawing, LayerIndex, Mark, MarkId, PageIndex, Paged, Underlay};
 use std::cmp::Ordering;
 
 use ink::geom::{Local, Point, Rect, Surface};
 use ink::mesh::Mesh;
 use model::color::Rgb;
-use model::sheet::GAP;
 use smallvec::{SmallVec, smallvec};
 
-/// The width of a ruled line, in points.
-pub const RULE: f32 = 0.5;
-/// The side of a dot on dotted paper, in points.
-pub const DOT: f32 = 1.5;
+pub const MARGIN: f32 = 16.0;
 
 pub static BLANK: Underlay = Underlay::Blank;
 
@@ -73,8 +67,8 @@ pub fn region<'a>(board: &'a Board, region: &Region) -> Option<Scene<'a>> {
     let (min, max) = (bounds.min(), bounds.max());
     Some(Scene {
         area: Rect::spanning(
-            Point::new(min.x - GAP, min.y - GAP),
-            Point::new(max.x + GAP, max.y + GAP),
+            Point::new(min.x - MARGIN, min.y - MARGIN),
+            Point::new(max.x + MARGIN, max.y + MARGIN),
         ),
         paper: board.background,
         underlay: &BLANK,
@@ -97,35 +91,13 @@ impl Scene<'_> {
                 ink,
                 pattern,
                 spacing,
-            } => {
-                let (min, max) = (self.area.min(), self.area.max());
-                let step = spacing.get();
-                let lines = |from: f32, to: f32| {
-                    ((from / step).floor() as i64 + 1..)
-                        .map(move |n| n as f32 * step)
-                        .take_while(move |at| *at < to)
-                };
-                let rect = |x: f32, y: f32, width: f32, height: f32| {
-                    Rect::spanning(Point::new(x, y), Point::new(x + width, y + height))
-                };
-                let across = |y: f32| rect(min.x, y - RULE * 0.5, max.x - min.x, RULE);
-                let rects = match pattern {
-                    Pattern::Lines => lines(min.y, max.y).map(across).collect(),
-                    Pattern::Grid => (lines(min.y, max.y).map(across))
-                        .chain(
-                            lines(min.x, max.x)
-                                .map(|x| rect(x - RULE * 0.5, min.y, RULE, max.y - min.y)),
-                        )
-                        .collect(),
-                    Pattern::Dots => lines(min.y, max.y)
-                        .flat_map(|y| {
-                            lines(min.x, max.x)
-                                .map(move |x| rect(x - DOT * 0.5, y - DOT * 0.5, DOT, DOT))
-                        })
-                        .collect(),
-                };
-                smallvec![sheet(paper), Fill { color: ink, rects }]
-            }
+            } => smallvec![
+                sheet(paper),
+                Fill {
+                    color: ink,
+                    rects: pattern.rects(spacing, self.area),
+                }
+            ],
         }
     }
 }

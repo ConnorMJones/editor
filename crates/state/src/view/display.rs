@@ -11,7 +11,7 @@ use model::mode::Mode;
 use model::theme::{self, Background, Style};
 
 use crate::text::buffer::TextDoc;
-use crate::view::layout::{Scroll, Viewport};
+use crate::view::layout::{Scroll, Sideways, Viewport};
 
 /// Tab stops and indent-guide spacing of a document, in columns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,10 +42,13 @@ impl Indent {
 }
 
 /// Soft-wrapping format for a viewport, matching helix's defaults.
-pub fn text_format(viewport: Viewport, indent: Indent) -> TextFormat {
-    let width = viewport.cols;
+pub fn text_format(scroll: Scroll, indent: Indent) -> TextFormat {
+    let width = scroll.viewport.cols;
     TextFormat {
-        soft_wrap: width > 10,
+        soft_wrap: match scroll.sideways {
+            Sideways::Wrapped => width > 10,
+            Sideways::Unwrapped { .. } => false,
+        },
         tab_width: indent.tab_width,
         max_wrap: 20.min(width / 4),
         max_indent_retain: 40.min(width * 2 / 5),
@@ -243,7 +246,7 @@ pub fn layout(
 
     let indent = Indent::of(doc, loader);
     let unit = indent.unit.max(1);
-    let format = text_format(viewport, indent);
+    let format = text_format(scroll, indent);
     let anchor = scroll.anchor.min(text.len_chars());
     // Negative with filler rows above the first line on screen.
     let row_off = visual_offset_from_block(text, anchor, anchor, &format, annotations)
@@ -347,6 +350,13 @@ pub fn layout(
             area = Area::Indent;
         }
 
+        let col = match scroll.sideways {
+            Sideways::Wrapped => col,
+            Sideways::Unwrapped { left } => match col.checked_sub(left) {
+                Some(col) if col < viewport.cols => col,
+                Some(_) | None => continue,
+            },
+        };
         let source = match g.source {
             GraphemeSource::Document { codepoints: 0 } => Source::Eof,
             GraphemeSource::Document { .. } => Source::Text,

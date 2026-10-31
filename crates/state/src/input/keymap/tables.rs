@@ -4,9 +4,9 @@ use model::command::{
     Align, Annotate, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
     DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join, Motion,
     ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand, Pending, PickerCommand,
-    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, RegexOp, Resize, ScrollBy,
-    Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking,
-    ZoomBy,
+    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, ReadingCommand, RegexOp,
+    Resize, ScrollBy, Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand,
+    WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -1012,10 +1012,11 @@ const READ: Bindings = &[
         &[Key::code(KeyCode::End)],
         read(ReadCommand::Move(ReadMove::Bottom)),
     ),
-    (&[Key::code(KeyCode::Esc)], read(ReadCommand::Leave)),
     (&[Key::char(':')], Command::CommandMode),
     (&SAVE_ALL, Command::WriteAll),
 ];
+
+const LEAVE: Bindings = &[(&[Key::code(KeyCode::Esc)], read(ReadCommand::Leave))];
 
 const DOCUMENT: Bindings = &[
     (
@@ -1163,14 +1164,11 @@ const PDF_READ: Bindings = &[
         Command::Drawing(DrawingCommand::Pdf(PdfCommand::Markup)),
     ),
     (&SAVE_ALL, Command::WriteAll),
-    (
-        &[Key::char('y')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Copy)),
-    ),
-    (
-        &[Key::char('/')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Find)),
-    ),
+];
+
+const READER: Bindings = &[
+    (&[Key::char('y')], Command::Reading(ReadingCommand::Copy)),
+    (&[Key::char('/')], Command::Reading(ReadingCommand::Find)),
     (
         &[SPACE, Key::char('t')],
         Command::Picker(PickerCommand::Open(PickerKind::Outline)),
@@ -1185,39 +1183,31 @@ const PDF_READ: Bindings = &[
     ),
     (
         &[Key::char('v')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(
-            Annotate::Highlight,
-        ))),
+        Command::Reading(ReadingCommand::Annotate(Annotate::Highlight)),
     ),
     (
         &[Key::char('i')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(Annotate::Comment))),
+        Command::Reading(ReadingCommand::Annotate(Annotate::Comment)),
     ),
     (
         &[Key::char('d')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(Annotate::Remove))),
+        Command::Reading(ReadingCommand::Annotate(Annotate::Remove)),
     ),
     (
         &[Key::char('m')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Annotate(
-            Annotate::Bookmark,
-        ))),
+        Command::Reading(ReadingCommand::Annotate(Annotate::Bookmark)),
     ),
     (
         &[Key::char('n')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::FindNext(
-            Direction::Forward,
-        ))),
+        Command::Reading(ReadingCommand::FindNext(Direction::Forward)),
     ),
     (
         &[Key::char('N')],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::FindNext(
-            Direction::Backward,
-        ))),
+        Command::Reading(ReadingCommand::FindNext(Direction::Backward)),
     ),
     (
         &[Key::code(KeyCode::Esc)],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
+        Command::Reading(ReadingCommand::Clear),
     ),
 ];
 
@@ -1272,6 +1262,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[CONFIRM],
     &[
         READ,
+        LEAVE,
         DOCUMENT,
         MODES,
         MARKDOWN,
@@ -1282,6 +1273,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     ],
     &[
         READ,
+        LEAVE,
         SHEET,
         MODES,
         MARKDOWN,
@@ -1323,6 +1315,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     ],
     &[
         PDF_READ,
+        READER,
         PAGE_GO,
         SHEET,
         SHEET_VERTICAL,
@@ -1338,6 +1331,15 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         DRAWING,
         SHEET,
         SHEET_VERTICAL,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
+        READ,
+        DOCUMENT,
+        READER,
         WORKSPACE,
         WINDOW,
         SPACE_WINDOW,

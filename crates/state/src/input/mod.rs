@@ -47,6 +47,7 @@ pub fn context(state: &State) -> Context {
                 (Some(_), Mode::Insert | Mode::Select) => mode_context(state),
             },
             Some(Tab::Image(_)) => Context::ImageViewer,
+            Some(Tab::Book(_)) => Context::Book,
             Some(Tab::Text(text)) => match text.showing() {
                 Showing::Document(_, _, Beside::Alone) => Context::Document,
                 Showing::Pages(_, _, Beside::Alone) => Context::Pages,
@@ -136,7 +137,8 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::Drawing
             | Context::ImageViewer
             | Context::PdfRead
-            | Context::PdfMarkup),
+            | Context::PdfMarkup
+            | Context::Book),
         ) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
@@ -341,6 +343,7 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::ImageViewer
         | Context::PdfRead
         | Context::PdfMarkup
+        | Context::Book
         | Context::DrawingText => None,
     }
 }

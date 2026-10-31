@@ -1,6 +1,8 @@
 //! Renderings of markdown and typst, and the typesetting they ask for.
 
+pub mod book;
 pub mod document;
+pub mod flow;
 pub mod markdown;
 pub mod pages;
 pub mod typeset;
@@ -8,7 +10,7 @@ pub mod typeset;
 use model::command::{Direction, ReadCommand, ScrollBy, Shown};
 
 use crate::view::mode;
-use crate::view::tab::{ShowingMut, TextTabs};
+use crate::view::tab::{ShowingMut, Tab, TextTabs};
 use crate::{Effect, State};
 
 /// Where a rendering opens: on a source line, placed once the rendering is ready, or at a block
@@ -36,9 +38,14 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
 
 /// Scrolling keys for the rendering focused, and leaving it for the source.
 pub fn read(state: &mut State, command: ReadCommand) {
-    let motion = match command {
-        ReadCommand::Leave => return mode::show(state, Shown::Source),
-        ReadCommand::Move(motion) => motion,
+    let motion = match (command, state.layout.focused().active()) {
+        (ReadCommand::Move(motion), Some(Tab::Book(_))) => {
+            return crate::book::moved(state, motion);
+        }
+        (ReadCommand::Leave, _) => return mode::show(state, Shown::Source),
+        (ReadCommand::Move(motion), Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None) => {
+            motion
+        }
     };
     let State {
         layout,

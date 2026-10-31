@@ -69,7 +69,7 @@ pub fn written(
                         Tab::Ink(tabs @ InkTabs::Pdf(_)) if tabs.opened() == Opened::Pdf(file) => {
                             tabs.reloaded()
                         }
-                        Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => {}
+                        Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => {}
                     }
                 }
             }

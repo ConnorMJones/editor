@@ -12,8 +12,7 @@ use gpui::{
 };
 use helix_core::SmallVec;
 use ink::doc::{
-    Background, Board, Drawing, GeometryId, Ink, MarkId, PageIndex, Paged, Pattern, Underlay,
-    Visibility,
+    Background, Board, Drawing, GeometryId, Ink, MarkId, PageIndex, Paged, Underlay, Visibility,
 };
 use ink::input::{Pressure, Tilt};
 use ink::mesh::Mesh;
@@ -24,19 +23,21 @@ use model::geom::{Affine, Local, Pane, Point, Rect, Surface};
 use model::picture::{Picture, Source};
 use model::sheet::{Measure, Viewport};
 use model::theme::Color;
-use model::units::Px;
 use slotmap::Key as _;
 use state::drawing::frame::{self, InkFrame, Paper, REACH};
 use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
 use state::drawing::typing::Writing;
-use state::drawing::{Doing, Found, Hand, InkTabs, Notes, PdfMode, Reading, TextSpan};
+use state::drawing::{Doing, Hand, InkTabs, PdfMode};
 use state::view::layout::PaneId;
 use state::view::tab::Tab;
 
 use crate::fonts::hsla;
 use crate::page_tiles::{PageOnScreen, TileShown, prefetch, tiles_for};
+use crate::pane_space;
 use crate::pictures::{Drawn, decoded, paint_picture};
 use crate::workspace::Workspace;
+
+const LEAST_PATTERN_STEP: f32 = 4.0;
 
 /// The window's pixels.
 pub enum Screen {}
@@ -94,7 +95,7 @@ impl Element for DrawingElement {
         let pane = self.pane;
         let workspace = self.workspace.read(cx);
         (workspace.areas.drawings.borrow_mut()).insert(pane, bounds);
-        let Some(viewport) = viewport(bounds) else {
+        let Some(viewport) = pane_space::viewport(bounds) else {
             return Pictured::default();
         };
         let state = &workspace.state;
@@ -128,26 +129,13 @@ impl Element for DrawingElement {
                         pages: SmallVec::new(),
                     }
                 }
-                Some(Tab::Text(_) | Tab::Image(_)) | None => return Pictured::default(),
+                Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => {
+                    return Pictured::default();
+                }
             };
-        let measure = Measure {
-            viewport,
-            line: Px(f32::from(workspace.fonts.cell.height)),
-        };
         let (pictures, weak) = (workspace.pictures.clone(), self.workspace.downgrade());
         let page_tiles = workspace.page_tiles.clone();
-        // Keys that move by part of the pane hear of a new size after this frame.
-        match last {
-            Some(seen) if seen == measure => {}
-            Some(_) | None => {
-                let workspace = self.workspace.clone();
-                window.defer(cx, move |_, cx| {
-                    workspace.update(cx, |workspace, _| {
-                        state::view::sheet::measured(&mut workspace.state, pane, measure);
-                    })
-                });
-            }
-        }
+        pane_space::report_measure(&self.workspace, pane, viewport, last, window, cx);
         let view_bounds = Bounds::from_corners(
             point(px(view.min().x), px(view.min().y)),
             point(px(view.max().x), px(view.max().y)),
@@ -196,7 +184,7 @@ impl Element for DrawingElement {
         let state = &workspace.state;
         let desk = hsla(workspace.theme.surface);
         let accent = hsla(workspace.theme.editor.cursor_primary);
-        let Some(viewport) = viewport(bounds) else {
+        let Some(viewport) = pane_space::viewport(bounds) else {
             return;
         };
         let Placed { to_screen, view } = placed(bounds, viewport);
@@ -218,60 +206,27 @@ impl Element for DrawingElement {
                     let paged = file.ink.edited.drawing();
                     let frame = frame::paged(paged, &tab.view, viewport);
                     paint_ink::<Paged>(&frame, &tab.hand, paged, &screen, pictured, window);
-                    let reader = &workspace.theme.reader;
-                    let mut marked: SmallVec<[(&TextSpan, Hsla); 16]> = SmallVec::new();
-                    match &file.notes {
-                        Notes::Listed(listed) => marked.extend(
-                            (listed.notebook.highlights.iter())
-                                .filter(|highlight| frame.on(highlight.span.page).is_some())
-                                .map(|highlight| (&highlight.span, hsla(reader.highlight))),
+                    let marked = match &tab.mode {
+                        PdfMode::Read(reading) => crate::reading::marks(
+                            &workspace.theme.reader,
+                            &file.notes,
+                            &tab.found,
+                            reading,
+                            file.document(),
                         ),
-                        Notes::Unlisted(_) => {}
-                    }
-                    match &tab.found {
-                        Found::Hits { hits, at, .. } => marked.extend(
-                            (hits.iter().enumerate())
-                                .filter(|(_, hit)| frame.on(hit.page).is_some())
-                                .map(|(index, hit)| match index == *at {
-                                    true => (hit, hsla(reader.current_hit)),
-                                    false => (hit, hsla(reader.hit)),
-                                }),
-                        ),
-                        Found::Nothing | Found::Searching { .. } => {}
-                    }
-                    let selecting;
-                    match &tab.mode {
-                        PdfMode::Read(Reading::Selecting { page, anchor, head }) => {
-                            selecting = TextSpan {
-                                page: *page,
-                                chars: *anchor.min(head)..*anchor.max(head) + 1,
-                            };
-                            marked.push((&selecting, hsla(reader.selection)))
-                        }
-                        PdfMode::Read(Reading::Selected(span)) => {
-                            marked.push((span, hsla(reader.selection)))
-                        }
-                        PdfMode::Read(Reading::OnHighlight(highlight)) => {
-                            marked.push((&highlight.span, hsla(reader.selection)))
-                        }
-                        PdfMode::Read(Reading::Idle) | PdfMode::Markup => {}
-                    }
+                        PdfMode::Markup => crate::reading::Marks::new(),
+                    };
                     for (span, color) in marked {
-                        let (Some(text), Some(shown)) =
-                            (file.document().text(span.page.0), frame.on(span.page))
-                        else {
+                        let (Some(text), Some(shown)) = (
+                            file.document().text(span.part.0),
+                            frame.on(PageIndex(span.part.0)),
+                        ) else {
                             continue;
                         };
                         let to_screen = shown.to_pane.then(&screen.to_screen);
                         let mut path = PathBuilder::fill();
                         for char in text.chars.get(span.chars.clone()).unwrap_or_default() {
-                            for (index, corner) in char.quad.into_iter().enumerate() {
-                                let at = to_screen.apply(corner);
-                                match index {
-                                    0 => path.move_to(point(px(at.x), px(at.y))),
-                                    _ => path.line_to(point(px(at.x), px(at.y))),
-                                }
-                            }
+                            trace(&mut path, char.quad.map(|corner| to_screen.apply(corner)));
                             path.close();
                         }
                         match path.build() {
@@ -285,7 +240,7 @@ impl Element for DrawingElement {
                     let frame = frame::board(board, &tab.view, viewport);
                     paint_ink::<Board>(&frame, &tab.hand, board, &screen, pictured, window)
                 }
-                Some(Tab::Text(_) | Tab::Image(_)) | None => {}
+                Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => {}
             }
         });
     }
@@ -413,13 +368,6 @@ pub struct Onscreen {
     pub accent: Hsla,
 }
 
-pub fn viewport(bounds: Bounds<Pixels>) -> Option<Viewport> {
-    Viewport::new(
-        Px(f32::from(bounds.size.width)),
-        Px(f32::from(bounds.size.height)),
-    )
-}
-
 pub fn paint_ink<D: Drawing>(
     frame: &InkFrame<'_, D::Surface>,
     hand: &Hand<D::Target>,
@@ -432,16 +380,26 @@ pub fn paint_ink<D: Drawing>(
     let layers = drawing.layers();
     for shown in &frame.shown {
         let to_screen = shown.to_pane.then(&screen.to_screen);
-        let (area, background) = match shown.paper {
+        let (surface, background) = match shown.paper {
             Paper::Page { size, background } => {
                 let page = Rect::spanning(
                     Point::<Surface>::new(0.0, 0.0),
                     Point::new(size.width.get(), size.height.get()),
                 );
-                (page.mapped(&to_screen), background)
+                (Some(page), background)
             }
-            Paper::Plane(background) => (*view, background),
+            Paper::Plane(background) => {
+                let from_screen = to_screen.inverse();
+                (
+                    from_screen.map(|from_screen| view.mapped(&from_screen)),
+                    background,
+                )
+            }
         };
+        let Some(surface) = surface else {
+            continue;
+        };
+        let area = surface.mapped(&to_screen);
         let (min, max) = (area.min(), area.max());
         let rect = |left: f32, top: f32, width: f32, height: f32| {
             Bounds::new(point(px(left), px(top)), size(px(width), px(height)))
@@ -449,7 +407,7 @@ pub fn paint_ink<D: Drawing>(
         let sheet = rect(min.x, min.y, max.x - min.x, max.y - min.y);
         match background {
             Background::Pdf { page } => {
-                window.paint_quad(fill(sheet, solid(Rgb::hex(0xffffff))));
+                window.paint_quad(fill(sheet, solid(Rgb::WHITE)));
                 let tiles = pictured.pages.iter().find(|shown| shown.page == page);
                 for tile in tiles.into_iter().flat_map(|shown| &shown.tiles) {
                     paint_picture(tile.bounds, tile.image.clone(), window);
@@ -463,32 +421,15 @@ pub fn paint_ink<D: Drawing>(
                 spacing,
             } => {
                 window.paint_quad(fill(sheet, solid(paper)));
-                let step = spacing.get() * frame.scale;
                 let ink = solid(ink);
-                let (columns, rows) = (lines(min.x, max.x, step), lines(min.y, max.y, step));
-                // Too dense to read at this zoom, so the paper shows plain.
-                match (step < 4.0, pattern) {
-                    (true, _) => {}
-                    (false, Pattern::Lines) => {
-                        for y in rows {
-                            window.paint_quad(fill(rect(min.x, y, max.x - min.x, 1.0), ink));
-                        }
-                    }
-                    (false, Pattern::Grid) => {
-                        for y in rows {
-                            window.paint_quad(fill(rect(min.x, y, max.x - min.x, 1.0), ink));
-                        }
-                        for x in columns {
-                            window.paint_quad(fill(rect(x, min.y, 1.0, max.y - min.y), ink));
-                        }
-                    }
-                    (false, Pattern::Dots) => {
-                        for y in rows {
-                            for x in columns.clone() {
-                                window.paint_quad(fill(rect(x - 1.0, y - 1.0, 2.0, 2.0), ink));
-                            }
-                        }
-                    }
+                let marks = (Some(spacing))
+                    .filter(|spacing| spacing.get() * frame.scale >= LEAST_PATTERN_STEP)
+                    .map_or_else(Vec::new, |spacing| pattern.rects(spacing, surface));
+                for mark in marks {
+                    let shown = mark.mapped(&to_screen);
+                    let (at, extent) = (shown.min(), shown.max());
+                    let (width, height) = ((extent.x - at.x).max(1.0), (extent.y - at.y).max(1.0));
+                    window.paint_quad(fill(rect(at.x, at.y, width, height), ink));
                 }
             }
         }
@@ -542,13 +483,9 @@ pub fn paint_ink<D: Drawing>(
                         .find(|shown| shown.id == built.id)
                     {
                         Some(shown) => {
-                            let [a, b, c, d, e, f] = transform.coefficients;
                             let painted = window.paint_image_transformed(
                                 size(px(image.extent.width.get()), px(image.extent.height.get())),
-                                TransformationMatrix {
-                                    rotation_scale: [[a, c], [b, d]],
-                                    translation: [e, f],
-                                },
+                                matrix(&transform),
                                 shown.image.clone(),
                                 0,
                             );
@@ -640,13 +577,7 @@ pub fn paint_ink<D: Drawing>(
                 let rope = text.doc.text.slice(..);
                 let quad = |corners: [Point<Local>; 4], color: Hsla, window: &mut Window| {
                     let mut path = PathBuilder::fill();
-                    for (index, corner) in corners.into_iter().enumerate() {
-                        let at = transform.apply(corner);
-                        match index {
-                            0 => path.move_to(point(px(at.x), px(at.y))),
-                            _ => path.line_to(point(px(at.x), px(at.y))),
-                        }
-                    }
+                    trace(&mut path, corners.map(|corner| transform.apply(corner)));
                     path.close();
                     match path.build() {
                         Ok(path) => window.paint_path(path, color),
@@ -705,12 +636,7 @@ pub fn paint_ink<D: Drawing>(
     }
     let line = |points: &mut dyn Iterator<Item = Point<Screen>>, closed: Closed| {
         let mut path = PathBuilder::stroke(px(1.0));
-        for (index, at) in points.enumerate() {
-            match index {
-                0 => path.move_to(point(px(at.x), px(at.y))),
-                _ => path.line_to(point(px(at.x), px(at.y))),
-            }
-        }
+        trace(&mut path, points);
         match closed {
             Closed::Yes => path.close(),
             Closed::No => {}
@@ -823,7 +749,6 @@ pub fn paint_mesh(
         true => {}
         false => return,
     }
-    let [a, b, c, d, e, f] = transform.coefficients;
     window.paint_mesh(
         key,
         version,
@@ -831,10 +756,7 @@ pub fn paint_mesh(
             point(px(bounds.min().x), px(bounds.min().y)),
             point(px(bounds.max().x), px(bounds.max().y)),
         ),
-        TransformationMatrix {
-            rotation_scale: [[a, c], [b, d]],
-            translation: [e, f],
-        },
+        matrix(transform),
         hsla(color),
         &mut || MeshData {
             vertices: Cow::Owned(shape.vertices.iter().map(|at| [at.x, at.y]).collect()),
@@ -843,10 +765,21 @@ pub fn paint_mesh(
     );
 }
 
-pub fn lines(from: f32, to: f32, step: f32) -> impl Iterator<Item = f32> + Clone {
-    (1..)
-        .map(move |n| from + n as f32 * step)
-        .take_while(move |at| *at < to)
+fn trace<S>(path: &mut PathBuilder, points: impl IntoIterator<Item = Point<S>>) {
+    for (index, at) in points.into_iter().enumerate() {
+        match index {
+            0 => path.move_to(point(px(at.x), px(at.y))),
+            _ => path.line_to(point(px(at.x), px(at.y))),
+        }
+    }
+}
+
+fn matrix<From, To>(transform: &Affine<From, To>) -> TransformationMatrix {
+    let [a, b, c, d, e, f] = transform.coefficients;
+    TransformationMatrix {
+        rotation_scale: [[a, c], [b, d]],
+        translation: [e, f],
+    }
 }
 
 pub fn solid(rgb: Rgb) -> Hsla {
@@ -864,11 +797,10 @@ pub fn on_pane(
     position: gpui::Point<Pixels>,
 ) -> Option<(Point<Pane>, Viewport)> {
     let bounds = *workspace.areas.drawings.borrow().get(pane)?;
-    let at = Point::new(
-        f32::from(position.x - bounds.origin.x),
-        f32::from(position.y - bounds.origin.y),
-    );
-    Some((at, viewport(bounds)?))
+    Some((
+        pane_space::pane_point(bounds, position),
+        pane_space::viewport(bounds)?,
+    ))
 }
 
 pub fn sample(

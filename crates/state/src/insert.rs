@@ -130,7 +130,9 @@ pub fn into_focused(state: &State, at: Option<PanePoint>) -> Result<ImageInto, N
                 TextKind::Typst | TextKind::Code => Err(Notice::NoImagesHere),
             }
         }
-        Some(Tab::Ink(InkTabs::Pdf(_)) | Tab::Image(_)) | None => Err(Notice::NoImagesHere),
+        Some(Tab::Ink(InkTabs::Pdf(_)) | Tab::Image(_) | Tab::Book(_)) | None => {
+            Err(Notice::NoImagesHere)
+        }
     }
 }
 

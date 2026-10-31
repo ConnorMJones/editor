@@ -7,9 +7,10 @@ use model::command::Shown;
 use model::mode::Mode;
 use model::sheet::{Fit, Zoom};
 use state::State;
-use state::drawing::{Found, InkTabs, Notes, PdfMode, PdfTab};
+use state::drawing::{InkTabs, PdfMode, PdfTab};
 use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
+use state::reading::{Found, bookmark_in_view};
 use state::text::buffer::{Disk, Highlight};
 use state::view::layout::{Pane, PaneId};
 use state::view::tab::{Opened, Tab};
@@ -45,6 +46,14 @@ enum Tone {
 }
 
 impl Part {
+    fn found(found: &Found) -> Part {
+        match found {
+            Found::Hits { hits, at, .. } => Part::plain(format!("hit {}/{}", at + 1, hits.len())),
+            Found::Searching { .. } => Part::plain("searching".to_owned()),
+            Found::Nothing => Part::NONE,
+        }
+    }
+
     fn plain(text: String) -> Part {
         Part {
             text,
@@ -65,7 +74,10 @@ impl Workspace {
         let fonts = &self.fonts;
         let state = &self.state;
         let focused = pane == state.layout.focus();
-        let status = match state.layout.panes().get(pane).and_then(Pane::active) {
+        let active = state.layout.panes().get(pane).and_then(Pane::active);
+        let marked = (active.and_then(|tab| bookmark_in_view(tab, &state.pdfs, &state.books)))
+            .map_or("", |_| " \u{25cf}");
+        let status = match active {
             Some(Tab::Ink(ink)) => {
                 let opened = ink.opened();
                 let (tip, layer, layers, disk, place) = match ink {
@@ -85,12 +97,6 @@ impl Workspace {
                         let file = &pdf.ink;
                         let pages = file.edited.drawing().stack().sizes().len();
                         let focus = tab.view.centre.page;
-                        let marked = match &pdf.notes {
-                            Notes::Listed(listed) => (listed.notebook.bookmarks.iter())
-                                .find(|bookmark| bookmark.page == focus)
-                                .map_or("", |_| " \u{25cf}"),
-                            Notes::Unlisted(_) => "",
-                        };
                         let place = format!(
                             "page {}/{pages}{marked}  {}",
                             focus.0 + 1,
@@ -158,20 +164,8 @@ impl Workspace {
                         }),
                         Part::plain(place),
                         match ink {
-                            InkTabs::Pdf(PdfTab {
-                                found: Found::Hits { hits, at, .. },
-                                ..
-                            }) => Part::plain(format!("hit {}/{}", at + 1, hits.len())),
-                            InkTabs::Pdf(PdfTab {
-                                found: Found::Searching { .. },
-                                ..
-                            }) => Part::plain("searching".to_owned()),
-                            InkTabs::Pdf(PdfTab {
-                                found: Found::Nothing,
-                                ..
-                            })
-                            | InkTabs::Paged(_)
-                            | InkTabs::Board(_) => Part::NONE,
+                            InkTabs::Pdf(PdfTab { found, .. }) => Part::found(found),
+                            InkTabs::Paged(_) | InkTabs::Board(_) => Part::NONE,
                         },
                     ],
                 }
@@ -263,6 +257,22 @@ impl Workspace {
                     ],
                 }
             }
+            Some(Tab::Book(tab)) => {
+                let file = &state.books[tab.file()];
+                let items = file.flow.flow.roots.len();
+                let read = (tab.scroll.at().item + 1) * 100 / items;
+                Status {
+                    label: Label::Read,
+                    file: name(state, Opened::Book(tab.file())),
+                    flags: disk_flag(file.disk).to_owned(),
+                    parts: [
+                        Part::plain(file.title.clone()),
+                        Part::plain(format!("{read}%{marked}")),
+                        Part::found(&tab.found),
+                        Part::NONE,
+                    ],
+                }
+            }
             None => Status {
                 label: Label::Mode,
                 file: "[scratch]".to_owned(),
@@ -328,11 +338,7 @@ impl Workspace {
 
 /// The file's name under the project root.
 fn name(state: &State, opened: Opened) -> String {
-    let path = state.path_of(opened);
-    path.strip_prefix(state.project.root.path())
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    state.project.root.label(state.path_of(opened))
 }
 
 fn disk_flag(disk: Disk) -> &'static str {

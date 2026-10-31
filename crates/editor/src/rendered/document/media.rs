@@ -4,11 +4,11 @@ use gpui::{AnyElement, Div, IntoElement, SharedString, StyledText, TextRun, div,
 use model::picture::{Picture, Source};
 use model::theme::Theme;
 use model::units::Px;
-use state::render::markdown::{Figure, FigureKind, ImageFile};
+use state::render::markdown::{Figure, FigureKind, ImageFile, ImagePlace};
 use state::render::typeset::{Probe, Render};
 use state::viewer::Probed;
 
-use super::Draw;
+use super::{Draw, Drawable};
 use crate::fonts::{Fonts, hsla};
 use crate::pictures::picture_canvas;
 
@@ -82,7 +82,7 @@ pub fn placeholder(
 }
 
 /// A typeset figure: its image once ready, else its source (and error) in a muted box.
-pub fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyElement {
+pub fn figure_element<O: Drawable>(draw: &Draw<O>, figure: Figure, source: &str) -> AnyElement {
     let theme = draw.theme;
     let fonts = draw.fonts;
     let label = match figure.kind {
@@ -117,7 +117,7 @@ pub fn figure_element(draw: &Draw, figure: Figure, source: &str) -> AnyElement {
 }
 
 /// An image file at its pixel size, narrowed to the column; a box until its size is read.
-pub fn picture(draw: &Draw, file: &ImageFile, src: &str) -> AnyElement {
+pub fn picture<O: Drawable>(draw: &Draw<O>, file: &ImageFile, src: &str) -> AnyElement {
     let (theme, fonts) = (draw.theme, draw.fonts);
     let boxed =
         |label, text: &str| placeholder(theme, fonts, label, SharedString::from(text.to_owned()));
@@ -125,11 +125,19 @@ pub fn picture(draw: &Draw, file: &ImageFile, src: &str) -> AnyElement {
         ImageFile::Local(local) => match draw.figures.image(local) {
             Some(Probe::Read(Probed { size, modified })) => {
                 let (width, height) = (size.width.get(), size.height.get());
-                let picture = Picture {
-                    source: Source::File {
-                        path: local.path.clone(),
+                let source = match &local.place {
+                    ImagePlace::File(path) => Source::File {
+                        path: path.clone(),
                         modified: *modified,
                     },
+                    ImagePlace::Zipped { archive, name } => Source::Zipped {
+                        archive: archive.clone(),
+                        modified: *modified,
+                        name: name.clone(),
+                    },
+                };
+                let picture = Picture {
+                    source,
                     encoding: local.encoding,
                 };
                 div()

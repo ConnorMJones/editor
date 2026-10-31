@@ -118,7 +118,7 @@ pub fn complete(prompt: &mut Prompt, index: &FileIndex) {
     completion.start = 0;
     match prompt.kind {
         PromptKind::Command => {}
-        PromptKind::Regex { .. } | PromptKind::FindInPdf | PromptKind::Comment(_) => return,
+        PromptKind::Regex { .. } | PromptKind::Find | PromptKind::Comment(_) => return,
     }
     let line = prompt.line.as_str();
     let (name, arg) = match line.split_once(char::is_whitespace) {
@@ -464,7 +464,7 @@ pub fn cancel(state: &mut State) {
             ..
         }) => crate::apply::select(state, |_, _, _| snapshot),
         Overlay::Prompt(Prompt {
-            kind: PromptKind::Command | PromptKind::FindInPdf | PromptKind::Comment(_),
+            kind: PromptKind::Command | PromptKind::Find | PromptKind::Comment(_),
             ..
         })
         | Overlay::None
@@ -508,18 +508,18 @@ pub fn submit(state: &mut State, out: &mut Vec<Effect>) {
                     ..
                 }) => select::submit_regex(state, op, register, snapshot, line, out),
                 Overlay::Prompt(Prompt {
-                    kind: PromptKind::FindInPdf,
+                    kind: PromptKind::Find,
                     line,
                     ..
                 }) => match remember(state, Register::SEARCH, line, out) {
-                    Some(query) => crate::drawing::reading::find(state, query, out),
+                    Some(query) => crate::reading::find(state, query, out),
                     None => {}
                 },
                 Overlay::Prompt(Prompt {
                     kind: PromptKind::Comment(commenting),
                     line,
                     ..
-                }) => crate::drawing::reading::comment(state, commenting, line, out),
+                }) => crate::reading::comment(state, commenting, line, out),
                 Overlay::None | Overlay::Picker(_) | Overlay::Confirm(_) => {}
             }
         }

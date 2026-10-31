@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod book;
 pub mod drawing;
 pub mod export;
 pub mod git;
@@ -6,6 +7,7 @@ pub mod input;
 pub mod insert;
 pub mod job;
 pub mod project;
+pub mod reading;
 pub mod render;
 pub mod sidebar;
 pub mod text;
@@ -44,6 +46,7 @@ use crate::job::Job;
 use crate::project::Project;
 use crate::project::files::{FileIndex, OnIndexed};
 use crate::project::path::{Folder, RelPath};
+use crate::reading::Commenting;
 use crate::sidebar::changes::ChangesList;
 use crate::sidebar::tree::{Dir, Fold, Listing, Tree, TreeEdit};
 use crate::text::buffer::{Buffer, BufferId, Read, ReadId};
@@ -119,6 +122,13 @@ impl Launch {
 }
 
 impl Root {
+    pub fn label(&self, path: &Path) -> String {
+        path.strip_prefix(&self.0)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+
     pub fn open(path: &Path) -> Result<Root, RootError> {
         let canonical = path.canonicalize().map_err(|source| RootError::Resolve {
             path: path.to_owned(),
@@ -173,6 +183,7 @@ pub struct State {
     pub pdfs: drawing::PdfFiles,
     pub library: library::Library,
     pub images: viewer::ImageFiles,
+    pub books: book::BookFiles,
     /// What new ink tabs draw with.
     pub ink: drawing::InkSettings,
 }
@@ -236,6 +247,7 @@ impl State {
             changes: ChangesList {
                 cursor: None,
                 folds: [Fold::Expanded; Group::COUNT],
+                selected: Vec::new(),
             },
             matcher: nucleo::Matcher::default(),
             grep: Arc::new(AtomicU64::new(0)),
@@ -247,6 +259,7 @@ impl State {
             pdfs: SlotMap::with_key(),
             library,
             images: SlotMap::with_key(),
+            books: SlotMap::with_key(),
             ink: drawing::InkSettings::default(),
         })
     }
@@ -258,39 +271,30 @@ impl State {
             .chain(self.boards.keys().map(Opened::Board))
             .chain(self.pdfs.keys().map(Opened::Pdf))
             .chain(self.images.keys().map(Opened::Image))
+            .chain(self.books.keys().map(Opened::Book))
     }
 
-    /// The disk state of `opened`'s file.
+    pub fn file(&self, opened: Opened) -> &dyn OpenFile {
+        match opened {
+            Opened::Text(buffer) => &self.buffers[buffer],
+            Opened::Paged(id) => &self.pageds[id],
+            Opened::Board(id) => &self.boards[id],
+            Opened::Pdf(id) => &self.pdfs[id].ink,
+            Opened::Image(id) => &self.images[id],
+            Opened::Book(id) => &self.books[id],
+        }
+    }
+
     pub fn disk_of(&self, opened: Opened) -> text::buffer::Disk {
-        match opened {
-            Opened::Text(buffer) => self.buffers[buffer].disk,
-            Opened::Paged(id) => self.pageds[id].disk,
-            Opened::Board(id) => self.boards[id].disk,
-            Opened::Pdf(id) => self.pdfs[id].ink.disk,
-            Opened::Image(id) => self.images[id].disk,
-        }
+        self.file(opened).disk()
     }
 
-    /// Whether `opened` holds changes its file doesn't.
     pub fn is_modified(&self, opened: Opened) -> bool {
-        match opened {
-            Opened::Text(buffer) => self.buffers[buffer].doc.is_modified(),
-            Opened::Paged(id) => self.pageds[id].is_modified(),
-            Opened::Board(id) => self.boards[id].is_modified(),
-            Opened::Pdf(id) => self.pdfs[id].ink.is_modified(),
-            // Images are only viewed.
-            Opened::Image(_) => false,
-        }
+        self.file(opened).is_modified()
     }
 
     pub fn path_of(&self, opened: Opened) -> &std::path::Path {
-        match opened {
-            Opened::Text(buffer) => &self.buffers[buffer].path,
-            Opened::Paged(id) => &self.pageds[id].path,
-            Opened::Board(id) => &self.boards[id].path,
-            Opened::Pdf(id) => &self.pdfs[id].ink.path,
-            Opened::Image(id) => &self.images[id].path,
-        }
+        self.file(opened).path()
     }
 
     /// Drops `opened`'s file unless a tab still shows it.
@@ -315,6 +319,9 @@ impl State {
             Opened::Image(id) => {
                 self.images.remove(id);
             }
+            Opened::Book(id) => {
+                self.books.remove(id);
+            }
         }
     }
 
@@ -326,6 +333,7 @@ impl State {
             Opened::Board(id) => job::Reload::Board(id, self.fonts.clone()),
             Opened::Pdf(id) => job::Reload::Pdf(id, self.library.clone(), self.fonts.clone()),
             Opened::Image(id) => job::Reload::Image(id, self.images[id].encoding),
+            Opened::Book(id) => job::Reload::Book(id, self.library.clone()),
         }
     }
 
@@ -433,7 +441,7 @@ pub struct Prompt {
 
 pub enum PromptKind {
     Command,
-    FindInPdf,
+    Find,
     Comment(Commenting),
     /// Previews on every edit from `snapshot`, which cancel restores.
     Regex {
@@ -444,18 +452,12 @@ pub enum PromptKind {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Commenting {
-    pub file: drawing::PdfId,
-    pub highlight: library::Highlight,
-}
-
 impl PromptKind {
     /// Register keeping submitted lines, browsed with up and down.
     pub fn history(&self) -> Option<Register> {
         match self {
             PromptKind::Command => Some(Register::COMMAND),
-            PromptKind::FindInPdf => Some(Register::SEARCH),
+            PromptKind::Find => Some(Register::SEARCH),
             PromptKind::Comment(_) => None,
             PromptKind::Regex { register, .. } => Some(*register),
         }
@@ -464,7 +466,7 @@ impl PromptKind {
     pub fn label(&self) -> &'static str {
         match self {
             PromptKind::Command => ":",
-            PromptKind::FindInPdf => "find:",
+            PromptKind::Find => "find:",
             PromptKind::Comment(_) => "comment:",
             PromptKind::Regex { op, .. } => match op {
                 RegexOp::Search(_) => "search:",
@@ -702,5 +704,70 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     tracing::trace_span!("diffs").in_scope(|| git::track::sync(state, out));
     tracing::trace_span!("diff views").in_scope(|| git::diffview::refresh(state, out));
     tracing::trace_span!("typing").in_scope(|| drawing::typing::sync(state));
-    tracing::trace_span!("pdf text").in_scope(|| drawing::reading::sync(state, out));
+    tracing::trace_span!("pdf text").in_scope(|| drawing::pdf_text::sync(state, out));
+    tracing::trace_span!("reading place").in_scope(|| reading::sync(state, out));
+}
+
+pub trait OpenFile {
+    fn path(&self) -> &std::path::Path;
+
+    fn disk(&self) -> text::buffer::Disk;
+
+    fn is_modified(&self) -> bool;
+}
+
+impl OpenFile for text::buffer::Buffer {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disk(&self) -> text::buffer::Disk {
+        self.disk
+    }
+
+    fn is_modified(&self) -> bool {
+        self.doc.is_modified()
+    }
+}
+
+impl<D: ink::doc::Drawing> OpenFile for drawing::InkFile<D> {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disk(&self) -> text::buffer::Disk {
+        self.disk
+    }
+
+    fn is_modified(&self) -> bool {
+        drawing::InkFile::is_modified(self)
+    }
+}
+
+impl OpenFile for viewer::ImageFile {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disk(&self) -> text::buffer::Disk {
+        self.disk
+    }
+
+    fn is_modified(&self) -> bool {
+        false
+    }
+}
+
+impl OpenFile for book::BookFile {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disk(&self) -> text::buffer::Disk {
+        self.disk
+    }
+
+    fn is_modified(&self) -> bool {
+        false
+    }
 }
