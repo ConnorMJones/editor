@@ -42,6 +42,9 @@ use typeset::{FontSource, Typesetter};
 use crate::fonts::Fonts;
 use crate::workspace::{Drag, SessionFile, Workspace};
 
+#[cfg(any(debug_assertions, feature = "tracy"))]
+const LOG: &str = "info,simplecss=error";
+
 /// Reports every allocation to tracy with up to 16 frames of callstack.
 #[cfg(feature = "tracy-alloc")]
 #[global_allocator]
@@ -61,7 +64,7 @@ fn main() -> anyhow::Result<()> {
             Attach::Background => None,
         };
         let registry = tracing_subscriber::registry()
-            .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(EnvFilter::try_from_env("EDT_LOG").unwrap_or_else(|_| EnvFilter::new(LOG)))
             .with(terminal);
         #[cfg(feature = "tracy")]
         let registry = registry.with(match attach {

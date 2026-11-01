@@ -1,11 +1,13 @@
 pub mod apply;
 pub mod book;
+pub mod comment;
 pub mod drawing;
 pub mod export;
 pub mod git;
 pub mod input;
 pub mod insert;
 pub mod job;
+pub mod literature;
 pub mod project;
 pub mod reading;
 pub mod render;
@@ -649,6 +651,7 @@ pub enum Confirm {
     },
     /// Creates the empty note an unresolved link names, and opens it.
     Create(RelPath),
+    DropComment,
 }
 
 pub enum Repo {

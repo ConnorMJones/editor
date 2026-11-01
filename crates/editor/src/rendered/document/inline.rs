@@ -10,7 +10,7 @@ use model::theme::{Modifiers, Theme};
 use model::typeset::{Display, Svg};
 use model::units::Px;
 use state::book::Pressed;
-use state::reading::Press;
+use state::reading::{Press, Taps};
 use state::render::markdown::{Emphasis, Figure, FigureKind, Inline, Span, SpanKind};
 use state::render::typeset::Render;
 use state::view::layout::PaneId;
@@ -118,7 +118,12 @@ pub fn inline<O: Drawable>(
                         .on_mouse_down(
                             MouseButton::Left,
                             move |event: &MouseDownEvent, window, cx| {
-                                pressed(Press::Down, event.position, window, cx)
+                                pressed(
+                                    Press::Down(Taps::of(event.click_count)),
+                                    event.position,
+                                    window,
+                                    cx,
+                                )
                             },
                         )
                         .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {

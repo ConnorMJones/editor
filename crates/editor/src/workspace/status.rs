@@ -7,10 +7,11 @@ use model::command::Shown;
 use model::mode::Mode;
 use model::sheet::{Fit, Zoom};
 use state::State;
+use state::comment::{Edits, Writing};
 use state::drawing::{InkTabs, PdfMode, PdfTab};
 use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
-use state::reading::{Found, bookmark_in_view};
+use state::reading::{Found, Reading, bookmark_in_view};
 use state::text::buffer::{Disk, Highlight};
 use state::view::layout::{Pane, PaneId};
 use state::view::tab::{Opened, Tab};
@@ -125,6 +126,10 @@ impl Workspace {
                 };
                 let label = match ink {
                     InkTabs::Pdf(PdfTab {
+                        mode: PdfMode::Read(Reading::Writing(_)),
+                        ..
+                    }) => Label::Mode,
+                    InkTabs::Pdf(PdfTab {
                         mode: PdfMode::Read(_),
                         ..
                     }) => Label::Read,
@@ -142,7 +147,12 @@ impl Workspace {
                 Status {
                     label,
                     file: name(state, opened),
-                    flags: format!("{}{}", modified_flag(state, opened), disk_flag(disk)),
+                    flags: format!(
+                        "{}{}{}",
+                        modified_flag(state, opened),
+                        active.and_then(Tab::writing).map_or("", comment_flag),
+                        disk_flag(disk)
+                    ),
                     parts: [
                         tool,
                         Part::plain({
@@ -261,10 +271,17 @@ impl Workspace {
                 let file = &state.books[tab.file()];
                 let items = file.flow.flow.roots.len();
                 let read = (tab.scroll.at().item + 1) * 100 / items;
+                let (label, flags) = match &tab.reading {
+                    Reading::Writing(writing) => (Label::Mode, comment_flag(writing)),
+                    Reading::Idle
+                    | Reading::Selecting { .. }
+                    | Reading::Selected(_)
+                    | Reading::OnHighlight(_) => (Label::Read, ""),
+                };
                 Status {
-                    label: Label::Read,
+                    label,
                     file: name(state, Opened::Book(tab.file())),
-                    flags: disk_flag(file.disk).to_owned(),
+                    flags: format!("{flags}{}", disk_flag(file.disk)),
                     parts: [
                         Part::plain(file.title.clone()),
                         Part::plain(format!("{read}%{marked}")),
@@ -346,6 +363,13 @@ fn disk_flag(disk: Disk) -> &'static str {
         Disk::Synced { .. } | Disk::New => "",
         Disk::ChangedExternally { .. } => " [changed on disk]",
         Disk::Deleted => " [deleted]",
+    }
+}
+
+fn comment_flag(writing: &Writing) -> &'static str {
+    match writing.edits() {
+        Edits::Unsaved => "[+]",
+        Edits::Saved => "",
     }
 }
 

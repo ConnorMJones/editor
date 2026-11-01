@@ -23,7 +23,7 @@ pub struct Flow<O: Origin> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block<O: Origin> {
-    pub kind: BlockKind<O::Target>,
+    pub kind: BlockKind<O>,
     pub origin: O,
     pub end: usize,
 }
@@ -34,38 +34,93 @@ pub struct Lines {
     pub lines: Range<usize>,
 }
 
-pub trait Origin {
+pub trait Origin: Clone + std::fmt::Debug + PartialEq {
     type Target: Clone + std::fmt::Debug + PartialEq;
+    type Task: Clone + Copy + std::fmt::Debug + PartialEq;
+    type Own: OwnBlock;
+}
+
+pub trait OwnBlock: Clone + std::fmt::Debug + PartialEq {
+    fn figure(&self) -> Option<(Figure, &str)>;
+
+    fn image(&self) -> Option<&LocalImage>;
+}
+
+impl OwnBlock for NoteBlock {
+    fn figure(&self) -> Option<(Figure, &str)> {
+        match self {
+            NoteBlock::Math(math) => Some((math.figure, &math.tex)),
+            NoteBlock::Mermaid(mermaid) => Some((mermaid.figure, &mermaid.src)),
+            NoteBlock::Callout(_)
+            | NoteBlock::Embed(_)
+            | NoteBlock::Html(_)
+            | NoteBlock::Footnote { .. }
+            | NoteBlock::Frontmatter(_) => None,
+        }
+    }
+
+    fn image(&self) -> Option<&LocalImage> {
+        match self {
+            NoteBlock::Embed(Embed {
+                kind: EmbedKind::Image(ImageFile::Local(local)),
+                ..
+            }) => Some(local),
+            NoteBlock::Embed(_)
+            | NoteBlock::Callout(_)
+            | NoteBlock::Math(_)
+            | NoteBlock::Mermaid(_)
+            | NoteBlock::Html(_)
+            | NoteBlock::Footnote { .. }
+            | NoteBlock::Frontmatter(_) => None,
+        }
+    }
+}
+
+impl OwnBlock for std::convert::Infallible {
+    fn figure(&self) -> Option<(Figure, &str)> {
+        match *self {}
+    }
+
+    fn image(&self) -> Option<&LocalImage> {
+        match *self {}
+    }
 }
 
 impl Origin for Lines {
     type Target = LinkTarget;
+    type Task = Task;
+    type Own = NoteBlock;
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum BlockKind<T = LinkTarget> {
+pub enum BlockKind<O: Origin> {
     Heading {
         level: Level,
-        text: Inline<T>,
+        text: Inline<O::Target>,
     },
-    Paragraph(Inline<T>),
+    Paragraph(Inline<O::Target>),
     /// Holds `Item`s.
     List(ListKind),
     /// Holds blocks; a tight item's text arrives as a paragraph.
-    Item(Task),
+    Item(O::Task),
     Quote,
-    Callout(Callout),
     Code(Code),
-    Math(Math),
-    Mermaid(Mermaid),
     /// Holds `Row`s; the first one is the header.
     Table(Box<[Column]>),
     Row(RowKind),
-    Cell(Inline<T>),
+    Cell(Inline<O::Target>),
     Image(Image),
+    Rule,
+    Own(O::Own),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteBlock {
+    Callout(Callout),
+    Math(Math),
+    Mermaid(Mermaid),
     /// `![[...]]` on its own line.
     Embed(Embed),
-    Rule,
     /// Raw HTML, shown as code.
     Html(Arc<str>),
     /// A footnote definition holding blocks.
@@ -460,17 +515,11 @@ impl<O: Origin> Block<O> {
             BlockKind::List(_)
             | BlockKind::Item(_)
             | BlockKind::Quote
-            | BlockKind::Callout(_)
-            | BlockKind::Math(_)
-            | BlockKind::Mermaid(_)
             | BlockKind::Table(_)
             | BlockKind::Row(_)
             | BlockKind::Image(_)
-            | BlockKind::Embed(_)
             | BlockKind::Rule
-            | BlockKind::Html(_)
-            | BlockKind::Footnote { .. }
-            | BlockKind::Frontmatter(_) => None,
+            | BlockKind::Own(_) => None,
         }
     }
 
@@ -482,18 +531,12 @@ impl<O: Origin> Block<O> {
             BlockKind::List(_)
             | BlockKind::Item(_)
             | BlockKind::Quote
-            | BlockKind::Callout(_)
             | BlockKind::Code(_)
-            | BlockKind::Math(_)
-            | BlockKind::Mermaid(_)
             | BlockKind::Table(_)
             | BlockKind::Row(_)
             | BlockKind::Image(_)
-            | BlockKind::Embed(_)
             | BlockKind::Rule
-            | BlockKind::Html(_)
-            | BlockKind::Footnote { .. }
-            | BlockKind::Frontmatter(_) => None,
+            | BlockKind::Own(_) => None,
         }
     }
 }

@@ -174,6 +174,7 @@ impl Element for TextElement {
             Part::Text => "text",
             Part::Head => "diff-head",
             Part::Buffer => "diff-buffer",
+            Part::Comment => "comment",
         };
         Some(ElementId::NamedInteger(
             name.into(),
@@ -227,7 +228,7 @@ impl Element for TextElement {
             cols: ((text_width / cell.width).floor().max(0.0) as u16).saturating_sub(gutter.cols),
         };
         let measured = match draws {
-            Draws::Editable { view, .. } | Draws::Deleted { view } => Some(view.scroll.viewport),
+            Draws::Editable { scroll, .. } | Draws::Deleted { scroll } => Some(scroll.viewport),
             Draws::Head { .. } | Draws::NoHead | Draws::Absent => None,
         };
         let focus = match (draws, state.layout.focus() == pane) {
@@ -258,24 +259,19 @@ impl Element for TextElement {
             let languages = &state.languages;
             let tracked = match draws {
                 Draws::Editable {
-                    view,
+                    selection,
+                    scroll: shown,
                     doc,
                     rows,
                     tracked,
                 } => {
                     let text = doc.text.slice(..);
-                    let drawn = scroll::fit(
-                        doc,
-                        &view.selection,
-                        view.scroll,
-                        viewport,
-                        rows.padding(),
-                        languages,
-                    );
+                    let drawn =
+                        scroll::fit(doc, selection, shown, viewport, rows.padding(), languages);
                     display::layout(
                         frame,
                         doc,
-                        &view.selection,
+                        selection,
                         drawn,
                         languages,
                         focus,

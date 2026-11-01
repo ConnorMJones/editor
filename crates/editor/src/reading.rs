@@ -24,7 +24,7 @@ impl Offer<'_> {
         match reading {
             Reading::Selected(_) => Some(Offer::Selection),
             Reading::OnHighlight(highlight) => Some(Offer::Highlight(highlight.comment.as_ref())),
-            Reading::Idle | Reading::Selecting { .. } => None,
+            Reading::Idle | Reading::Selecting { .. } | Reading::Writing(_) => None,
         }
     }
 }
@@ -128,7 +128,7 @@ pub fn popup(workspace: &Workspace, offer: Offer, cx: &mut Context<Workspace>) -
             div()
                 .px(fonts.ui_size * 0.6)
                 .py(fonts.ui_size * 0.3)
-                .child(comment.as_str().to_owned())
+                .child(comment.line().into_owned())
         }))
         .child(buttons)
 }

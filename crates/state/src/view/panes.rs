@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use model::command::{
-    ChangesCommand, Command, Cycle, PickerCommand, PickerKind, Shown, TreeCommand, WindowCommand,
+    ChangesCommand, Command, Cycle, Direction, PickerCommand, PickerKind, Shown, TreeCommand,
+    WindowCommand,
 };
 use model::config::OpenAs;
 use model::geom::{self, Point};
@@ -14,6 +15,7 @@ use model::window::{Axis, Side};
 use nucleo::Matcher;
 
 use crate::apply::{Force, apply};
+use crate::comment::Edits;
 use crate::drawing::InkTabs;
 use crate::input::picker::{
     self, AnnotationSearch, Grep, Items, Narrowing, Notebook, Outline, OutlineEntry, PALETTE,
@@ -26,11 +28,14 @@ use crate::project::backlinks::{self, Build};
 use crate::project::files::{FileIndex, Indexed};
 use crate::project::path::TextKind;
 use crate::project::path::{Folder, RelPath};
+use crate::reading::Landing;
 use crate::reading::{Notes, Reader, ReaderId, Viewing};
 use crate::render::Opening;
-use crate::sidebar::changes::{self, EntryKey, ListCursor, ListRow, Pick};
+use crate::sidebar::Pick;
+use crate::sidebar::changes::{self, EntryKey, ListCursor, ListRow};
 use crate::sidebar::tree::{
-    self, Dir, EntryKind, Fold, Listing, NewEntry, RowKind, TreeAction, TreeEdit, TreeTarget,
+    self, Dir, EntryKind, Fold, Listing, NewEntry, Removal, Row, RowKind, TreeAction, TreeEdit,
+    TreeTarget,
 };
 use crate::text::buffer::{BufferId, Position, Target};
 use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Place, Tabs, Tick};
@@ -203,6 +208,30 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
         TreeCommand::Down => {
             state.tree.cursor = (state.tree.cursor + 1).min(state.tree.rows.len().saturating_sub(1))
         }
+        TreeCommand::Extend(direction) => {
+            let listed = &mut state.tree;
+            let from = listed.cursor;
+            let to = match direction {
+                Direction::Forward => (from + 1).min(listed.rows.len().saturating_sub(1)),
+                Direction::Backward => from.saturating_sub(1),
+            };
+            let (Some(left), Some(reached)) = (listed.rows.get(from), listed.rows.get(to)) else {
+                return;
+            };
+            let (left, reached) = (left.path.clone(), reached.path.clone());
+            match (left, reached) {
+                (left, reached) if listed.selected.contains(&reached) => {
+                    listed.selected.retain(|path| *path != left)
+                }
+                (left, reached) => {
+                    listed
+                        .selected
+                        .retain(|path| *path != left && *path != reached);
+                    listed.selected.extend([left, reached]);
+                }
+            }
+            listed.cursor = to;
+        }
         TreeCommand::Open => match selected {
             None => {}
             Some(row) => match row.kind {
@@ -278,19 +307,43 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
             }
             None => {}
         },
-        TreeCommand::Delete => match selected {
-            Some(row) => {
-                state.sidebar = Sidebar::Files(Files::Edit(TreeEdit::Delete {
-                    path: row.path,
-                    kind: match row.kind {
-                        RowKind::File => EntryKind::File,
-                        RowKind::Dir(_) => EntryKind::Dir,
-                    },
-                    line: String::new(),
-                }))
+        TreeCommand::Delete => {
+            let tree = &state.tree;
+            let removal = |row: &Row| Removal {
+                path: row.path.clone(),
+                kind: match row.kind {
+                    RowKind::File => EntryKind::File,
+                    RowKind::Dir(_) => EntryKind::Dir,
+                },
+            };
+            let within_picked_dir = |row: &Row| {
+                (tree.rows.iter()).any(|outer| {
+                    matches!(outer.kind, RowKind::Dir(_))
+                        && outer.path != row.path
+                        && tree.selected.contains(&outer.path)
+                        && row.path.is_within(&outer.path)
+                })
+            };
+            let removals: Vec<Removal> = match selected {
+                Some(row) if tree.selected.contains(&row.path) => (tree.rows.iter())
+                    .filter(|row| tree.selected.contains(&row.path) && !within_picked_dir(row))
+                    .map(removal)
+                    .collect(),
+                Some(row) => vec![removal(&row)],
+                None => Vec::new(),
+            };
+            let mut removals = removals.into_iter();
+            match removals.next() {
+                Some(first) => {
+                    state.sidebar = Sidebar::Files(Files::Edit(TreeEdit::Delete {
+                        first,
+                        rest: removals.collect(),
+                        line: String::new(),
+                    }))
+                }
+                None => {}
             }
-            None => {}
-        },
+        }
         TreeCommand::EditInsert(c) => match &mut state.sidebar {
             Sidebar::Files(Files::Edit(edit)) => edit.line_mut().push(c),
             Sidebar::Hidden | Sidebar::Files(Files::Editor | Files::Tree) | Sidebar::Changes(_) => {
@@ -338,8 +391,18 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
                         return;
                     }
                 },
-                TreeEdit::Delete { path, kind, line } => match line.as_str() {
-                    "y" => FsOp::Remove { path, kind },
+                TreeEdit::Delete { first, rest, line } => match line.as_str() {
+                    "y" => {
+                        state.tree.selected.clear();
+                        let removed = std::iter::once(first).chain(rest);
+                        out.extend(removed.map(|Removal { path, kind }| {
+                            Effect::Job(Job::Fs {
+                                root: root.clone(),
+                                op: FsOp::Remove { path, kind },
+                            })
+                        }));
+                        return;
+                    }
                     _ => {
                         state.notice = Some(Notice::DeleteNotConfirmed);
                         return;
@@ -633,7 +696,7 @@ fn submit(state: &mut State, picker: Picker, out: &mut Vec<Effect>) {
             let (hit, _) = &found.hits[index];
             let path = state.library.path_of(&hit.path);
             let open = state.tab_config.open_from_picker;
-            let to = Some(Target::Annotation(hit.annotation.id()));
+            let to = Some(Target::Reader(Landing::Annotation(hit.annotation.id())));
             crate::apply::open(state, path, Arrive::AsIs, to, open, out);
             focus_editor(state);
         }
@@ -751,6 +814,11 @@ pub fn request_close(state: &mut State) -> Close {
             .count()
         + (state.boards.values())
             .filter(|file| file.is_modified())
+            .count()
+        + (state.layout.panes().values())
+            .flat_map(Pane::items)
+            .filter_map(|item| item.tab.writing())
+            .filter(|writing| writing.edits() == Edits::Unsaved)
             .count();
     match unsaved {
         0 => Close::Allowed,
@@ -807,12 +875,43 @@ pub fn focus_pane(state: &mut State, pane: PaneId) {
     focus_editor(state);
 }
 
-pub fn click_tree(state: &mut State, index: usize, click: Click, out: &mut Vec<Effect>) {
+pub fn click_tree(
+    state: &mut State,
+    index: usize,
+    click: Click,
+    pick: Pick,
+    out: &mut Vec<Effect>,
+) {
     let Some(kind) = state.tree.rows.get(index).map(|row| row.kind) else {
         return;
     };
-    state.tree.cursor = index;
     state.sidebar = Sidebar::Files(Files::Tree);
+    let listed = &mut state.tree;
+    match pick {
+        Pick::Only => listed.selected.clear(),
+        Pick::Toggle => {
+            let clicked = listed.rows[index].path.clone();
+            match (listed.rows.get(listed.cursor), listed.selected.as_slice()) {
+                (Some(at), []) => listed.selected.push(at.path.clone()),
+                (Some(_) | None, _) => {}
+            }
+            match listed.selected.iter().position(|path| *path == clicked) {
+                Some(at) => drop(listed.selected.remove(at)),
+                None => listed.selected.push(clicked),
+            }
+            listed.cursor = index;
+            return;
+        }
+        Pick::Extend => {
+            let from = listed.cursor.min(listed.rows.len().saturating_sub(1));
+            listed.selected = listed.rows[from.min(index)..=from.max(index)]
+                .iter()
+                .map(|row| row.path.clone())
+                .collect();
+            return;
+        }
+    }
+    state.tree.cursor = index;
     match (click, kind) {
         (_, RowKind::Dir(_)) | (Click::Single, RowKind::File) => {
             tree(state, TreeCommand::Open, out)
@@ -866,7 +965,6 @@ pub fn click_changes(
         (Some(ListRow::Entry(index)), Pick::Toggle) => {
             let key = EntryKey::of(&changes[index]);
             let list = &mut state.changes;
-            // The entry under the cursor joins the first pick, as in VS Code.
             match (&list.cursor, list.selected.as_slice()) {
                 (Some(ListCursor::Entry { group, path }), []) => list.selected.push(EntryKey {
                     group: *group,
@@ -933,8 +1031,17 @@ pub fn tree_action(
     out: &mut Vec<Effect>,
 ) {
     state.sidebar = Sidebar::Files(Files::Tree);
+    let listed = &mut state.tree;
+    let row = match target {
+        TreeTarget::Row(index) => listed.rows.get(index),
+        TreeTarget::Root => None,
+    };
+    match row {
+        Some(row) if listed.selected.contains(&row.path) => {}
+        Some(_) | None => listed.selected.clear(),
+    }
     match target {
-        TreeTarget::Row(index) if index < state.tree.rows.len() => state.tree.cursor = index,
+        TreeTarget::Row(index) if index < listed.rows.len() => listed.cursor = index,
         TreeTarget::Row(_) | TreeTarget::Root => {}
     }
     match (target, action) {

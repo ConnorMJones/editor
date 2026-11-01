@@ -55,7 +55,7 @@ pub enum Target {
     Hunk(Edge),
     Heading(String),
     Saved(Saved),
-    Annotation(library::AnnotationId),
+    Reader(crate::reading::Landing),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

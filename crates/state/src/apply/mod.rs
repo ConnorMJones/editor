@@ -263,7 +263,11 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
             (Err(notice), _) | (_, Err(notice)) => state.notice = Some(notice),
         },
         Command::GotoFile => links::goto_file(state, out),
-        Command::Write => write_focused(state, Dirs::Existing, out),
+        Command::Write => match crate::comment::write(state, out) {
+            Ok(()) => {}
+            Err(crate::comment::NotWriting) => write_focused(state, Dirs::Existing, out),
+        },
+        Command::Comment(command) => crate::comment::command(state, command, out),
         Command::ForceWrite => write_focused(state, Dirs::Create, out),
         Command::WriteAs(path, dirs) => {
             let path = helix_stdx::path::normalize(state.project.root.path().join(path));
@@ -339,6 +343,10 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
                 }
                 (Overlay::Confirm(Confirm::Discard { path, how }), Answer::Yes) => {
                     stage::discard(state, path, how, out)
+                }
+                (Overlay::Confirm(Confirm::DropComment), Answer::No) => {}
+                (Overlay::Confirm(Confirm::DropComment), Answer::Yes) => {
+                    crate::comment::dropped(state)
                 }
                 (Overlay::Confirm(Confirm::Create(_)), Answer::No) => {
                     state.notice = Some(Notice::CreateNotConfirmed)

@@ -785,6 +785,9 @@ pub enum Edited<'a> {
     },
     /// A drawing's text mark being typed, which no other view shows.
     Mark,
+    Comment {
+        scroll: &'a mut Scroll,
+    },
 }
 
 /// Activation order across all panes; larger is more recent.

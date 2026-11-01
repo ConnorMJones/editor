@@ -412,7 +412,6 @@ pub enum IndexError {
 }
 
 pub fn change_index(git_dir: &Path, op: &IndexOp) -> Result<(), IndexError> {
-    // libgit2 refuses to write the index while another write holds its lock file.
     let _writing = INDEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

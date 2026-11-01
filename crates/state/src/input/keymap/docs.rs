@@ -11,6 +11,7 @@ const CUSTOM: &str = "\
 | `g n` / `g p` | normal, select | Next / previous tab |
 | `space e` | normal, select, tree | Toggle the file tree |
 | `j` / `k` | tree | Move |
+| `S-up` / `S-down` | tree | Extend the selection |
 | `l` / `h` | tree | Open or expand / collapse |
 | `a` / `r` / `d` | tree | Add / rename / delete |
 | `esc` | tree | Back to the editor |
@@ -23,6 +24,7 @@ const SOURCE_VIEW: &str = "\
 | --- | --- | --- |
 | `space g` | normal, select, tree, changes | Toggle the Changes sidebar |
 | `j` / `k` | changes | Move |
+| `S-up` / `S-down` | changes | Extend the selection |
 | `l` / enter | changes | Open the diff / fold the group |
 | `h` / left | changes | Fold the group |
 | `s` / `u` | changes | Stage / unstage |
@@ -85,6 +87,12 @@ const DRAWINGS: &str = "\
 | `:export-pdf` / `:export-svg` / `:export-png` | drawing | Export |
 | `v` | PDF, book | Highlight |
 | `i` | PDF, book | Highlight with a comment / edit the comment |
+| `I` | PDF, book | Write the comment beside the page |
+| `C-v` | comment prompt | Move to the full view |
+| `esc` | comment | Save and close |
+| `C-s`, `:w` | comment | Save |
+| `space q` | comment | Close without saving |
+| `space v` | comment | Full / split |
 | `d` | PDF, book | Delete the highlight |
 | `y` | PDF, book | Copy |
 | `esc` | PDF, book | Clear the selection |
@@ -96,6 +104,7 @@ const DRAWINGS: &str = "\
 | `space t` | PDF, book | Contents |
 | `space tab`, `space d` | PDF | Read / markup |
 | `:flatten` | PDF | Flatten the markup |
+| `:export-notes` | PDF, book | Write annotations to a note beside it |
 | `]]` / `[[` | book | Next / previous heading |
 ";
 

@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use helix_core::regex::bytes::{Regex, RegexBuilder};
 use model::command::{
-    Command, Cycle, Direction, ExportAs, HunkOp, HunkTarget, PickerCommand, PickerKind, Shown,
-    Take, TreeCommand, WindowCommand,
+    Command, Cycle, Direction, ExportAs, HunkOp, HunkTarget, PickerCommand, PickerKind,
+    ReadingCommand, Shown, Take, TreeCommand, WindowCommand,
 };
 use model::picture::Encoding;
 use model::window::{Axis, Side};
@@ -386,6 +386,10 @@ pub static PALETTE: &[(&str, Command)] = &[
         "outline",
         Command::Picker(PickerCommand::Open(PickerKind::Outline)),
     ),
+    (
+        "export-notes",
+        Command::Reading(ReadingCommand::ExportNotes),
+    ),
     ("export-svg", Command::Export(ExportAs::Svg)),
     ("export-png", Command::Export(ExportAs::Png)),
     (
@@ -562,7 +566,7 @@ pub fn label(annotation: &Annotation, file: ReaderKind) -> String {
     let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let quoted = |quote: &Quote, comment: &Option<Comment>| {
         let comment = comment.as_ref().map_or(String::new(), |comment| {
-            format!("  \u{2014} {}", one_line(comment.as_str()))
+            format!("  \u{2014} {}", one_line(&comment.line()))
         });
         format!("\u{201c}{}\u{201d}{comment}", one_line(quote.exact()))
     };

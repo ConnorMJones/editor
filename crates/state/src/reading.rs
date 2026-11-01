@@ -7,11 +7,13 @@ use library::{
     Library, LibraryError, Notebook, Part, Place, TextSpan, Texts,
 };
 use model::command::{Annotate, Direction, ReadingCommand};
+use model::mode::Mode;
 use model::notice::Notice;
 use model::register::Clipboard;
 use model::sheet::{Measure, PageIndex, SheetView, Stack};
 
 use crate::book::{BookFiles, BookId};
+use crate::comment::{Kept, Writing};
 use crate::drawing::{InkTabs, PdfFiles, PdfId, PdfMode};
 use crate::input::prompt;
 use crate::job::Job;
@@ -65,24 +67,38 @@ pub enum Found {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Reading {
     Idle,
-    Selecting {
-        part: Part,
-        anchor: usize,
-        head: usize,
-    },
+    Selecting { anchor: Place, head: Place },
     Selected(TextSpan),
     OnHighlight(Highlight),
+    Writing(Box<Writing>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
-    Down,
+    Down(Taps),
     Move,
     Up,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taps {
+    One,
+    Two,
+    Three,
+}
+
+impl Taps {
+    pub fn of(count: usize) -> Taps {
+        match count {
+            0 | 1 => Taps::One,
+            2 => Taps::Two,
+            _ => Taps::Three,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +133,8 @@ enum After {
     Find,
     FindText(String),
     Comment(Commenting),
+    Writing,
+    Export(ReaderId),
 }
 
 impl Notes {
@@ -194,11 +212,9 @@ impl Reading {
     pub fn shown(&self, texts: &dyn Texts) -> Option<TextSpan> {
         match self {
             Reading::Selected(span) => Some(span.clone()),
-            Reading::Selecting { part, anchor, head } => Some(TextSpan {
-                part: *part,
-                chars: *anchor.min(head)..texts.part(*part)?.after(*anchor.max(head)),
-            }),
+            Reading::Selecting { anchor, head } => TextSpan::covering(*anchor, *head, texts),
             Reading::OnHighlight(highlight) => Some(highlight.span.clone()),
+            Reading::Writing(writing) => Some(writing.highlight.span.clone()),
             Reading::Idle => None,
         }
     }
@@ -207,49 +223,53 @@ impl Reading {
         self,
         press: Press,
         at: Option<Place>,
+        kind: ReaderKind,
         texts: &dyn Texts,
         notes: &Notes,
     ) -> Reading {
+        let around = |at: Place, within: fn(char) -> bool| {
+            let chars = texts.part(at.part)?.around(at.char, within);
+            TextSpan::within(at.part, chars)
+        };
         match (press, self) {
-            (Press::Down, _) => match at {
-                Some(at) => Reading::Selecting {
-                    part: at.part,
-                    anchor: at.char,
-                    head: at.char,
+            (_, writing @ Reading::Writing(_)) => writing,
+            (Press::Down(taps), _) => match (at, taps) {
+                (Some(at), Taps::One) => Reading::Selecting {
+                    anchor: at,
+                    head: at,
                 },
-                None => Reading::Idle,
-            },
-            (Press::Move, Reading::Selecting { part, anchor, head }) => Reading::Selecting {
-                part,
-                anchor,
-                head: (at.filter(|at| at.part == part)).map_or(head, |at| at.char),
-            },
-            (Press::Up, Reading::Selecting { part, anchor, head }) => {
-                match (anchor.cmp(&head), texts.part(part)) {
-                    (Ordering::Equal, _) => {
-                        let tapped = match notes {
-                            Notes::Listed(listed) => (listed.notebook.highlights.iter().rev())
-                                .find(|highlight| {
-                                    highlight.span.part == part
-                                        && highlight.span.chars.contains(&anchor)
-                                })
-                                .cloned(),
-                            Notes::Unlisted(_) => None,
-                        };
-                        match tapped {
-                            Some(highlight) => Reading::OnHighlight(highlight),
-                            None => Reading::Idle,
-                        }
-                    }
-                    (Ordering::Less | Ordering::Greater, Some(text)) => {
-                        Reading::Selected(TextSpan {
-                            part,
-                            chars: anchor.min(head)..text.after(anchor.max(head)),
-                        })
-                    }
-                    (Ordering::Less | Ordering::Greater, None) => Reading::Idle,
+                (Some(at), Taps::Two) => {
+                    around(at, char::is_alphanumeric).map_or(Reading::Idle, Reading::Selected)
                 }
-            }
+                (Some(at), Taps::Three) => {
+                    around(at, |c| c != '\n').map_or(Reading::Idle, Reading::Selected)
+                }
+                (None, _) => Reading::Idle,
+            },
+            (Press::Move, Reading::Selecting { anchor, head }) => Reading::Selecting {
+                anchor,
+                head: match (kind, at) {
+                    (ReaderKind::Pdf, Some(at)) => at,
+                    (ReaderKind::Book, Some(at)) if at.part == anchor.part => at,
+                    (ReaderKind::Pdf | ReaderKind::Book, _) => head,
+                },
+            },
+            (Press::Up, Reading::Selecting { anchor, head }) => match anchor.cmp(&head) {
+                Ordering::Equal => {
+                    let tapped = match notes {
+                        Notes::Listed(listed) => (listed.notebook.highlights.iter().rev())
+                            .find(|highlight| highlight.span.contains(anchor))
+                            .cloned(),
+                        Notes::Unlisted(_) => None,
+                    };
+                    match tapped {
+                        Some(highlight) => Reading::OnHighlight(highlight),
+                        None => Reading::Idle,
+                    }
+                }
+                Ordering::Less | Ordering::Greater => (TextSpan::covering(anchor, head, texts))
+                    .map_or(Reading::Idle, Reading::Selected),
+            },
             (Press::Cancel, _) => Reading::Idle,
             (Press::Move | Press::Up, kept) => kept,
         }
@@ -429,17 +449,16 @@ impl<'a> Reader<'a> {
     }
 
     fn text(&self, span: &TextSpan) -> Result<String, Notice> {
-        (self.texts.part(span.part))
-            .map(|text| text.slice(span.chars.clone()).to_owned())
-            .ok_or(Notice::NothingSelected)
+        span.text(&*self.texts).ok_or(Notice::NothingSelected)
     }
 
     fn selected(&self) -> Result<TextSpan, Notice> {
         match &*self.reading {
             Reading::Selected(span) => Ok(span.clone()),
-            Reading::Idle | Reading::Selecting { .. } | Reading::OnHighlight(_) => {
-                Err(Notice::NothingSelected)
-            }
+            Reading::Idle
+            | Reading::Selecting { .. }
+            | Reading::OnHighlight(_)
+            | Reading::Writing(_) => Err(Notice::NothingSelected),
         }
     }
 
@@ -458,6 +477,7 @@ impl<'a> Reader<'a> {
                 Ok(After::Nothing)
             }
             ReadingCommand::Find => Ok(After::Find),
+            ReadingCommand::ExportNotes => Ok(After::Export(self.id)),
             ReadingCommand::FindSelection => Ok(After::FindText(self.text(&self.selected()?)?)),
             ReadingCommand::FindNext(direction) => match &mut *self.found {
                 Found::Hits { hits, at, .. } => {
@@ -490,10 +510,33 @@ impl<'a> Reader<'a> {
                         }))
                     }
                     (Annotate::Comment, Reading::OnHighlight(highlight)) => {
-                        Ok(After::Comment(Commenting {
-                            file,
-                            highlight: highlight.clone(),
-                        }))
+                        let highlight = highlight.clone();
+                        let long = (highlight.comment.as_ref())
+                            .map(|comment| comment.as_str().to_owned())
+                            .filter(|text| text.lines().nth(1).is_some());
+                        match long {
+                            Some(text) => {
+                                let writing = Writing::new(highlight, Kept::Library, &text);
+                                *self.reading = Reading::Writing(Box::new(writing));
+                                Ok(After::Writing)
+                            }
+                            None => Ok(After::Comment(Commenting { file, highlight })),
+                        }
+                    }
+                    (Annotate::Write, Reading::Selected(span)) => {
+                        let highlight = Highlight::of(&*self.texts, span.clone())
+                            .ok_or(Notice::NothingSelected)?;
+                        let writing = Writing::new(highlight, Kept::New, "");
+                        *self.reading = Reading::Writing(Box::new(writing));
+                        Ok(After::Writing)
+                    }
+                    (Annotate::Write, Reading::OnHighlight(highlight)) => {
+                        let highlight = highlight.clone();
+                        let text = (highlight.comment.as_ref())
+                            .map_or(String::new(), |comment| comment.as_str().to_owned());
+                        let writing = Writing::new(highlight, Kept::Library, &text);
+                        *self.reading = Reading::Writing(Box::new(writing));
+                        Ok(After::Writing)
                     }
                     (Annotate::Remove, Reading::OnHighlight(highlight)) => {
                         out.push(listed.write(file, Change::Remove(highlight.id)));
@@ -512,8 +555,9 @@ impl<'a> Reader<'a> {
                         out.push(listed.write(file, change));
                         Ok(After::Nothing)
                     }
+                    (_, Reading::Writing(_)) => Err(Notice::NotReading),
                     (
-                        Annotate::Highlight | Annotate::Comment,
+                        Annotate::Highlight | Annotate::Comment | Annotate::Write,
                         Reading::Idle | Reading::Selecting { .. } | Reading::OnHighlight(_),
                     ) => Err(Notice::NothingSelected),
                     (
@@ -553,6 +597,8 @@ pub fn command(state: &mut State, command: ReadingCommand, out: &mut Vec<Effect>
             prompt.line = line;
             state.overlay = Overlay::Prompt(prompt);
         }
+        Ok(After::Export(file)) => crate::literature::export(state, file, out),
+        Ok(After::Writing) => state.input.mode = Mode::Insert,
         Err(refused) => state.notice = Some(refused),
     }
 }
@@ -666,7 +712,20 @@ pub fn comment(state: &mut State, commenting: Commenting, line: String, out: &mu
     }
 }
 
-pub fn arrive(state: &mut State, pane: PaneId, file: ReaderId, id: AnnotationId) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locate {
+    Page(Part),
+    Chapter(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    Annotation(AnnotationId),
+    Locate(Locate),
+    Noted { note: AnnotationId, or: Locate },
+}
+
+pub fn land(state: &mut State, pane: PaneId, file: ReaderId, landing: Landing) {
     let State {
         layout,
         pdfs,
@@ -676,17 +735,42 @@ pub fn arrive(state: &mut State, pane: PaneId, file: ReaderId, id: AnnotationId)
     let Some(tab) = layout.find_pane(pane).and_then(|pane| pane.active_mut()) else {
         return;
     };
-    let Ok(mut reader) = Reader::of(tab, pdfs, books) else {
-        return;
+    let locate = |locate: Locate| match (locate, file) {
+        (Locate::Page(part), ReaderId::Pdf(_)) => Some(Place { part, char: 0 }),
+        (Locate::Chapter(chapter), ReaderId::Book(id)) => {
+            let book = &books[id];
+            let entry = (book.contents.iter())
+                .filter(|entry| entry.depth == 0)
+                .nth(chapter)?;
+            Some(book.flow.place_of(book.flow.item(&entry.at)))
+        }
+        (Locate::Page(_), ReaderId::Book(_)) | (Locate::Chapter(_), ReaderId::Pdf(_)) => None,
     };
-    let annotation = match reader.notes {
-        Notes::Listed(listed) => (listed.notebook.in_reading_order().into_iter())
-            .find(|annotation| annotation.id() == id),
-        Notes::Unlisted(_) => None,
+    let (note, or) = match landing {
+        Landing::Annotation(note) => (Some(note), None),
+        Landing::Locate(at) => (None, locate(at)),
+        Landing::Noted { note, or } => (Some(note), locate(or)),
     };
-    match (reader.id == file, annotation) {
-        (true, Some(annotation)) => reader.show(annotation),
-        (true, None) | (false, _) => {}
+    let notes = match file {
+        ReaderId::Pdf(id) => pdfs.get(id).map(|pdf| &pdf.notes),
+        ReaderId::Book(id) => books.get(id).map(|book| &book.notes),
+    };
+    let annotation = match (note, notes) {
+        (Some(note), Some(Notes::Listed(listed))) => (listed.notebook.in_reading_order())
+            .into_iter()
+            .find(|annotation| annotation.id() == note),
+        (Some(_) | None, _) => None,
+    };
+    let unshown = match (annotation, Reader::of(tab, pdfs, books)) {
+        (Some(annotation), Ok(mut reader)) if reader.id == file => {
+            reader.show(annotation);
+            None
+        }
+        (annotation, _) => annotation.as_ref().map(Annotation::place).or(or),
+    };
+    match (unshown, Viewing::of(tab, pdfs, books)) {
+        (Some(at), Some((id, mut viewing))) if id == file => viewing.show(at),
+        (Some(_) | None, _) => {}
     }
 }
 

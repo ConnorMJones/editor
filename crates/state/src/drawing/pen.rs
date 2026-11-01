@@ -17,6 +17,7 @@ use crate::drawing::frame::{self, Landed};
 use crate::drawing::pdf_text;
 use crate::drawing::typing::{self, Ended};
 use crate::drawing::{Doing, Gesture, Hand, InkFile, InkTabs, PdfMode, Pen};
+use crate::reading::Taps;
 use crate::view::layout::PaneId;
 use crate::view::tab::Tab;
 
@@ -31,7 +32,7 @@ pub struct PenSample {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PenPhase {
-    Down(Stylus),
+    Down(Stylus, Taps),
     Move,
     Up,
     Cancel,
@@ -45,7 +46,7 @@ pub enum Stylus {
 
 pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) {
     match phase {
-        PenPhase::Down(_) => match state.layout.set_focus(pane) {
+        PenPhase::Down(..) => match state.layout.set_focus(pane) {
             Ok(()) => {}
             // Closed since the host drew it.
             Err(_) => return,
@@ -128,7 +129,7 @@ fn on<D: Drawing>(
 ) -> Result<(), Notice> {
     let drawing = file.edited.drawing();
     let outcome = match (phase, &mut hand.doing) {
-        (PenPhase::Down(_), Doing::Typing(open)) => {
+        (PenPhase::Down(..), Doing::Typing(open)) => {
             match land(drawing, hand.layer) {
                 Some(landed)
                     if open.target == landed.target
@@ -146,7 +147,7 @@ fn on<D: Drawing>(
             *mode = Mode::Normal;
             return Ok(());
         }
-        (PenPhase::Down(stylus), Doing::Ink { using, pen }) => {
+        (PenPhase::Down(stylus, _), Doing::Ink { using, pen }) => {
             match drawing
                 .layers()
                 .get(hand.layer)

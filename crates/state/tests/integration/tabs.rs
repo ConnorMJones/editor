@@ -4,6 +4,7 @@ use model::notice::Notice;
 use state::apply::Force;
 use state::input::picker::Items;
 use state::project::session::{self, Session, SessionError};
+use state::sidebar::Pick;
 use state::view::layout::InvalidTabs;
 use state::view::panes::{self, Click};
 use state::{Overlay, State};
@@ -30,11 +31,13 @@ fn tree_click(h: &mut Harness, path: &str, click: Click) {
         let row = row(&h.state, dir);
         match h.state.tree.dirs.get(dir) {
             Some(listing) if listing.fold == state::sidebar::tree::Fold::Expanded => {}
-            Some(_) | None => h.run(|state, out| panes::click_tree(state, row, Click::Single, out)),
+            Some(_) | None => {
+                h.run(|state, out| panes::click_tree(state, row, Click::Single, Pick::Only, out))
+            }
         }
     }
     let row = row(&h.state, path);
-    h.run(|state, out| panes::click_tree(state, row, click, out));
+    h.run(|state, out| panes::click_tree(state, row, click, Pick::Only, out));
 }
 
 fn row(state: &State, path: &str) -> usize {

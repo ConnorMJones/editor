@@ -15,40 +15,58 @@ fn multi_page_document_gives_each_page() {
     let dir = tempfile::tempdir().expect("tempdir");
     let main = dir.path().join("main.typ");
     let pages = typesetter
-        .typst_pages(dir.path(), &main, THREE_PAGES)
+        .typst_pages(dir.path(), &main, THREE_PAGES, 0..usize::MAX)
         .result
         .expect("compiles");
     assert_eq!(pages.pages.len(), 3);
-    for page in &pages.pages {
-        assert_valid(page);
+    assert_eq!(pages.drawn.len(), 3);
+    for (page, (_, svg)) in pages.pages.iter().zip(&pages.drawn) {
+        assert_valid(svg);
         assert!((page.width.0 - 283.46).abs() < 0.1, "{}", page.width.0);
         assert!((page.height.0 - 170.08).abs() < 0.1, "{}", page.height.0);
     }
 }
 
 #[test]
-fn edit_reexports_only_the_changed_page() {
+fn only_the_pages_asked_for_are_drawn_and_the_rest_come_one_at_a_time() {
+    let mut typesetter = typesetter();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let main = dir.path().join("main.typ");
+    let pages = typesetter
+        .typst_pages(dir.path(), &main, THREE_PAGES, 1..2)
+        .result
+        .expect("compiles");
+    let drawn: Vec<usize> = pages.drawn.iter().map(|(index, _)| *index).collect();
+    assert_eq!(drawn, [1]);
+    let third = pages.pages[2].hash;
+    assert_valid(&typesetter.page(&main, 2, third).expect("the third page"));
+    assert!(
+        typesetter.page(&main, 2, pages.pages[0].hash).is_none(),
+        "a hash from another page"
+    );
+    assert!(
+        typesetter.page(&main, 3, third).is_none(),
+        "past the last page"
+    );
+}
+
+#[test]
+fn an_edit_changes_only_the_hash_of_the_page_it_touched() {
     let mut typesetter = typesetter();
     let dir = tempfile::tempdir().expect("tempdir");
     let main = dir.path().join("main.typ");
     let before = typesetter
-        .typst_pages(dir.path(), &main, THREE_PAGES)
+        .typst_pages(dir.path(), &main, THREE_PAGES, 0..usize::MAX)
         .result
         .expect("compiles");
     let edited = THREE_PAGES.replace("Third", "Thirds");
     let after = typesetter
-        .typst_pages(dir.path(), &main, &edited)
+        .typst_pages(dir.path(), &main, &edited, 0..usize::MAX)
         .result
         .expect("compiles");
-    assert!(std::sync::Arc::ptr_eq(
-        &before.pages[0].bytes,
-        &after.pages[0].bytes
-    ));
-    assert!(std::sync::Arc::ptr_eq(
-        &before.pages[1].bytes,
-        &after.pages[1].bytes
-    ));
-    assert_ne!(before.pages[2].bytes, after.pages[2].bytes);
+    assert_eq!(before.pages[0].hash, after.pages[0].hash);
+    assert_eq!(before.pages[1].hash, after.pages[1].hash);
+    assert_ne!(before.pages[2].hash, after.pages[2].hash);
 }
 
 #[test]
@@ -65,7 +83,7 @@ fn imports_resolve_relative_to_root_and_track_disk_changes() {
     let source = "#import \"lib/util.typ\": greet, pages\n\
         #for i in range(pages) [#greet(i) #pagebreak(weak: true)]\n";
     let pages = typesetter
-        .typst_pages(dir.path(), &main, source)
+        .typst_pages(dir.path(), &main, source, 0..usize::MAX)
         .result
         .expect("import resolves");
     assert_eq!(pages.pages.len(), 2);
@@ -76,7 +94,7 @@ fn imports_resolve_relative_to_root_and_track_disk_changes() {
     )
     .expect("rewrite");
     let pages = typesetter
-        .typst_pages(dir.path(), &main, source)
+        .typst_pages(dir.path(), &main, source, 0..usize::MAX)
         .result
         .expect("import resolves");
     assert_eq!(pages.pages.len(), 4, "edited import is re-read");
@@ -88,8 +106,9 @@ fn syntax_error_reports_its_line() {
     let dir = tempfile::tempdir().expect("tempdir");
     let main = dir.path().join("main.typ");
     let source = "= Title\n\nSome text.\n#let x = (1, 2\nMore text.\n";
-    let Err(DocumentError::Compile(diagnostics)) =
-        typesetter.typst_pages(dir.path(), &main, source).result
+    let Err(DocumentError::Compile(diagnostics)) = typesetter
+        .typst_pages(dir.path(), &main, source, 0..usize::MAX)
+        .result
     else {
         panic!("expected a compile error");
     };
@@ -113,7 +132,12 @@ fn error_in_an_imported_file_points_at_that_file() {
     .expect("write");
     let main = dir.path().join("main.typ");
     let Err(DocumentError::Compile(diagnostics)) = typesetter
-        .typst_pages(dir.path(), &main, "#import \"other.typ\": a\n#a\n")
+        .typst_pages(
+            dir.path(),
+            &main,
+            "#import \"other.typ\": a\n#a\n",
+            0..usize::MAX,
+        )
         .result
     else {
         panic!("expected a compile error");
@@ -142,6 +166,7 @@ fn main_outside_root_is_rejected() {
             &dir.path().join("sub"),
             &dir.path().join("main.typ"),
             "hello",
+            0..usize::MAX,
         )
         .result;
     assert!(
@@ -159,6 +184,7 @@ fn missing_package_is_a_diagnostic_not_a_download() {
             dir.path(),
             &dir.path().join("main.typ"),
             "#import \"@preview/cetz:0.3.0\": canvas\n",
+            0..usize::MAX,
         )
         .result;
     assert!(
@@ -183,7 +209,7 @@ fn math_and_documents_share_one_world() {
     let dir = tempfile::tempdir().expect("tempdir");
     let main = dir.path().join("main.typ");
     let pages = typesetter
-        .typst_pages(dir.path(), &main, THREE_PAGES)
+        .typst_pages(dir.path(), &main, THREE_PAGES, 0..usize::MAX)
         .result
         .expect("document");
     typesetter
@@ -195,9 +221,9 @@ fn math_and_documents_share_one_world() {
         )
         .expect("math between documents");
     let again = typesetter
-        .typst_pages(dir.path(), &main, THREE_PAGES)
+        .typst_pages(dir.path(), &main, THREE_PAGES, 0..usize::MAX)
         .result
         .expect("document again");
     assert_eq!(pages.pages.len(), again.pages.len());
-    assert_eq!(pages.pages[0].bytes, again.pages[0].bytes);
+    assert_eq!(pages.pages[0].hash, again.pages[0].hash);
 }

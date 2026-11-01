@@ -20,6 +20,7 @@ pub struct Tree {
     /// Visible rows in display order, rebuilt whenever `dirs` changes.
     pub rows: Vec<Row>,
     pub cursor: usize,
+    pub selected: Vec<RelPath>,
     pub unsaved: Unsaved,
     pub marked_up: HashSet<RelPath>,
 }
@@ -79,10 +80,16 @@ pub enum TreeEdit {
     },
     /// Proceeds only when the line reads `y`.
     Delete {
-        path: RelPath,
-        kind: EntryKind,
+        first: Removal,
+        rest: Vec<Removal>,
         line: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Removal {
+    pub path: RelPath,
+    pub kind: EntryKind,
 }
 
 impl TreeEdit {

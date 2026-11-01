@@ -4,7 +4,9 @@ use std::sync::Arc;
 use helix_core::Rope;
 use state::project::links::{self, Dest, Index, Resolution};
 use state::project::path::RelPath;
-use state::render::markdown::{self, Base, BlockKind, EmbedKind, ImageFile, LinkTarget, Markdown};
+use state::render::markdown::{
+    self, Base, BlockKind, EmbedKind, ImageFile, Lines, LinkTarget, Markdown, NoteBlock,
+};
 
 fn examples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")
@@ -21,7 +23,6 @@ fn files(root: &Path, dir: &Path, found: &mut Vec<RelPath>) {
     }
 }
 
-/// Every markdown file under examples, parsed against an index of all example files.
 fn notes() -> (Index, Vec<(RelPath, Markdown)>) {
     let root = examples();
     let mut found = Vec::new();
@@ -31,6 +32,7 @@ fn notes() -> (Index, Vec<(RelPath, Markdown)>) {
     let notes = found
         .into_iter()
         .filter(|file| file.as_str().ends_with(".md"))
+        .filter(|file| file.as_str().starts_with("vault/") || file.as_str() == "README.md")
         .map(|file| {
             let text = std::fs::read_to_string(root.join(file.as_str())).expect("read note");
             let folder = file.as_str().rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -51,12 +53,15 @@ fn notes() -> (Index, Vec<(RelPath, Markdown)>) {
 fn vault_has_every_showcased_block() {
     let (_, notes) = notes();
     assert_eq!(notes.len(), 5);
-    let kinds: Vec<&BlockKind> = notes
+    let kinds: Vec<&BlockKind<Lines>> = notes
         .iter()
         .flat_map(|(_, parsed)| parsed.blocks.iter().map(|block| &block.kind))
         .collect();
-    let has = |wanted: fn(&BlockKind) -> bool| kinds.iter().any(|kind| wanted(kind));
-    assert!(has(|kind| matches!(kind, BlockKind::Callout(_))), "callout");
+    let has = |wanted: fn(&BlockKind<Lines>) -> bool| kinds.iter().any(|kind| wanted(kind));
+    assert!(
+        has(|kind| matches!(kind, BlockKind::Own(NoteBlock::Callout(_)))),
+        "callout"
+    );
     assert!(
         has(|kind| matches!(kind, BlockKind::Item(markdown::Task::Open { .. }))),
         "open task"
@@ -66,8 +71,14 @@ fn vault_has_every_showcased_block() {
         "done task"
     );
     assert!(has(|kind| matches!(kind, BlockKind::Table(_))), "table");
-    assert!(has(|kind| matches!(kind, BlockKind::Math(_))), "math");
-    assert!(has(|kind| matches!(kind, BlockKind::Mermaid(_))), "mermaid");
+    assert!(
+        has(|kind| matches!(kind, BlockKind::Own(NoteBlock::Math(_)))),
+        "math"
+    );
+    assert!(
+        has(|kind| matches!(kind, BlockKind::Own(NoteBlock::Mermaid(_)))),
+        "mermaid"
+    );
     assert!(has(|kind| matches!(kind, BlockKind::Code(_))), "code");
     assert!(
         has(
@@ -77,7 +88,7 @@ fn vault_has_every_showcased_block() {
     );
     assert!(
         has(
-            |kind| matches!(kind, BlockKind::Embed(embed) if matches!(&embed.kind, EmbedKind::Note(Resolution::File(file)) if file.as_str() == "vault/math.md"))
+            |kind| matches!(kind, BlockKind::Own(NoteBlock::Embed(embed)) if matches!(&embed.kind, EmbedKind::Note(Resolution::File(file)) if file.as_str() == "vault/math.md"))
         ),
         "embed of math.md"
     );

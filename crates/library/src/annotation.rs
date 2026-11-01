@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use uuid::Uuid;
 
@@ -11,6 +12,10 @@ pub struct AnnotationId(pub Uuid);
 impl AnnotationId {
     pub fn new() -> AnnotationId {
         AnnotationId(Uuid::now_v7())
+    }
+
+    pub fn parse(text: &str) -> Option<AnnotationId> {
+        Uuid::parse_str(text).ok().map(AnnotationId)
     }
 }
 
@@ -74,6 +79,15 @@ impl Comment {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn line(&self) -> Cow<'_, str> {
+        let mut lines = self.0.lines();
+        let first = lines.next().unwrap_or_default();
+        match lines.next() {
+            Some(_) => Cow::Owned(format!("{first}\u{2026}")),
+            None => Cow::Borrowed(first),
+        }
+    }
 }
 
 impl Quote {
@@ -94,26 +108,46 @@ impl Quote {
             a.zip(b).take_while(|(a, b)| a == b).count()
         };
         (0..texts.parts())
-            .filter_map(|part| Some((part, texts.part(Part(part))?)))
-            .flat_map(|(part, text)| {
-                let whole = text.text();
-                (whole.match_indices(self.exact.as_str()))
+            .filter_map(|part| Some((Part(part), texts.part(Part(part))?)))
+            .flat_map(|(part, first)| {
+                let next = texts.part(Part(part.0 + 1));
+                let split = first.text().len();
+                let joined = match &next {
+                    Some(next) => Cow::Owned(format!("{}\n{}", first.text(), next.text())),
+                    None => Cow::Borrowed(first.text()),
+                };
+                (joined.match_indices(self.exact.as_str()))
+                    .filter(|(start, _)| *start < split)
                     .map(|(start, exact)| {
                         let end = start + exact.len();
                         let context =
                             shared(
-                                &mut whole[..start].chars().rev(),
+                                &mut joined[..start].chars().rev(),
                                 &mut self.prefix.chars().rev(),
-                            ) + shared(&mut whole[end..].chars(), &mut self.suffix.chars());
-                        let span = TextSpan {
-                            part: Part(part),
-                            chars: text.chars_in(start..end),
+                            ) + shared(&mut joined[end..].chars(), &mut self.suffix.chars());
+                        let from = Place {
+                            part,
+                            char: first.chars_in(start..end.min(split)).start,
                         };
-                        (span, context, Reverse(part.abs_diff(near.0)))
+                        let to = match (end.checked_sub(split + 1), &next) {
+                            (Some(into), Some(next)) => Place {
+                                part: Part(part.0 + 1),
+                                char: next.chars_in(0..into).end,
+                            },
+                            (Some(_), None) | (None, _) => Place {
+                                part,
+                                char: first.chars_in(start..end.min(split)).end,
+                            },
+                        };
+                        (
+                            TextSpan::new(from, to),
+                            context,
+                            Reverse(part.0.abs_diff(near.0)),
+                        )
                     })
                     .collect::<Vec<_>>()
             })
-            .filter(|(span, ..)| !span.chars.is_empty())
+            .filter_map(|(span, context, distance)| Some((span?, context, distance)))
             .max_by_key(|&(_, context, distance)| (context, distance))
             .map(|(span, ..)| span)
     }
@@ -121,14 +155,14 @@ impl Quote {
 
 impl Highlight {
     pub fn of(texts: &dyn Texts, span: TextSpan) -> Option<Highlight> {
-        let text = texts.part(span.part)?;
-        let exact = text.slice(span.chars.clone());
-        let start = text.byte(span.chars.start);
-        let before = &text.text()[..start];
+        let exact = span.text(texts)?;
+        let first = texts.part(span.start().part)?;
+        let before = &first.text()[..first.byte(span.start().char)];
         let from = (before.char_indices().rev().nth(QUOTE_CONTEXT - 1)).map_or(0, |(at, _)| at);
-        let after = &text.text()[start + exact.len()..];
+        let last = texts.part(span.end().part)?;
+        let after = &last.text()[last.byte(span.end().char)..];
         let quote = Quote::new(
-            exact.to_owned(),
+            exact,
             before[from..].to_owned(),
             after.chars().take(QUOTE_CONTEXT).collect(),
         )?;
@@ -141,14 +175,16 @@ impl Highlight {
     }
 
     pub fn reanchor(self, texts: &dyn Texts) -> Annotation {
-        let unmoved = (texts.part(self.span.part))
-            .is_some_and(|text| text.slice(self.span.chars.clone()) == self.quote.exact);
-        match (unmoved, self.quote.find_in(texts, self.span.part)) {
+        let unmoved = self
+            .span
+            .text(texts)
+            .is_some_and(|text| text == self.quote.exact);
+        match (unmoved, self.quote.find_in(texts, self.span.start().part)) {
             (true, _) => Annotation::Highlight(self),
             (false, Some(span)) => Annotation::Highlight(Highlight { span, ..self }),
             (false, None) => Annotation::Lost(Lost {
                 id: self.id,
-                part: self.span.part,
+                part: self.span.start().part,
                 quote: self.quote,
                 comment: self.comment,
             }),

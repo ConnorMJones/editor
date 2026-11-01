@@ -313,11 +313,11 @@ fn show(state: &mut State, opened: Opened, waiter: Waiter) {
     };
     panes::show(state, pane, opened, arrive, open);
     match (to, opened) {
-        (Some(Target::Annotation(id)), Opened::Pdf(file)) => {
-            crate::reading::arrive(state, pane, ReaderId::Pdf(file), id)
+        (Some(Target::Reader(landing)), Opened::Pdf(file)) => {
+            reading::land(state, pane, ReaderId::Pdf(file), landing)
         }
-        (Some(Target::Annotation(id)), Opened::Book(file)) => {
-            crate::reading::arrive(state, pane, ReaderId::Book(file), id)
+        (Some(Target::Reader(landing)), Opened::Book(file)) => {
+            reading::land(state, pane, ReaderId::Book(file), landing)
         }
         (Some(to), Opened::Text(buffer)) => place(state, pane, buffer, to),
         (
@@ -343,7 +343,7 @@ pub fn place(state: &mut State, pane: PaneId, buffer: BufferId, to: Target) {
     } = state;
     let Buffer { doc, diff, .. } = &mut buffers[buffer];
     let (at, line) = match to {
-        Target::Annotation(_) => return,
+        Target::Reader(_) => return,
         Target::Hunk(edge) => {
             navigate::expect_landing(diff, Landing { pane, edge });
             return navigate::land(state, buffer);

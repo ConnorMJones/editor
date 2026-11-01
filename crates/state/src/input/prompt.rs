@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use helix_core::unicode::segmentation::GraphemeCursor;
 use model::command::{
     Command, Cycle, Direction, Dirs, DrawingCommand, ExportAs, PdfCommand, PromptCommand,
-    PromptMotion, RegexOp, SortCase, SortOrder, Take, WindowCommand,
+    PromptMotion, ReadingCommand, RegexOp, SortCase, SortOrder, Take, WindowCommand,
 };
 use model::notice::Notice;
 use model::register::Register;
@@ -63,7 +63,7 @@ pub enum Completes {
     Paths,
 }
 
-pub const COMMANDS: [(&[&str], Completes); 31] = [
+pub const COMMANDS: [(&[&str], Completes); 32] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
     (&["write-all", "wa"], Completes::Nothing),
@@ -93,6 +93,7 @@ pub const COMMANDS: [(&[&str], Completes); 31] = [
     (&["conflict-base"], Completes::Nothing),
     (&["export-pdf"], Completes::Nothing),
     (&["flatten"], Completes::Nothing),
+    (&["export-notes"], Completes::Nothing),
     (&["export-svg"], Completes::Nothing),
     (&["export-png"], Completes::Nothing),
 ];
@@ -430,6 +431,10 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
         ("flatten", _) => bare(
             Command::Drawing(DrawingCommand::Pdf(PdfCommand::Flatten)),
             "flatten",
+        ),
+        ("export-notes", _) => bare(
+            Command::Reading(ReadingCommand::ExportNotes),
+            "export-notes",
         ),
         ("export-svg", _) => bare(Command::Export(ExportAs::Svg), "export-svg"),
         ("export-png", _) => bare(Command::Export(ExportAs::Png), "export-png"),

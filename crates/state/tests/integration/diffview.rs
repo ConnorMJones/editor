@@ -10,7 +10,8 @@ use state::git::stage::Discard;
 use state::input;
 use state::input::keymap::Context;
 use state::project::session::{self, SessionMode, SessionPane, SessionSidebar, SessionView};
-use state::sidebar::changes::{self, ListCursor, ListRow, Pick};
+use state::sidebar::Pick;
+use state::sidebar::changes::{self, ListCursor, ListRow};
 use state::sidebar::tree::Fold;
 use state::view::draws::{self, Draws, Part, Rows};
 use state::view::layout::Viewport;
@@ -604,4 +605,22 @@ fn picked_changes_stage_and_unstage_together() {
     click(&mut h, 3, Pick::Toggle);
     h.keys("d");
     assert!(matches!(h.state.notice, Some(Notice::DiscardGroup)));
+}
+
+#[test]
+fn shift_arrows_pick_changes_and_s_stages_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["a.txt", "b.txt", "c.txt"];
+    let repo = init(dir.path(), &names.map(|name| (name, FIVE)));
+    for name in names {
+        fs::write(dir.path().join(name), "changed\n").unwrap();
+    }
+    let mut h = Harness::new(dir.path());
+    // Rows: Staged header, Changes header, then a, b, c; the cursor starts on a.
+    h.keys("<space>g<S-down>");
+    assert_eq!(h.state.changes.selected.len(), 2);
+    h.keys("s");
+    assert_eq!(staged_text(&repo, "a.txt").unwrap(), "changed\n");
+    assert_eq!(staged_text(&repo, "b.txt").unwrap(), "changed\n");
+    assert_eq!(staged_text(&repo, "c.txt").unwrap(), FIVE);
 }

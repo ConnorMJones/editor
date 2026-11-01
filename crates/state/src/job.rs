@@ -25,6 +25,7 @@ use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
 use crate::input::picker::{self, Hit, Preview, Search};
+use crate::literature::ExportNotesError;
 use crate::project::files::{self, Rescan, Walked};
 use crate::project::path::{FileKind, TextKind};
 use crate::project::path::{Folder, RelPath};
@@ -70,6 +71,10 @@ pub enum Job {
         path: PathBuf,
     },
     PdfText(TextClaim),
+    ExportNotes {
+        note: PathBuf,
+        section: String,
+    },
     Find {
         file: ReaderId,
         texts: Arc<dyn Texts>,
@@ -265,6 +270,10 @@ pub enum JobResult {
         file: ReaderId,
         query: String,
         hits: Vec<TextSpan>,
+    },
+    NotesExported {
+        note: PathBuf,
+        result: Result<usize, ExportNotesError>,
     },
     Annotated {
         file: ReaderId,
@@ -540,6 +549,7 @@ pub fn run(job: Job) -> JobResult {
         Job::ExportDrawing { .. } => "export drawing",
         Job::PdfText(_) => "pdf text",
         Job::Find { .. } => "find",
+        Job::ExportNotes { .. } => "export notes",
         Job::Annotate { .. } => "annotate",
         Job::SearchAnnotations { .. } => "search annotations",
         Job::KeepPlace { .. } => "keep place",
@@ -616,6 +626,10 @@ pub fn run(job: Job) -> JobResult {
                 .map_err(ExportFailed::Write),
             path,
         },
+        Job::ExportNotes { note, section } => JobResult::NotesExported {
+            result: crate::literature::write(&note, &section),
+            note,
+        },
         Job::Find { file, texts, query } => {
             let pattern = RegexBuilder::new(&helix_core::regex::escape(&query))
                 .case_insensitive(true)
@@ -628,9 +642,7 @@ pub fn run(job: Job) -> JobResult {
                 };
                 hits.extend(
                     (pattern.find_iter(text.text()))
-                        .map(|found| text.chars_in(found.range()))
-                        .filter(|chars| !chars.is_empty())
-                        .map(|chars| TextSpan { part, chars }),
+                        .filter_map(|found| TextSpan::within(part, text.chars_in(found.range()))),
                 );
             }
             JobResult::Found { file, query, hits }
@@ -965,6 +977,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Exported { .. } => "exported",
         JobResult::PdfText { .. } => "pdf text",
         JobResult::Found { .. } => "found",
+        JobResult::NotesExported { .. } => "notes exported",
         JobResult::Annotated { .. } => "annotated",
         JobResult::AnnotationsFound { .. } => "annotations found",
         JobResult::PlaceKept(_) => "place kept",
@@ -999,6 +1012,9 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         } => apply::written(state, saving, path, result, out),
         JobResult::Exported { path, result } => crate::export::exported(state, path, result),
         JobResult::Found { file, query, hits } => crate::reading::found(state, file, query, hits),
+        JobResult::NotesExported { note, result } => {
+            crate::literature::exported(state, note, result)
+        }
         JobResult::Annotated {
             file,
             document,

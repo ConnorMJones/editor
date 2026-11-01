@@ -148,7 +148,7 @@ pub struct PdfTab {
     pub found: Found,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum PdfMode {
     Read(Reading),
     Markup,

@@ -412,6 +412,9 @@ impl Render for Workspace {
                 ..,
             ) => format!("delete untracked {}? y/n", relative(path)),
             (Overlay::Confirm(Confirm::Create(path)), ..) => format!("create {path}? y/n"),
+            (Overlay::Confirm(Confirm::DropComment), ..) => {
+                "leave the comment without saving? y/n".to_owned()
+            }
             (
                 Overlay::None | Overlay::Picker(_),
                 Sidebar::Files(Files::Edit(TreeEdit::Create {
@@ -441,11 +444,12 @@ impl Render for Workspace {
             }
             (
                 Overlay::None | Overlay::Picker(_),
-                Sidebar::Files(Files::Edit(TreeEdit::Delete { path, line, .. })),
+                Sidebar::Files(Files::Edit(TreeEdit::Delete { first, rest, line })),
                 _,
-            ) => {
-                format!("delete {path}? type y to confirm: {line}")
-            }
+            ) => match rest.len() {
+                0 => format!("delete {}? type y to confirm: {line}", first.path),
+                more => format!("delete {} entries? type y to confirm: {line}", more + 1),
+            },
             (
                 Overlay::None | Overlay::Picker(_),
                 Sidebar::Hidden | Sidebar::Files(Files::Editor | Files::Tree) | Sidebar::Changes(_),

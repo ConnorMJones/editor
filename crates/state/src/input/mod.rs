@@ -29,35 +29,43 @@ pub fn context(state: &State) -> Context {
         (
             Overlay::None,
             Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
-        ) => match state.layout.focused().active() {
-            Some(Tab::Ink(ink)) => match (ink.typed(), state.input.mode) {
-                (None, _) => match ink {
-                    InkTabs::Pdf(PdfTab {
-                        mode: PdfMode::Read(_),
-                        ..
-                    }) => Context::PdfRead,
-                    InkTabs::Pdf(PdfTab {
-                        mode: PdfMode::Markup,
-                        ..
-                    }) => Context::PdfMarkup,
-                    InkTabs::Paged(_) | InkTabs::Board(_) => Context::Drawing,
+        ) => match (
+            state.layout.focused().active().and_then(Tab::writing),
+            state.input.mode,
+        ) {
+            (Some(_), Mode::Normal) => Context::Comment,
+            (Some(_), Mode::Insert) => Context::CommentInsert,
+            (Some(_), Mode::Select) => Context::Select,
+            (None, _) => match state.layout.focused().active() {
+                Some(Tab::Ink(ink)) => match (ink.typed(), state.input.mode) {
+                    (None, _) => match ink {
+                        InkTabs::Pdf(PdfTab {
+                            mode: PdfMode::Read(_),
+                            ..
+                        }) => Context::PdfRead,
+                        InkTabs::Pdf(PdfTab {
+                            mode: PdfMode::Markup,
+                            ..
+                        }) => Context::PdfMarkup,
+                        InkTabs::Paged(_) | InkTabs::Board(_) => Context::Drawing,
+                    },
+                    // Text being typed takes the keys; normal mode adds a way out.
+                    (Some(_), Mode::Normal) => Context::DrawingText,
+                    (Some(_), Mode::Insert | Mode::Select) => mode_context(state),
                 },
-                // Text being typed takes the keys; normal mode adds a way out.
-                (Some(_), Mode::Normal) => Context::DrawingText,
-                (Some(_), Mode::Insert | Mode::Select) => mode_context(state),
+                Some(Tab::Image(_)) => Context::ImageViewer,
+                Some(Tab::Book(_)) => Context::Book,
+                Some(Tab::Text(text)) => match text.showing() {
+                    Showing::Document(_, _, Beside::Alone) => Context::Document,
+                    Showing::Pages(_, _, Beside::Alone) => Context::Pages,
+                    // Beside its rendering, the source takes the keys.
+                    Showing::Source(_)
+                    | Showing::Diff(..)
+                    | Showing::Document(_, _, Beside::Source(..))
+                    | Showing::Pages(_, _, Beside::Source(..)) => mode_context(state),
+                },
+                None => mode_context(state),
             },
-            Some(Tab::Image(_)) => Context::ImageViewer,
-            Some(Tab::Book(_)) => Context::Book,
-            Some(Tab::Text(text)) => match text.showing() {
-                Showing::Document(_, _, Beside::Alone) => Context::Document,
-                Showing::Pages(_, _, Beside::Alone) => Context::Pages,
-                // Beside its rendering, the source takes the keys.
-                Showing::Source(_)
-                | Showing::Diff(..)
-                | Showing::Document(_, _, Beside::Source(..))
-                | Showing::Pages(_, _, Beside::Source(..)) => mode_context(state),
-            },
-            None => mode_context(state),
         },
     }
 }
@@ -80,15 +88,21 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
     match (state.input.awaiting.take(), context(state)) {
         (Some(pending), context) => {
             complete_pending(state, pending, key, out);
-            if context == Context::Insert {
-                state.input.last_insert.keys.push(key);
+            match context {
+                Context::Insert | Context::CommentInsert => state.input.last_insert.keys.push(key),
+                _ => {}
             }
         }
-        (None, Context::Insert) => {
-            insert_key(state, key, out);
+        (None, context @ (Context::Insert | Context::CommentInsert)) => {
+            if let Some(command) = step(state, context, key) {
+                run(state, command, out);
+            }
             state.input.last_insert.keys.push(key);
         }
-        (None, context @ (Context::Normal | Context::Select | Context::DrawingText)) => {
+        (
+            None,
+            context @ (Context::Normal | Context::Select | Context::DrawingText | Context::Comment),
+        ) => {
             let digit = match key.code {
                 KeyCode::Char(c) if key.mods.is_empty() && state.input.pending.len == 0 => {
                     c.to_digit(10).map(|digit| digit as usize)
@@ -328,7 +342,7 @@ pub fn text(state: &mut State, text: &str, out: &mut Vec<Effect>) {
 /// The command inserting `c` in contexts that take typed text.
 pub fn typed(context: Context, c: char) -> Option<Command> {
     match context {
-        Context::Insert => Some(Command::InsertChar(c)),
+        Context::Insert | Context::CommentInsert => Some(Command::InsertChar(c)),
         Context::Prompt => Some(Command::PromptInsert(c)),
         Context::Picker => Some(Command::Picker(PickerCommand::Insert(c))),
         Context::TreeInput => Some(Command::Tree(TreeCommand::EditInsert(c))),
@@ -344,6 +358,7 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::PdfRead
         | Context::PdfMarkup
         | Context::Book
+        | Context::Comment
         | Context::DrawingText => None,
     }
 }

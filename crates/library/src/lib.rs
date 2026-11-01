@@ -6,7 +6,7 @@ use std::fs::File;
 use std::hash::Hasher;
 use std::io::{self, Write};
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -48,6 +48,7 @@ CREATE TABLE annotations (
     part INTEGER NOT NULL,
     start INTEGER,
     end INTEGER,
+    end_part INTEGER,
     exact TEXT,
     prefix TEXT,
     suffix TEXT,
@@ -71,7 +72,7 @@ CREATE TRIGGER annotations_changed AFTER UPDATE ON annotations BEGIN
 END;
 ";
 
-const COLUMNS: &str = "id, kind, part, start, end, exact, prefix, suffix, comment";
+const COLUMNS: &str = "id, kind, part, start, end, exact, prefix, suffix, comment, end_part";
 
 const HIGHLIGHT: i64 = 0;
 const BOOKMARK: i64 = 1;
@@ -127,7 +128,12 @@ impl LibPath {
 pub struct Library {
     pub folder: PathBuf,
     // private: opened by `with` on first use, so a project that never records anything gets no `.edt`
-    connection: Arc<Mutex<Option<rusqlite::Connection>>>,
+    connection: Arc<Mutex<Option<Opened>>>,
+}
+
+struct Opened {
+    connection: rusqlite::Connection,
+    inode: u64,
 }
 
 impl std::fmt::Debug for Library {
@@ -234,10 +240,16 @@ impl Library {
             .connection
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let connection = match guard.take() {
-            Some(connection) => connection,
+        let dir = self.folder.join(FOLDER);
+        let file = dir.join(FILE);
+        let on_disk = std::fs::metadata(&file).ok().map(|meta| meta.ino());
+        let kept = match (guard.take(), on_disk) {
+            (Some(opened), Some(inode)) if opened.inode == inode => Some(opened),
+            (Some(_) | None, _) => None,
+        };
+        let opened = match kept {
+            Some(opened) => opened,
             None => {
-                let dir = self.folder.join(FOLDER);
                 std::fs::create_dir_all(&dir)?;
                 match (std::fs::File::options().write(true).create_new(true))
                     .open(dir.join(".gitignore"))
@@ -246,10 +258,9 @@ impl Library {
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => return Err(error.into()),
                 }
-                let connection = rusqlite::Connection::open(dir.join(FILE))?;
+                let connection = rusqlite::Connection::open(&file)?;
                 connection.busy_timeout(Duration::from_secs(5))?;
-                connection.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
-                connection.pragma_update(None, "synchronous", "NORMAL")?;
+                connection.pragma_update_and_check(None, "journal_mode", "DELETE", |_| Ok(()))?;
                 connection.pragma_update(None, "foreign_keys", true)?;
                 let version: i32 =
                     connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -261,10 +272,13 @@ impl Library {
                     VERSION => {}
                     other => return Err(LibraryError::Version(other)),
                 }
-                connection
+                Opened {
+                    connection,
+                    inode: std::fs::metadata(&file)?.ino(),
+                }
             }
         };
-        run(guard.insert(connection))
+        run(&mut guard.insert(opened).connection)
     }
 
     pub fn identify(
@@ -494,23 +508,30 @@ fn annotation(row: &Row<'_>, from: usize) -> Result<Annotation, LibraryError> {
             let comment = row
                 .get::<_, Option<String>>(from + 8)?
                 .and_then(Comment::new);
-            match (index(3)?, index(4)?) {
-                (Some(start), Some(end)) if start < end => Ok(Annotation::Highlight(Highlight {
-                    id,
-                    span: TextSpan {
-                        part,
-                        chars: start..end,
-                    },
-                    quote,
-                    comment,
-                })),
-                (None, None) => Ok(Annotation::Lost(Lost {
+            match (index(3)?, index(4)?, index(9)?) {
+                (Some(start), Some(end), Some(end_part)) => {
+                    let span = TextSpan::new(
+                        Place { part, char: start },
+                        Place {
+                            part: Part(end_part),
+                            char: end,
+                        },
+                    )
+                    .ok_or(LibraryError::Malformed(Malformed::Span))?;
+                    Ok(Annotation::Highlight(Highlight {
+                        id,
+                        span,
+                        quote,
+                        comment,
+                    }))
+                }
+                (None, None, None) => Ok(Annotation::Lost(Lost {
                     id,
                     part,
                     quote,
                     comment,
                 })),
-                (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {
+                (Some(_) | None, Some(_) | None, Some(_) | None) => {
                     Err(LibraryError::Malformed(Malformed::Span))
                 }
             }
@@ -531,7 +552,7 @@ fn put(
     document: DocumentId,
     annotation: &Annotation,
 ) -> Result<(), LibraryError> {
-    let (kind, part, (start, end), quote, comment) = match annotation {
+    let (kind, part, (start, end, end_part), quote, comment) = match annotation {
         Annotation::Highlight(Highlight {
             span,
             quote,
@@ -539,8 +560,12 @@ fn put(
             ..
         }) => (
             HIGHLIGHT,
-            span.part,
-            (Some(span.chars.start), Some(span.chars.end)),
+            span.start().part,
+            (
+                Some(span.start().char),
+                Some(span.end().char),
+                Some(span.end().part.0),
+            ),
             Some(quote),
             comment.as_ref(),
         ),
@@ -552,19 +577,20 @@ fn put(
         }) => (
             HIGHLIGHT,
             *part,
-            (None, None),
+            (None, None, None),
             Some(quote),
             comment.as_ref(),
         ),
         Annotation::Bookmark(Bookmark { at, .. }) => {
-            (BOOKMARK, at.part, (Some(at.char), None), None, None)
+            (BOOKMARK, at.part, (Some(at.char), None, None), None, None)
         }
     };
     tx.execute(
         &format!(
-            "INSERT INTO annotations (document, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO annotations (document, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, part = excluded.part,
-                start = excluded.start, end = excluded.end, exact = excluded.exact,
+                start = excluded.start, end = excluded.end, end_part = excluded.end_part,
+                exact = excluded.exact,
                 prefix = excluded.prefix, suffix = excluded.suffix, comment = excluded.comment"
         ),
         params![
@@ -578,6 +604,7 @@ fn put(
             quote.map(|quote| quote.prefix.as_str()),
             quote.map(|quote| quote.suffix.as_str()),
             comment.map(Comment::as_str),
+            end_part.map(|part| part as i64),
         ],
     )?;
     Ok(())

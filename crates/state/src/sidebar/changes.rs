@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use model::command::{ChangesCommand, FileOp};
+use model::command::{ChangesCommand, Direction, FileOp};
 use model::config::OpenAs;
 use model::git::{Group, WhenEmpty};
 use model::notice::Notice;
@@ -61,13 +61,6 @@ impl EntryKey {
     pub fn is(&self, changed: &Changed) -> bool {
         self.group == changed.entry.group() && self.path == changed.path
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pick {
-    Only,
-    Toggle,
-    Extend,
 }
 
 /// What the Changes sidebar cursor rests on, by value so it survives refreshes.
@@ -205,7 +198,6 @@ pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
         .filter(|changed| state.changes.selected.iter().any(|key| key.is(changed)))
         .map(|changed| changed.path.to_path(root))
         .collect();
-    // A selected entry stands for the whole selection; a header for its group.
     let targets = |row: ListRow| match row {
         ListRow::Entry(index)
             if (state.changes.selected.iter()).any(|key| key.is(&changes[index])) =>
@@ -231,7 +223,29 @@ pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
             let last = list_len(changes, &folds).saturating_sub(1);
             state.changes.cursor = cursor_at(changes, &folds, (at + 1).min(last))
         }
-        (ChangesCommand::Up | ChangesCommand::Down, None, _) => {}
+        (ChangesCommand::Up | ChangesCommand::Down | ChangesCommand::Extend(_), None, _) => {}
+        (ChangesCommand::Extend(direction), Some(at), _) => {
+            let to = match direction {
+                Direction::Forward => (at + 1).min(list_len(changes, &folds).saturating_sub(1)),
+                Direction::Backward => at.saturating_sub(1),
+            };
+            let entry = |row: usize| match rows(changes, &folds).nth(row)? {
+                ListRow::Entry(index) => Some(EntryKey::of(&changes[index])),
+                ListRow::Header { .. } => None,
+            };
+            let selected = &mut state.changes.selected;
+            match (entry(at), entry(to)) {
+                (left, Some(reached)) if selected.contains(&reached) => {
+                    selected.retain(|key| Some(key) != left.as_ref())
+                }
+                (left, Some(reached)) => {
+                    selected.retain(|key| Some(key) != left.as_ref() && *key != reached);
+                    selected.extend(left.into_iter().chain([reached]));
+                }
+                (_, None) => {}
+            }
+            state.changes.cursor = cursor_at(changes, &folds, to);
+        }
         (ChangesCommand::Open, _, Some(ListRow::Header { group, fold, .. })) => {
             state.changes.folds[group as usize] = match fold {
                 Fold::Expanded => Fold::Collapsed,

@@ -14,7 +14,8 @@ use model::theme::Theme;
 use model::window::Axis;
 use state::git::{Entry, Work};
 use state::project::path::RelPath;
-use state::sidebar::changes::{self, ListRow, Pick};
+use state::sidebar::Pick;
+use state::sidebar::changes::{self, ListRow};
 use state::sidebar::tree::{Fold, RowKind, TreeAction, TreeTarget};
 use state::view::panes::{self, Arrive};
 use state::{Focus, Repo, Sidebar, SidebarWidth};
@@ -393,14 +394,7 @@ impl Workspace {
                                                 &mut this.state,
                                                 row,
                                                 panes::Click::of(event.click_count()),
-                                                match event.modifiers() {
-                                                    Modifiers { shift: true, .. } => Pick::Extend,
-                                                    Modifiers { control: true, .. }
-                                                    | Modifiers { platform: true, .. } => {
-                                                        Pick::Toggle
-                                                    }
-                                                    _ => Pick::Only,
-                                                },
+                                                pick(event.modifiers()),
                                                 &mut this.effects,
                                             );
                                             window.focus(&this.focus, cx);
@@ -497,7 +491,13 @@ impl Workspace {
                                     true => "●",
                                     false => "",
                                 };
-                                let picked = Picked::of(index, Some(state.tree.cursor), focus);
+                                let picked = match Picked::of(index, Some(state.tree.cursor), focus)
+                                {
+                                    Picked::No if state.tree.selected.contains(&row.path) => {
+                                        Picked::Resting
+                                    }
+                                    picked => picked,
+                                };
                                 list_row_base(theme, fonts, index, picked)
                                     .pl(fonts.ui_size * (0.4 + INDENT * row.depth as f32))
                                     .text_color(color)
@@ -547,6 +547,7 @@ impl Workspace {
                                                 &mut this.state,
                                                 index,
                                                 click,
+                                                pick(event.modifiers()),
                                                 &mut this.effects,
                                             );
                                             window.focus(&this.focus, cx);
@@ -585,6 +586,14 @@ impl Workspace {
                 .size_full(),
             )
             .into_any_element()
+    }
+}
+
+fn pick(modifiers: Modifiers) -> Pick {
+    match modifiers {
+        Modifiers { shift: true, .. } => Pick::Extend,
+        Modifiers { control: true, .. } | Modifiers { platform: true, .. } => Pick::Toggle,
+        _ => Pick::Only,
     }
 }
 

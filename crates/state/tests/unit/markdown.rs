@@ -10,8 +10,8 @@ use state::project::path::RelPath;
 use state::project::path::{FileKind, TextKind};
 use state::render::markdown::{
     self, Base, BlockKind, CalloutFold, Column, EmbedKind, Emphasis, FigureKind, ImageFile,
-    ImagePlace, Level, LinkTarget, ListKind, LocalImage, Markdown, RowKind, SpanKind, Task,
-    WikiLink,
+    ImagePlace, Level, Lines, LinkTarget, ListKind, LocalImage, Markdown, NoteBlock, RowKind,
+    SpanKind, Task, WikiLink,
 };
 
 fn parse(text: &str) -> Markdown {
@@ -34,30 +34,30 @@ fn roots(markdown: &Markdown) -> Vec<&'static str> {
         .collect()
 }
 
-fn name(kind: &BlockKind) -> &'static str {
+fn name(kind: &BlockKind<Lines>) -> &'static str {
     match kind {
         BlockKind::Heading { .. } => "heading",
         BlockKind::Paragraph(_) => "paragraph",
         BlockKind::List(_) => "list",
         BlockKind::Item(_) => "item",
         BlockKind::Quote => "quote",
-        BlockKind::Callout(_) => "callout",
+        BlockKind::Own(NoteBlock::Callout(_)) => "callout",
         BlockKind::Code(_) => "code",
-        BlockKind::Math(_) => "math",
-        BlockKind::Mermaid(_) => "mermaid",
+        BlockKind::Own(NoteBlock::Math(_)) => "math",
+        BlockKind::Own(NoteBlock::Mermaid(_)) => "mermaid",
         BlockKind::Table(_) => "table",
         BlockKind::Row(_) => "row",
         BlockKind::Cell(_) => "cell",
         BlockKind::Image(_) => "image",
-        BlockKind::Embed(_) => "embed",
+        BlockKind::Own(NoteBlock::Embed(_)) => "embed",
         BlockKind::Rule => "rule",
-        BlockKind::Html(_) => "html",
-        BlockKind::Footnote { .. } => "footnote",
-        BlockKind::Frontmatter(_) => "frontmatter",
+        BlockKind::Own(NoteBlock::Html(_)) => "html",
+        BlockKind::Own(NoteBlock::Footnote { .. }) => "footnote",
+        BlockKind::Own(NoteBlock::Frontmatter(_)) => "frontmatter",
     }
 }
 
-fn text(kind: &BlockKind) -> &str {
+fn text(kind: &BlockKind<Lines>) -> &str {
     match kind {
         BlockKind::Heading { text, .. } | BlockKind::Paragraph(text) | BlockKind::Cell(text) => {
             &text.text
@@ -276,9 +276,9 @@ fn callout(markdown: &Markdown) -> (&markdown::Callout, Vec<&str>) {
     let index = markdown
         .blocks
         .iter()
-        .position(|block| matches!(block.kind, BlockKind::Callout(_)))
+        .position(|block| matches!(block.kind, BlockKind::Own(NoteBlock::Callout(_))))
         .expect("a callout");
-    let BlockKind::Callout(callout) = &markdown.blocks[index].kind else {
+    let BlockKind::Own(NoteBlock::Callout(callout)) = &markdown.blocks[index].kind else {
         unreachable!()
     };
     let body = markdown
@@ -339,7 +339,7 @@ fn callouts_are_numbered_in_order() {
         .blocks
         .iter()
         .filter_map(|block| match &block.kind {
-            BlockKind::Callout(callout) => Some(callout.index),
+            BlockKind::Own(NoteBlock::Callout(callout)) => Some(callout.index),
             _ => None,
         })
         .collect();
@@ -425,11 +425,11 @@ fn markdown_links_are_typed() {
 fn embeds_and_images_lift_to_blocks() {
     let parsed =
         parse("![[pic.png]]\n\n![[Other note#Part|shown]]\n\n![alt](https://x.org/a.png)\n");
-    let kinds: Vec<&BlockKind> = parsed.blocks.iter().map(|block| &block.kind).collect();
+    let kinds: Vec<&BlockKind<Lines>> = parsed.blocks.iter().map(|block| &block.kind).collect();
     match kinds.as_slice() {
         [
-            BlockKind::Embed(image),
-            BlockKind::Embed(note),
+            BlockKind::Own(NoteBlock::Embed(image)),
+            BlockKind::Own(NoteBlock::Embed(note)),
             BlockKind::Image(remote),
         ] => {
             assert_eq!(image.link.target, "pic.png");
@@ -517,7 +517,7 @@ fn math_inline_and_display() {
     let blocks: Vec<(&str, Display)> = parsed.blocks[1..]
         .iter()
         .map(|block| match &block.kind {
-            BlockKind::Math(math) => (math.tex.trim(), math.display),
+            BlockKind::Own(NoteBlock::Math(math)) => (math.tex.trim(), math.display),
             other => panic!("unexpected {}", name(other)),
         })
         .collect();
@@ -529,7 +529,7 @@ fn mermaid_and_code_fences() {
     let parsed =
         parse("```mermaid\ngraph TD; A-->B\n```\n\n```rust\nfn a() {}\n```\n\n    indented\n");
     match &parsed.blocks[0].kind {
-        BlockKind::Mermaid(mermaid) => {
+        BlockKind::Own(NoteBlock::Mermaid(mermaid)) => {
             assert_eq!(&*mermaid.src, "graph TD; A-->B");
             assert_eq!(mermaid.figure.kind, FigureKind::Mermaid);
         }
@@ -636,4 +636,19 @@ fn formats_by_extension() {
     assert_eq!(FileKind::of(Path::new("README")), text(TextKind::Code));
     assert_eq!(FileKind::of(Path::new("notes.pdt")), FileKind::Paged);
     assert_eq!(FileKind::of(Path::new("plan.bdt")), FileKind::Board);
+}
+
+#[test]
+fn html_that_is_only_comments_draws_nothing() {
+    let parsed =
+        parse("<!-- edt:annotations -->\n\ntext\n\n<!-- a --> <!-- b -->\n\n<div>kept</div>\n");
+    assert_eq!(roots(&parsed), ["paragraph", "html"]);
+}
+
+#[test]
+fn exported_annotation_markers_leave_only_their_text() {
+    let parsed = parse(
+        "[qt] **pg 1**\n[[a.pdf#page=1|pg 1]]\n<!-- quote -->\nquoted\n<!-- /quote -->\n<!-- comment -->\n- a list\n- inside\n<!-- /comment -->\n",
+    );
+    assert_eq!(roots(&parsed), ["paragraph", "paragraph", "list"]);
 }

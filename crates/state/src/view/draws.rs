@@ -4,9 +4,10 @@ use crate::git::diff::{Bases, Tracked};
 use crate::git::diffview::{self, DiffSides, LEFT, Left, RIGHT, Right, SideRows};
 use crate::text::buffer::TextDoc;
 use crate::view::display::{Gutter, Shade};
-use crate::view::layout::{Pane, PaneId, Scroll, TextView};
+use crate::view::layout::{Pane, PaneId, Scroll};
 use crate::view::scroll::Padding;
-use crate::view::tab::Showing;
+use crate::view::tab::{Showing, Tab};
+use helix_core::Selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -14,6 +15,7 @@ pub enum Part {
     Head,
     /// A diff's buffer side, which takes the keys.
     Buffer,
+    Comment,
 }
 
 #[derive(Clone, Copy)]
@@ -28,14 +30,15 @@ pub struct Drawing<'a> {
 pub enum Draws<'a> {
     /// Takes the keys: a source, a split's source side or a diff's buffer side.
     Editable {
-        view: &'a TextView,
+        selection: &'a Selection,
+        scroll: Scroll,
         doc: &'a TextDoc,
         rows: Rows<'a>,
         tracked: Option<&'a Tracked>,
     },
     /// A diff's buffer side for a file deleted from the worktree: blank, but still measured.
     Deleted {
-        view: &'a TextView,
+        scroll: Scroll,
     },
     Head {
         doc: &'a TextDoc,
@@ -71,6 +74,25 @@ impl<'a> Rows<'a> {
 }
 
 pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
+    let active = state.layout.panes().get(pane).and_then(Pane::active);
+    match (part, active.and_then(Tab::writing)) {
+        (Part::Comment, Some(writing)) => {
+            let doc = &writing.doc;
+            let lines = doc.text.len_lines();
+            return Drawing {
+                draws: Draws::Editable {
+                    selection: &writing.selection,
+                    scroll: writing.scroll,
+                    doc,
+                    rows: Rows::Conflicts(conflict::current(doc)),
+                    tracked: None,
+                },
+                gutter: Gutter::new(lines),
+                lines,
+            };
+        }
+        (Part::Comment, None) | (Part::Text | Part::Head | Part::Buffer, _) => {}
+    }
     let Some(tab) = state.layout.panes().get(pane).and_then(Pane::active_text) else {
         return Drawing {
             draws: Draws::Absent,
@@ -101,7 +123,8 @@ pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
     let draws = match (part, showing) {
         (Part::Text, showing) => match showing.source() {
             Some(view) => Draws::Editable {
-                view,
+                selection: &view.selection,
+                scroll: view.scroll,
                 doc,
                 rows: Rows::Conflicts(conflict::current(doc)),
                 tracked,
@@ -110,12 +133,15 @@ pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
         },
         (Part::Buffer, Showing::Diff(view, sides)) => match diffview::right(buffer) {
             Right::Live => Draws::Editable {
-                view,
+                selection: &view.selection,
+                scroll: view.scroll,
                 doc,
                 rows: Rows::Diff(&sides.align.sides[RIGHT]),
                 tracked,
             },
-            Right::Deleted => Draws::Deleted { view },
+            Right::Deleted => Draws::Deleted {
+                scroll: view.scroll,
+            },
         },
         (Part::Head, Showing::Diff(_, sides)) => match &sides.left {
             Left::Head { doc, scroll, .. } => Draws::Head {
@@ -128,7 +154,8 @@ pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
         (
             Part::Buffer | Part::Head,
             Showing::Source(_) | Showing::Document(..) | Showing::Pages(..),
-        ) => Draws::Absent,
+        )
+        | (Part::Comment, _) => Draws::Absent,
     };
     Drawing {
         draws,

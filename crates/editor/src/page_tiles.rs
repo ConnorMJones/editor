@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext as _, Bounds, Pixels, RenderImage, WeakEntity, Window, point, px, size,
@@ -15,11 +16,19 @@ use crate::workspace::Workspace;
 pub const TILE_BYTES_KEPT: usize = 384 << 20;
 pub const FRAMES_BEFORE_STALE: u64 = 2;
 pub const STRIP_ROWS: u16 = 2;
+pub const HEAVY: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 pub struct PageTiles {
     pub frame: Arc<AtomicU64>,
     pub entries: HashMap<TileKey, TileEntry>,
+    pub costs: HashMap<(usize, usize), Cost>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cost {
+    Light,
+    Heavy,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -43,7 +52,7 @@ pub enum TileState {
 }
 
 pub enum Rendered {
-    Done(Result<Vec<(Tile, Bgra)>, PdfError>),
+    Done(Result<Vec<(Tile, Bgra)>, PdfError>, Duration),
     Stale(SmallVec<[Tile; 16]>),
 }
 
@@ -154,22 +163,37 @@ pub fn tiles_for(
     let exact: SmallVec<[(Tile, Looked); 32]> = (wanted.into_iter())
         .map(|tile| (tile, look(&cache, document, tile, frame)))
         .collect();
-    let mut strips: SmallVec<[TileBlock; 8]> = SmallVec::new();
-    for (tile, _) in exact
-        .iter()
+    let missing = (exact.iter())
         .filter(|(_, looked)| matches!(looked, Looked::Missing))
-    {
-        let band = tile.row / STRIP_ROWS * STRIP_ROWS;
-        match strips.iter_mut().find(|strip| strip.rows.start == band) {
+        .map(|(tile, _)| tile);
+    let mut strips: SmallVec<[TileBlock; 8]> = SmallVec::new();
+    let cost = cache
+        .costs
+        .get(&(Arc::as_ptr(document) as usize, *page))
+        .copied();
+    for tile in missing {
+        let rows = match cost {
+            Some(Cost::Heavy) => tile.row..tile.row + 1,
+            Some(Cost::Light) | None => {
+                let band = tile.row / STRIP_ROWS * STRIP_ROWS;
+                band..(band + STRIP_ROWS).min(grid.rows)
+            }
+        };
+        let joins = |strip: &&mut TileBlock| match cost {
+            Some(Cost::Heavy) => true,
+            Some(Cost::Light) | None => strip.rows.start == rows.start,
+        };
+        match strips.iter_mut().find(joins) {
             Some(strip) => {
                 strip.columns =
-                    strip.columns.start.min(tile.column)..strip.columns.end.max(tile.column + 1)
+                    strip.columns.start.min(tile.column)..strip.columns.end.max(tile.column + 1);
+                strip.rows = strip.rows.start.min(rows.start)..strip.rows.end.max(rows.end);
             }
             None => strips.push(TileBlock {
                 page: *page,
                 level,
                 columns: tile.column..tile.column + 1,
-                rows: band..(band + STRIP_ROWS).min(grid.rows),
+                rows,
             }),
         }
     }
@@ -313,14 +337,18 @@ fn queue(
             entry.wanted.clone()
         })
         .collect();
-    let (now, rendering) = (cache.frame.clone(), document.clone());
+    let (now, rendering, block_page) = (cache.frame.clone(), document.clone(), block.page);
     let job = cx.background_spawn(async move {
         let current = now.load(Ordering::Relaxed);
         let since = (wanted.iter())
             .map(|wanted| current.saturating_sub(wanted.load(Ordering::Relaxed)))
             .min();
         match since {
-            Some(0..=FRAMES_BEFORE_STALE) => Rendered::Done(rendering.render_tiles(block)),
+            Some(0..=FRAMES_BEFORE_STALE) => {
+                let started = Instant::now();
+                let rendered = rendering.render_tiles(block);
+                Rendered::Done(rendered, started.elapsed())
+            }
             Some(_) | None => Rendered::Stale(tiles),
         }
     });
@@ -341,10 +369,21 @@ fn queue(
                         cache.entries.remove(&key(tile));
                     }
                 }
-                Rendered::Done(Err(error)) => {
+                Rendered::Done(Err(error), _) => {
                     tracing::warn!(%error, "rendering page tiles failed")
                 }
-                Rendered::Done(Ok(rendered)) => {
+                Rendered::Done(Ok(rendered), took) => {
+                    let cost = match took {
+                        took if took > HEAVY => Cost::Heavy,
+                        _ => Cost::Light,
+                    };
+                    let page = (Arc::as_ptr(&document) as usize, block_page);
+                    match (cache.costs.get(&page), cost) {
+                        (Some(Cost::Heavy), Cost::Light) => {}
+                        (Some(Cost::Heavy | Cost::Light) | None, cost) => {
+                            cache.costs.insert(page, cost);
+                        }
+                    }
                     for (tile, bgra) in rendered {
                         let image = image::RgbaImage::from_raw(
                             u32::from(bgra.width),

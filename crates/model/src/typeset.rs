@@ -43,8 +43,19 @@ impl std::fmt::Debug for Svg {
 
 #[derive(Clone, Debug)]
 pub struct Pages {
-    pub pages: Vec<Svg>,
+    pub pages: Vec<PageInfo>,
+    pub drawn: Vec<(usize, Svg)>,
     pub warnings: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PageHash(pub u128);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageInfo {
+    pub width: Pt,
+    pub height: Pt,
+    pub hash: PageHash,
 }
 
 /// A compile of a typst document and the project files it read, whether or not it succeeded.

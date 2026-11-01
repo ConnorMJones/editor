@@ -109,13 +109,14 @@ fn typst_example_compiles_to_several_pages() {
     let main = root.join("main.typ");
     let source = std::fs::read_to_string(&main).expect("read main.typ");
     let pages = typesetter
-        .typst_pages(&root, &main, &source)
+        .typst_pages(&root, &main, &source, 0..usize::MAX)
         .result
         .unwrap_or_else(|error| panic!("{error}: {error:?}"));
     assert!(pages.pages.len() > 1, "{} pages", pages.pages.len());
     assert!(pages.warnings.is_empty(), "{:?}", pages.warnings);
-    for page in &pages.pages {
-        assert_valid(page);
+    assert_eq!(pages.drawn.len(), pages.pages.len());
+    for (_, svg) in &pages.drawn {
+        assert_valid(svg);
     }
 }
 

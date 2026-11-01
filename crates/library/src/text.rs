@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -14,8 +15,8 @@ pub struct Place {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TextSpan {
-    pub part: Part,
-    pub chars: Range<usize>,
+    start: Place, // private: start < end, so a span is never empty or backwards
+    end: Place,
 }
 
 pub trait PartText {
@@ -27,9 +28,24 @@ pub trait PartText {
 
     fn after(&self, char: usize) -> usize;
 
+    fn len(&self) -> usize;
+
     fn slice(&self, chars: Range<usize>) -> &str {
         let start = self.byte(chars.start);
         self.text()[start..self.byte(chars.end).max(start)].trim_end()
+    }
+
+    fn around(&self, char: usize, within: fn(char) -> bool) -> Range<usize> {
+        let text = self.text();
+        let at = self.byte(char);
+        let start = (text[..at].char_indices().rev())
+            .take_while(|&(_, c)| within(c))
+            .last()
+            .map_or(at, |(byte, _)| byte);
+        let end = (text[at..].char_indices())
+            .find(|&(_, c)| !within(c))
+            .map_or(text.len(), |(byte, _)| at + byte);
+        self.chars_in(start..end)
     }
 }
 
@@ -40,11 +56,71 @@ pub trait Texts: Send + Sync {
 }
 
 impl TextSpan {
+    pub fn new(start: Place, end: Place) -> Option<TextSpan> {
+        (start < end).then_some(TextSpan { start, end })
+    }
+
+    pub fn within(part: Part, chars: Range<usize>) -> Option<TextSpan> {
+        TextSpan::new(
+            Place {
+                part,
+                char: chars.start,
+            },
+            Place {
+                part,
+                char: chars.end,
+            },
+        )
+    }
+
+    pub fn covering(a: Place, b: Place, texts: &dyn Texts) -> Option<TextSpan> {
+        let (from, to) = (a.min(b), a.max(b));
+        let end = Place {
+            part: to.part,
+            char: texts.part(to.part)?.after(to.char),
+        };
+        TextSpan::new(from, end)
+    }
+
     pub fn start(&self) -> Place {
-        Place {
-            part: self.part,
-            char: self.chars.start,
-        }
+        self.start
+    }
+
+    pub fn end(&self) -> Place {
+        self.end
+    }
+
+    pub fn parts(&self) -> impl Iterator<Item = Part> {
+        (self.start.part.0..=self.end.part.0).map(Part)
+    }
+
+    pub fn contains(&self, at: Place) -> bool {
+        self.start <= at && at < self.end
+    }
+
+    pub fn chars_in(&self, part: Part, text: &dyn PartText) -> Option<Range<usize>> {
+        let start = match part.cmp(&self.start.part) {
+            Ordering::Less => return None,
+            Ordering::Equal => self.start.char,
+            Ordering::Greater => 0,
+        };
+        let end = match part.cmp(&self.end.part) {
+            Ordering::Greater => return None,
+            Ordering::Equal => self.end.char,
+            Ordering::Less => text.len(),
+        };
+        (start < end).then_some(start..end)
+    }
+
+    pub fn text(&self, texts: &dyn Texts) -> Option<String> {
+        let parts = (self.parts())
+            .map(|part| {
+                let text = texts.part(part)?;
+                let chars = self.chars_in(part, &*text).unwrap_or_default();
+                Some(text.slice(chars).to_owned())
+            })
+            .collect::<Option<Vec<String>>>()?;
+        Some(parts.join("\n"))
     }
 }
 
@@ -63,6 +139,10 @@ impl PartText for PageText {
 
     fn after(&self, char: usize) -> usize {
         (char + 1).min(self.chars.len())
+    }
+
+    fn len(&self) -> usize {
+        self.chars.len()
     }
 
     fn slice(&self, chars: Range<usize>) -> &str {

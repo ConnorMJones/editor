@@ -7,10 +7,12 @@ use gpui::{
 
 use model::window::Axis;
 use slotmap::Key as _;
+use state::comment::Spread;
 use state::drawing::frame;
 use state::drawing::pen::{PenPhase, Stylus};
 use state::drawing::{InkTabs, PdfMode};
 use state::git::diffview::DiffShown;
+use state::reading::Taps;
 
 use state::view::layout::{Node, Pane, SplitPath};
 use state::view::mode;
@@ -73,9 +75,10 @@ impl Workspace {
                             PdfMode::Markup => None,
                         };
                         let corner = shown.as_ref().and_then(|(_, span)| {
-                            let text = file.document().text(span.part.0)?;
-                            let last = text.chars.get(span.chars.end.checked_sub(1)?)?;
-                            Some((model::sheet::PageIndex(span.part.0), last.quad[0]))
+                            let end = span.end();
+                            let text = file.document().text(end.part.0)?;
+                            let last = text.chars.get(end.char.checked_sub(1)?)?;
+                            Some((model::sheet::PageIndex(end.part.0), last.quad[0]))
                         });
                         match (shown, corner, tab.hand.last) {
                             (Some((offer, _)), Some((page, corner)), Some(measure)) => {
@@ -123,7 +126,10 @@ impl Workspace {
                                 let phase = match event.phase {
                                     gpui::PenPhase::Down => {
                                         window.focus(&this.focus, cx);
-                                        PenPhase::Down(drawing::stylus(event.tool))
+                                        PenPhase::Down(
+                                            drawing::stylus(event.tool),
+                                            Taps::of(event.click_count),
+                                        )
                                     }
                                     gpui::PenPhase::Move => PenPhase::Move,
                                     gpui::PenPhase::Up => PenPhase::Up,
@@ -157,7 +163,10 @@ impl Workspace {
                                         None,
                                     ) {
                                         Some(sample) => {
-                                            let phase = PenPhase::Down(Stylus::Tip);
+                                            let phase = PenPhase::Down(
+                                                Stylus::Tip,
+                                                Taps::of(event.click_count),
+                                            );
                                             drawing::input(this, pane, phase, sample, cx)
                                         }
                                         None => {}
@@ -279,6 +288,23 @@ impl Workspace {
                             .child(crate::rendered::body(self, pane, cx)),
                     },
                     None => div().flex_1(),
+                };
+                let writing = (target.and_then(Pane::active).and_then(Tab::writing))
+                    .map(|writing| (writing.spread, writing.share));
+                let body = match writing {
+                    Some((Spread::Split, share)) => self.split_body(
+                        pane,
+                        share,
+                        body.size_full().into_any_element(),
+                        element(Part::Comment).into_any_element(),
+                        cx,
+                    ),
+                    Some((Spread::Full, _)) => div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(element(Part::Comment)),
+                    None => body,
                 };
                 let body = body
                     .relative()

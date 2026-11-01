@@ -35,10 +35,7 @@ const FIRST: &[&[&str]] = &[&["Hello world", "the quick brown fox"], &["jumps ov
 fn highlight(document: &Arc<Document>, page: usize, word: &str) -> Highlight {
     let text = document.read_text(page).unwrap();
     let start = text.text.find(word).unwrap();
-    let span = TextSpan {
-        part: Part(page),
-        chars: text.chars_in(start..start + word.len()),
-    };
+    let span = TextSpan::within(Part(page), text.chars_in(start..start + word.len())).unwrap();
     Highlight {
         comment: Comment::new("a note".to_owned()),
         ..Highlight::of(document, span).unwrap()
@@ -172,9 +169,8 @@ fn a_changed_document_finds_its_highlights_again_or_loses_them() {
             .iter()
             .find(|kept: &&Highlight| kept.id == id)
     };
-    let text = changed.read_text(0).unwrap();
     assert_eq!(
-        text.slice(found(fox.id).unwrap().span.chars.clone()),
+        found(fox.id).unwrap().span.text(&changed).unwrap(),
         "fox",
         "moved down a line"
     );
@@ -220,4 +216,97 @@ fn search_finds_quotes_and_comments_by_prefix() {
     assert_eq!(ids("note"), [fox.id], "the old comment is gone");
     library.write(listed.id, &Change::Remove(fox.id)).unwrap();
     assert!(ids("fox").is_empty());
+}
+
+#[test]
+fn a_highlight_across_a_page_break_is_kept_and_found_again() {
+    let folder = tempfile::tempdir().unwrap();
+    let library = Library::at(folder.path().to_owned());
+    let path = library.place(&folder.path().join("a.pdf")).unwrap();
+    let document = pdf(FIRST);
+    let listed = identify(&library, &path, &document).unwrap();
+    let chars = |page: usize, word: &str| {
+        let text = document.read_text(page).unwrap();
+        let start = text.text.find(word).unwrap();
+        text.chars_in(start..start + word.len())
+    };
+    let span = TextSpan::new(
+        Place {
+            part: Part(0),
+            char: chars(0, "brown").start,
+        },
+        Place {
+            part: Part(1),
+            char: chars(1, "jumps").end,
+        },
+    )
+    .unwrap();
+    let across = Highlight::of(&document, span).unwrap();
+    assert_eq!(across.quote.exact(), "brown fox\njumps");
+    library.write(listed.id, &put(&across)).unwrap();
+    assert_eq!(
+        identify(&library, &path, &document)
+            .unwrap()
+            .notebook
+            .highlights,
+        [across.clone()]
+    );
+
+    let changed = pdf(&[
+        &["Hello world", "a new line", "the quick brown fox"],
+        &["jumps over"],
+    ]);
+    let listed = identify(&library, &path, &changed).unwrap();
+    let found = &listed.notebook.highlights[0];
+    assert_eq!(found.span.text(&changed).unwrap(), "brown fox\njumps");
+    assert_eq!(
+        (found.span.start().part, found.span.end().part),
+        (Part(0), Part(1))
+    );
+}
+
+#[test]
+fn a_deleted_library_starts_again_without_its_old_annotations() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join(".edt/library.db");
+    let document = pdf(FIRST);
+    let library = Library::at(folder.path().to_owned());
+    let path = library.place(&folder.path().join("a.pdf")).unwrap();
+    let listed = identify(&library, &path, &document).unwrap();
+    library
+        .write(listed.id, &put(&highlight(&document, 0, "fox")))
+        .unwrap();
+
+    std::fs::remove_file(&file).unwrap();
+    let listed = identify(&library, &path, &document).unwrap();
+    assert_eq!(listed.identity, Identity::New, "while it was open");
+    assert!(listed.notebook.highlights.is_empty());
+    library
+        .write(listed.id, &put(&highlight(&document, 0, "fox")))
+        .unwrap();
+
+    std::mem::forget(library);
+    std::fs::remove_file(&file).unwrap();
+    let library = Library::at(folder.path().to_owned());
+    let listed = identify(&library, &path, &document).unwrap();
+    assert_eq!(listed.identity, Identity::New, "after a restart");
+    assert!(listed.notebook.highlights.is_empty());
+}
+
+#[test]
+fn the_library_is_one_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let library = Library::at(folder.path().to_owned());
+    let path = library.place(&folder.path().join("a.pdf")).unwrap();
+    let document = pdf(FIRST);
+    let listed = identify(&library, &path, &document).unwrap();
+    library
+        .write(listed.id, &put(&highlight(&document, 0, "fox")))
+        .unwrap();
+    let mut files: Vec<String> = std::fs::read_dir(folder.path().join(".edt"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(files, [".gitignore", "library.db"], "while it is open");
 }

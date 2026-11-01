@@ -226,6 +226,8 @@ pub struct PenEvent {
     /// When the tool reported this, from an origin the platform picks; only differences mean
     /// anything.
     pub time: std::time::Duration,
+    /// Presses of the tip in quick succession at about the same place, as for mouse clicks.
+    pub click_count: usize,
 }
 
 impl Sealed for PenEvent {}

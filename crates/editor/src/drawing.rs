@@ -217,21 +217,25 @@ impl Element for DrawingElement {
                         PdfMode::Markup => crate::reading::Marks::new(),
                     };
                     for (span, color) in marked {
-                        let (Some(text), Some(shown)) = (
-                            file.document().text(span.part.0),
-                            frame.on(PageIndex(span.part.0)),
-                        ) else {
-                            continue;
-                        };
-                        let to_screen = shown.to_pane.then(&screen.to_screen);
-                        let mut path = PathBuilder::fill();
-                        for char in text.chars.get(span.chars.clone()).unwrap_or_default() {
-                            trace(&mut path, char.quad.map(|corner| to_screen.apply(corner)));
-                            path.close();
-                        }
-                        match path.build() {
-                            Ok(path) => window.paint_path(path, color),
-                            Err(error) => tracing::warn!(%error, "marked text"),
+                        for part in span.parts() {
+                            let (Some(text), Some(shown)) =
+                                (file.document().text(part.0), frame.on(PageIndex(part.0)))
+                            else {
+                                continue;
+                            };
+                            let Some(chars) = span.chars_in(part, &**text) else {
+                                continue;
+                            };
+                            let to_screen = shown.to_pane.then(&screen.to_screen);
+                            let mut path = PathBuilder::fill();
+                            for char in text.chars.get(chars).unwrap_or_default() {
+                                trace(&mut path, char.quad.map(|corner| to_screen.apply(corner)));
+                                path.close();
+                            }
+                            match path.build() {
+                                Ok(path) => window.paint_path(path, color),
+                                Err(error) => tracing::warn!(%error, "marked text"),
+                            }
                         }
                     }
                 }

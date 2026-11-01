@@ -433,6 +433,22 @@ pub struct Heading {
     pub page: Option<usize>,
 }
 
+pub struct About {
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+}
+
+fn text_string(bytes: &[u8]) -> String {
+    match bytes {
+        [0xfe, 0xff, utf16 @ ..] => String::from_utf16_lossy(
+            &(utf16.chunks_exact(2))
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>(),
+        ),
+        latin => latin.iter().map(|&byte| char::from(byte)).collect(),
+    }
+}
+
 impl Document {
     pub fn user_from_view(&self, page: usize) -> Option<Affine> {
         let read = self.pdf.pages().get(page)?;
@@ -444,6 +460,26 @@ impl Document {
         let catalog = xref.get::<Dict<'_>>(xref.root_id())?;
         let stream = catalog.get::<hayro::hayro_syntax::object::Stream<'_>>(revise::BLOB)?;
         stream.decoded().ok().map(|decoded| decoded.into_owned())
+    }
+
+    pub fn about(&self) -> About {
+        let metadata = self.pdf.metadata();
+        let field = |bytes: &Option<Vec<u8>>| {
+            (bytes.as_deref())
+                .map(text_string)
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+        };
+        About {
+            title: field(&metadata.title),
+            authors: (field(&metadata.author).iter())
+                .flat_map(|authors| authors.split([';', '&']))
+                .flat_map(|authors| authors.split(" and "))
+                .map(str::trim)
+                .filter(|author| !author.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        }
     }
 
     pub fn outline(&self) -> Vec<Heading> {
@@ -512,14 +548,7 @@ impl Document {
         {
             let title = item
                 .get::<PdfString<'_>>(b"Title")
-                .map(|title| match title.as_ref() {
-                    [0xfe, 0xff, utf16 @ ..] => String::from_utf16_lossy(
-                        &(utf16.chunks_exact(2))
-                            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-                            .collect::<Vec<_>>(),
-                    ),
-                    latin => latin.iter().map(|&byte| char::from(byte)).collect(),
-                });
+                .map(|title| text_string(title.as_ref()));
             let dest = item
                 .get::<Object<'_>>(b"Dest")
                 .or_else(|| item.get::<Dict<'_>>(b"A")?.get::<Object<'_>>(b"D"));

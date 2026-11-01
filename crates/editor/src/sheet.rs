@@ -14,7 +14,7 @@ use model::picture::Picture;
 use model::sheet::{Measure, PageIndex, SheetView, Stack, Viewport};
 use slotmap::Key as _;
 use state::State;
-use state::render::typeset::{Compiled, Outcome};
+use state::render::typeset::{Compiled, Outcome, PageSvg};
 use state::view::layout::PaneId;
 use state::view::sheet::Wheel;
 use state::view::sheet::{Sheeted, Stacked};
@@ -56,10 +56,13 @@ impl Pages<'_> {
         }
     }
 
-    pub fn picture(&self, page: PageIndex) -> Picture {
+    pub fn picture(&self, page: PageIndex) -> Option<Picture> {
         match self {
-            Pages::Typst(compiled, _) => compiled.pages[page.0].picture(),
-            Pages::Image(file) => file.picture(),
+            Pages::Typst(compiled, _) => match &compiled.pages.get(page.0)?.svg {
+                PageSvg::Ready(svg) => Some(svg.picture()),
+                PageSvg::Absent | PageSvg::Pending => None,
+            },
+            Pages::Image(file) => Some(file.picture()),
         }
     }
 }
@@ -102,7 +105,7 @@ pub struct Prepared {
 /// A page on screen and the picture to decode for it.
 pub struct PageWanted {
     pub area: Bounds<Pixels>,
-    pub picture: Picture,
+    pub picture: Option<Picture>,
 }
 
 /// A page on screen, with its picture once decoded.
@@ -194,14 +197,16 @@ impl Element for SheetElement {
         let pages = (shown.into_iter())
             .map(|PageWanted { area, picture }| PageShown {
                 area,
-                image: decoded(
-                    &pictures,
-                    &entity,
-                    &Drawn::Picture(picture),
-                    area,
-                    window,
-                    cx,
-                ),
+                image: picture.and_then(|picture| {
+                    decoded(
+                        &pictures,
+                        &entity,
+                        &Drawn::Picture(picture),
+                        area,
+                        window,
+                        cx,
+                    )
+                }),
             })
             .collect();
         Some(Prepared {

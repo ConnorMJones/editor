@@ -16,10 +16,8 @@ use crate::git::diffview::{self, RIGHT, Right};
 use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::text::registers::ClipboardUse;
 use crate::view::display::{Fillers, Indent, text_format};
-use crate::view::layout::{
-    Layout, NotInLayout, Pane, PaneId, Scroll, Sideways, TextView, Viewport,
-};
-use crate::view::tab::{BesideMut, ShowingMut};
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, Sideways, Viewport};
+use crate::view::tab::{BesideMut, ShowingMut, Tab};
 use crate::{Effect, State};
 
 /// Rows kept between the primary cursor and the viewport edges.
@@ -323,7 +321,8 @@ pub fn extend(text: RopeSlice, gesture: Gesture, pos: usize) -> Range {
 
 /// A text view, or a diff's buffer side with the diff's filler rows.
 pub struct Pointed<'a> {
-    pub view: &'a mut TextView,
+    pub selection: &'a mut Selection,
+    pub scroll: &'a mut Scroll,
     pub doc: &'a TextDoc,
     pub padding: Padding<'a>,
     pub right: Right,
@@ -334,20 +333,34 @@ pub fn pane_text<'a>(
     buffers: &'a SlotMap<BufferId, Buffer>,
     pane: PaneId,
 ) -> Option<Pointed<'a>> {
-    let tab = layout.find_pane(pane)?.active_text_mut()?;
+    let tab = match layout.find_pane(pane)?.active_mut()? {
+        Tab::Text(tab) => tab,
+        other => {
+            let writing = other.writing_mut()?;
+            return Some(Pointed {
+                selection: &mut writing.selection,
+                scroll: &mut writing.scroll,
+                doc: &writing.doc,
+                padding: crate::git::conflict::padding(&writing.doc),
+                right: Right::Live,
+            });
+        }
+    };
     let buffer = &buffers[tab.buffer()];
     let doc = &buffer.doc;
     Some(match tab.showing_mut() {
         ShowingMut::Source(view)
         | ShowingMut::Document(view, _, BesideMut::Source(..))
         | ShowingMut::Pages(view, _, BesideMut::Source(..)) => Pointed {
-            view,
+            selection: &mut view.selection,
+            scroll: &mut view.scroll,
             doc,
             padding: crate::git::conflict::padding(doc),
             right: Right::Live,
         },
         ShowingMut::Diff(view, diff) => Pointed {
-            view,
+            selection: &mut view.selection,
+            scroll: &mut view.scroll,
             doc,
             padding: diff.align.sides[RIGHT].padding(),
             right: diffview::right(buffer),
@@ -369,24 +382,19 @@ pub fn follow_cursor(state: &mut State, pane: PaneId) {
     } = state;
     match pane_text(layout, buffers, pane) {
         Some(Pointed {
-            view,
+            selection,
+            scroll,
             doc,
             padding,
             right: Right::Live,
         }) => {
             let text = doc.text.slice(..);
-            let format = text_format(view.scroll, Indent::of(doc, languages));
+            let format = text_format(*scroll, Indent::of(doc, languages));
             let annotations = annotations(text, padding);
-            let cursor = view.selection.primary().cursor(text);
-            (view.scroll.anchor, view.scroll.rows) = follow(
-                text,
-                cursor,
-                view.scroll,
-                padding.lead,
-                &format,
-                &annotations,
-            );
-            view.scroll.sideways = sideways(text, cursor, view.scroll, &format, &annotations);
+            let cursor = selection.primary().cursor(text);
+            (scroll.anchor, scroll.rows) =
+                follow(text, cursor, *scroll, padding.lead, &format, &annotations);
+            scroll.sideways = sideways(text, cursor, *scroll, &format, &annotations);
         }
         // Nothing to follow on an inert side.
         Some(Pointed {
@@ -436,20 +444,12 @@ pub fn measured(state: &mut State, pane: PaneId, viewport: Viewport) {
     } = state;
     match pane_text(layout, buffers, pane) {
         Some(Pointed {
-            view,
+            selection,
+            scroll,
             doc,
             padding,
             right: Right::Live,
-        }) => {
-            view.scroll = fit(
-                doc,
-                &view.selection,
-                view.scroll,
-                viewport,
-                padding,
-                languages,
-            )
-        }
+        }) => *scroll = fit(doc, selection, *scroll, viewport, padding, languages),
         // Nothing to follow on an inert side or in text still loading.
         Some(Pointed {
             right: Right::Deleted,
@@ -473,7 +473,8 @@ pub fn wheel(state: &mut State, pane: PaneId, rows: isize) {
         ..
     } = state;
     let Some(Pointed {
-        view,
+        selection,
+        scroll,
         doc,
         padding,
         right,
@@ -482,21 +483,21 @@ pub fn wheel(state: &mut State, pane: PaneId, rows: isize) {
         return;
     };
     let text = doc.text.slice(..);
-    let format = text_format(view.scroll, Indent::of(doc, languages));
+    let format = text_format(*scroll, Indent::of(doc, languages));
     let annotations = annotations(text, padding);
-    let (moved, dragged) = scroll(
+    let (moved, dragged) = self::scroll(
         text,
-        &view.selection,
-        view.scroll,
+        selection,
+        *scroll,
         rows,
         mode,
         padding.lead,
         &format,
         &annotations,
     );
-    view.scroll = moved;
+    *scroll = moved;
     match (dragged, right) {
-        (Some(selection), Right::Live) => view.selection = selection,
+        (Some(dragged), Right::Live) => *selection = dragged,
         (Some(_), Right::Deleted) | (None, _) => {}
     }
     drop(annotations);
@@ -507,7 +508,7 @@ pub fn wheel_sideways(state: &mut State, pane: PaneId, cols: isize) {
     let State {
         layout, buffers, ..
     } = state;
-    match pane_text(layout, buffers, pane).map(|pointed| &mut pointed.view.scroll.sideways) {
+    match pane_text(layout, buffers, pane).map(|pointed| &mut pointed.scroll.sideways) {
         Some(Sideways::Unwrapped { left }) => {
             *left = (*left as isize + cols).clamp(0, u16::MAX as isize) as u16
         }
@@ -522,7 +523,7 @@ fn pointed(
     pane: PaneId,
     row: u16,
     col: u16,
-) -> Option<(&mut TextView, &TextDoc, usize)> {
+) -> Option<(&mut Selection, &TextDoc, usize)> {
     let State {
         layout,
         buffers,
@@ -530,7 +531,8 @@ fn pointed(
         ..
     } = state;
     let Pointed {
-        view,
+        selection,
+        scroll,
         doc,
         padding,
         right: Right::Live,
@@ -539,22 +541,22 @@ fn pointed(
         return None;
     };
     let text = doc.text.slice(..);
-    let format = text_format(view.scroll, Indent::of(doc, languages));
+    let format = text_format(*scroll, Indent::of(doc, languages));
     let annotations = annotations(text, padding);
-    let pos = char_at(text, view.scroll, row, col, &format, &annotations);
-    Some((view, doc, pos))
+    let pos = char_at(text, *scroll, row, col, &format, &annotations);
+    Some((selection, doc, pos))
 }
 
 /// Focuses `pane` and selects at a text cell; returns the drag a following move extends.
 pub fn press(state: &mut State, pane: PaneId, row: u16, col: u16, press: Press) -> Option<Gesture> {
     let mode = state.input.mode;
     state.layout.set_focus(pane).ok()?;
-    let (view, doc, pos) = pointed(state, pane, row, col)?;
+    let (held, doc, pos) = pointed(state, pane, row, col)?;
     let text = doc.text.slice(..);
     let (selection, gesture) = match (press, mode) {
-        (Press::AddCursor, _) => (view.selection.clone().push(Range::point(pos)), None),
+        (Press::AddCursor, _) => (held.clone().push(Range::point(pos)), None),
         (Press::Select(Unit::Char), Mode::Select) => {
-            let origin = view.selection.primary().put_cursor(text, pos, true);
+            let origin = held.primary().put_cursor(text, pos, true);
             let gesture = Gesture {
                 unit: Unit::Char,
                 origin,
@@ -567,18 +569,17 @@ pub fn press(state: &mut State, pane: PaneId, row: u16, col: u16, press: Press) 
             (Selection::single(origin.anchor, origin.head), Some(gesture))
         }
     };
-    view.selection = selection.ensure_invariants(text);
+    *held = selection.ensure_invariants(text);
     follow_cursor(state, pane);
     gesture
 }
 
 pub fn drag(state: &mut State, pane: PaneId, row: u16, col: u16, gesture: Gesture) {
-    let Some((view, doc, pos)) = pointed(state, pane, row, col) else {
+    let Some((selection, doc, pos)) = pointed(state, pane, row, col) else {
         return;
     };
     let range = extend(doc.text.slice(..), gesture, pos);
-    view.selection =
-        Selection::single(range.anchor, range.head).ensure_invariants(doc.text.slice(..));
+    *selection = Selection::single(range.anchor, range.head).ensure_invariants(doc.text.slice(..));
     follow_cursor(state, pane);
 }
 
@@ -591,10 +592,10 @@ pub fn release(state: &mut State, pane: PaneId, out: &mut Vec<Effect>) {
         notice,
         ..
     } = state;
-    let Some(Pointed { view, doc, .. }) = pane_text(layout, buffers, pane) else {
+    let Some(Pointed { selection, doc, .. }) = pane_text(layout, buffers, pane) else {
         return;
     };
-    let primary = view.selection.primary();
+    let primary = selection.primary();
     match primary.len() > 1 {
         true => {
             let value = primary.fragment(doc.text.slice(..)).into_owned();
@@ -632,7 +633,8 @@ pub fn scroll_to_line(state: &mut State, pane: PaneId, line: usize) {
         ..
     } = state;
     let Some(Pointed {
-        view,
+        selection,
+        scroll,
         doc,
         padding,
         right,
@@ -642,26 +644,26 @@ pub fn scroll_to_line(state: &mut State, pane: PaneId, line: usize) {
     };
     let text = doc.text.slice(..);
     let line = line.min(text.len_lines().saturating_sub(1));
-    let current = text.char_to_line(view.scroll.anchor.min(text.len_chars()));
+    let current = text.char_to_line(scroll.anchor.min(text.len_chars()));
     let moved = Scroll {
         anchor: text.line_to_char(line),
         rows: 0,
-        ..view.scroll
+        ..*scroll
     };
-    let format = text_format(view.scroll, Indent::of(doc, languages));
+    let format = text_format(*scroll, Indent::of(doc, languages));
     let annotations = annotations(text, padding);
     let dragged = into_band(
         text,
-        &view.selection,
+        selection,
         moved,
         line.cmp(&current),
         mode,
         &format,
         &annotations,
     );
-    view.scroll = moved;
+    *scroll = moved;
     match (dragged, right) {
-        (Some(selection), Right::Live) => view.selection = selection,
+        (Some(dragged), Right::Live) => *selection = dragged,
         (Some(_), Right::Deleted) | (None, _) => {}
     }
     drop(annotations);

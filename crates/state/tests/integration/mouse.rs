@@ -6,6 +6,7 @@ use state::apply::Force;
 use state::input::picker::{PREVIEW_SLOTS, Preview, Previews};
 use state::job::Job;
 use state::project::path::RelPath;
+use state::sidebar::Pick;
 use state::sidebar::tree::{self, Fold, RowKind};
 use state::view::panes::{self, Click};
 use state::{Effect, Files, Overlay, Sidebar};
@@ -31,21 +32,21 @@ fn tree_clicks_toggle_directories_and_open_files() {
     assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 
     let src = row(&h, "src");
-    h.run(|state, out| panes::click_tree(state, src, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, src, Click::Single, Pick::Only, out));
     assert_eq!(h.state.sidebar, Sidebar::Files(Files::Tree));
     assert_eq!(h.state.tree.cursor, src);
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Expanded));
 
     let lib = row(&h, "src/lib.rs");
-    h.run(|state, out| panes::click_tree(state, lib, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, lib, Click::Single, Pick::Only, out));
     assert_eq!(h.focused_path(), Some(canonical(dir.path(), "src/lib.rs")));
     assert_eq!(h.state.sidebar, Sidebar::Files(Files::Editor));
 
-    h.run(|state, out| panes::click_tree(state, src, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, src, Click::Single, Pick::Only, out));
     assert_eq!(h.state.tree.rows[src].kind, RowKind::Dir(Fold::Collapsed));
     // Rows past the end are ignored.
     let rows = h.state.tree.rows.len();
-    h.run(|state, out| panes::click_tree(state, rows, Click::Single, out));
+    h.run(|state, out| panes::click_tree(state, rows, Click::Single, Pick::Only, out));
     assert_eq!(h.state.tree.cursor, src);
 }
 
@@ -234,7 +235,7 @@ fn a_folder_toggles_on_every_click_however_quick() {
     let expanded = RowKind::Dir(Fold::Expanded);
     let collapsed = RowKind::Dir(Fold::Collapsed);
     for (count, fold) in [(1, expanded), (2, collapsed), (3, expanded), (1, collapsed)] {
-        h.run(|state, out| panes::click_tree(state, src, Click::of(count), out));
+        h.run(|state, out| panes::click_tree(state, src, Click::of(count), Pick::Only, out));
         assert_eq!(h.state.tree.rows[src].kind, fold, "click count {count}");
     }
 }

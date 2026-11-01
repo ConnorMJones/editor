@@ -7,7 +7,7 @@ use model::picture::{Bitmap, Encoding};
 use reader::epub::Spot;
 use state::book::{BookTab, Pressed};
 use state::project::session;
-use state::reading::{Found, Notes, Press, Reading};
+use state::reading::{Found, Notes, Press, Reading, Taps};
 use state::render::book::{Align, BookTarget, InChapter};
 use state::render::document::{DocumentMotion, Placed, TopItem};
 use state::render::flow::{Block, BlockKind, Emphasis, ImagePlace, Inline, LocalImage};
@@ -288,7 +288,7 @@ fn drag(h: &mut Harness, item: usize, from: usize, to: usize) {
     let (pane, book) = (h.state.layout.focus(), tab(h).file());
     let block = h.state.books[book].flow.flow.roots[item];
     let at = |byte| Some(Pressed { block, byte });
-    h.run(|state, _| state::book::press(state, pane, book, at(from), Press::Down));
+    h.run(|state, _| state::book::press(state, pane, book, at(from), Press::Down(Taps::One)));
     h.run(|state, _| state::book::press(state, pane, book, at(to), Press::Move));
     h.run(|state, _| state::book::press(state, pane, book, None, Press::Up));
 }
@@ -297,10 +297,10 @@ fn drag(h: &mut Harness, item: usize, from: usize, to: usize) {
 fn a_selection_in_a_book_is_copied_highlighted_and_commented() {
     let (dir, _, mut h) = opened();
     drag(&mut h, 1, 3, 7);
-    let Reading::Selected(span) = tab(&h).reading.clone() else {
+    let Reading::Selected(span) = &tab(&h).reading else {
         panic!("{:?}", tab(&h).reading);
     };
-    assert_eq!(span.part, Part(0));
+    assert_eq!(span.start().part, Part(0));
     h.keys("y");
     assert_eq!(h.clipboard[0].as_deref(), Some("began"));
     h.keys("v");
@@ -337,7 +337,7 @@ fn a_drag_into_another_chapter_leaves_the_selection_where_it_was() {
     let flow = &h.state.books[book].flow.flow;
     let (first, later) = (flow.roots[1], flow.roots[6]);
     let at = |block, byte| Some(Pressed { block, byte });
-    h.run(|state, _| state::book::press(state, pane, book, at(first, 0), Press::Down));
+    h.run(|state, _| state::book::press(state, pane, book, at(first, 0), Press::Down(Taps::One)));
     h.run(|state, _| state::book::press(state, pane, book, at(later, 3), Press::Move));
     h.run(|state, _| state::book::press(state, pane, book, None, Press::Up));
     assert_eq!(
@@ -387,4 +387,60 @@ fn a_bookmark_marks_the_place_in_view_and_the_notebook_goes_back_to_it() {
         notebook(&h).bookmarks.is_empty(),
         "a second m takes it away"
     );
+}
+
+#[test]
+fn a_double_tap_in_a_book_selects_the_word() {
+    let (_dir, _, mut h) = opened();
+    let (pane, book) = (h.state.layout.focus(), tab(&h).file());
+    let block = h.state.books[book].flow.flow.roots[1];
+    let at = Some(Pressed { block, byte: 4 });
+    h.run(|state, _| state::book::press(state, pane, book, at, Press::Down(Taps::Two)));
+    h.keys("y");
+    assert_eq!(h.clipboard[0].as_deref(), Some("began"));
+}
+
+#[test]
+fn notes_from_a_book_name_the_contents_chapter_and_its_links_go_there() {
+    let (dir, _, mut h) = opened();
+    drag(&mut h, 1, 3, 7);
+    h.keys("v:export-notes<ret>");
+    let written = std::fs::read_to_string(dir.path().join("novel.md")).unwrap();
+    assert!(written.contains("# A Novel\nSomeone\n"), "{written}");
+    assert!(written.contains("[hl] **chp 1** - **"), "{written}");
+    assert!(
+        written.contains("%]]\n<!-- quote -->\nbegan\n<!-- /quote -->\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains(&format!(
+            "[[novel.epub#chapter=1&note={}|chp 1 - ",
+            notebook(&h).highlights[0].id.0
+        )),
+        "{written}"
+    );
+
+    std::fs::write(dir.path().join("links.md"), "[[novel.epub#chapter=2]]\n").unwrap();
+    h.keys(":o links.md<ret>gf");
+    let book = tab(&h).file();
+    let second = h.state.books[book].flow.starts[1];
+    assert_eq!(tab(&h).scroll, Placed::item(second));
+}
+
+#[test]
+fn a_comment_on_a_book_highlight_is_written_beside_it() {
+    let (_dir, _, mut h) = opened();
+    drag(&mut h, 1, 3, 7);
+    h.keys("Ia longer<ret>thought<esc>");
+    assert!(matches!(tab(&h).reading, Reading::Writing(_)));
+    h.keys("<esc>");
+    let [highlight] = &notebook(&h).highlights[..] else {
+        panic!("{:?}", notebook(&h));
+    };
+    assert_eq!(highlight.quote.exact(), "began");
+    assert_eq!(
+        highlight.comment.as_ref().map(|comment| comment.as_str()),
+        Some("a longer\nthought")
+    );
+    assert_eq!(tab(&h).reading, Reading::OnHighlight(highlight.clone()));
 }

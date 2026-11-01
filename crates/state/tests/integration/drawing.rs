@@ -12,6 +12,7 @@ use state::drawing::pen::{self, PenPhase, PenSample, Stylus};
 use state::drawing::{self as drawing, InkTabs};
 use state::input::{self, keymap::Context};
 use state::project::session;
+use state::reading::Taps;
 use state::view::sheet;
 use state::view::tab::Tab;
 
@@ -75,7 +76,7 @@ pub fn draw(h: &mut Harness, stylus: Stylus, points: &[(f32, f32)]) {
     let last = points.len() - 1;
     for (index, &at) in points.iter().enumerate() {
         let phase = match index {
-            0 => PenPhase::Down(stylus),
+            0 => PenPhase::Down(stylus, Taps::One),
             index if index == last => PenPhase::Up,
             _ => PenPhase::Move,
         };

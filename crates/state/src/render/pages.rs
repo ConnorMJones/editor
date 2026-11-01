@@ -1,5 +1,7 @@
 //! Typst rendered as fixed pages.
 
+use std::ops::Range;
+
 use helix_core::SmallVec;
 use model::command::{ReadMove, Shown};
 use model::config::OpenAs;
@@ -12,13 +14,16 @@ use model::units::Pt;
 use slotmap::SecondaryMap;
 
 use crate::project::Project;
-use crate::render::typeset::{self, Compiled, Outcome, Typst};
+use crate::render::typeset::{self, Compiled, Outcome, PageSvg, Typst};
 use crate::render::{Opening, Rendering, step};
 use crate::text::buffer::{BufferId, Position, Target};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::panes::{self, Arrive};
 use crate::view::tab::{BesideMut, Showing, TextTabs};
 use crate::{Effect, State};
+
+const DRAWN_AROUND: usize = 1;
+const KEPT_AROUND: usize = 2;
 
 /// The compile state of every buffer a pages view shows.
 pub type Compiles = SecondaryMap<BufferId, Typst>;
@@ -99,17 +104,68 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
             },
         )
         .collect();
-    let mut wanted: SmallVec<[BufferId; 4]> = SmallVec::new();
-    for &(_, buffer) in &shown {
+    let mut seen: SmallVec<[(BufferId, Range<usize>); 4]> = SmallVec::new();
+    for &(pane, buffer) in &shown {
         match compiles.get(buffer) {
             Some(_) => {}
             None => {
                 compiles.insert(buffer, Typst::new());
             }
         }
-        wanted.push(buffer);
+        let Some((_, view, _)) = layout.pages_mut(pane) else {
+            continue;
+        };
+        let stack = compiles[buffer]
+            .pages
+            .as_ref()
+            .map(|compiled| &compiled.stack);
+        let pages = match (stack, view.last) {
+            (Some(stack), Some(Measure { viewport, .. })) => view.view.frame(stack, viewport).pages,
+            (Some(_) | None, _) => {
+                let centre = view.view.centre.page.0;
+                centre..centre + 1
+            }
+        };
+        seen.push((buffer, pages));
     }
+    let drawn = |buffer: BufferId| {
+        (seen.iter().filter(|(shown, _)| *shown == buffer))
+            .map(|(_, pages)| pages.start.saturating_sub(DRAWN_AROUND)..pages.end + DRAWN_AROUND)
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+            .unwrap_or(0..0)
+    };
+    let wanted: SmallVec<[(BufferId, Range<usize>); 4]> = (shown.iter())
+        .map(|&(_, buffer)| (buffer, drawn(buffer)))
+        .collect();
     typeset::request_pages(compiles, buffers, root.path(), &wanted, out);
+    for (buffer, typst) in compiles.iter_mut() {
+        let (Busy::Idle, Some(compiled)) = (typst.compile, typst.pages.as_mut()) else {
+            continue;
+        };
+        let away = |index: usize| {
+            (seen.iter().filter(|(shown, _)| *shown == buffer))
+                .map(|(_, pages)| {
+                    (pages.start.saturating_sub(index)).max((index + 1).saturating_sub(pages.end))
+                })
+                .min()
+        };
+        for (index, page) in compiled.pages.iter_mut().enumerate() {
+            match (away(index), &page.svg) {
+                (Some(away), PageSvg::Absent) if away <= DRAWN_AROUND => {
+                    page.svg = PageSvg::Pending;
+                    out.push(Effect::Typeset(typeset::Request::Page {
+                        buffer,
+                        main: buffers[buffer].path.clone(),
+                        page: index,
+                        hash: page.hash,
+                    }));
+                }
+                (None, PageSvg::Ready(_)) => page.svg = PageSvg::Absent,
+                (Some(away), PageSvg::Ready(_)) if away > KEPT_AROUND => page.svg = PageSvg::Absent,
+                (Some(_) | None, PageSvg::Absent | PageSvg::Pending | PageSvg::Ready(_)) => {}
+            }
+        }
+    }
     for &(pane, buffer) in &shown {
         let doc = &buffers[buffer].doc;
         let (Some((text, view, beside)), Some(typst)) =

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use simplecss::{AttributeOperator, DeclarationTokenizer, PseudoClass, StyleSheet
 
 use crate::render::flow::{
     Block, BlockKind, Code, Column, Emphasis, Flow, Image, ImageFile, ImagePlace, InlineBuf, Level,
-    Link, ListKind, LocalImage, Origin, RowKind, SpanKind, Task, hash,
+    Link, ListKind, LocalImage, Origin, RowKind, SpanKind, hash,
 };
 
 pub const LEAST_SCALE: f32 = 0.6;
@@ -82,8 +83,13 @@ pub enum BookTarget {
     Spot(Spot),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoTask;
+
 impl Origin for InChapter {
     type Target = BookTarget;
+    type Task = NoTask;
+    type Own = Infallible;
 }
 
 #[derive(Clone, Copy)]
@@ -429,7 +435,7 @@ impl Style {
 }
 
 impl Builder {
-    fn push(&mut self, kind: BlockKind<BookTarget>, origin: InChapter) -> usize {
+    fn push(&mut self, kind: BlockKind<InChapter>, origin: InChapter) -> usize {
         let index = self.blocks.len();
         match self.open.as_slice() {
             [] => self.items += 1,
@@ -447,7 +453,7 @@ impl Builder {
         index
     }
 
-    fn open(&mut self, kind: BlockKind<BookTarget>, origin: InChapter) {
+    fn open(&mut self, kind: BlockKind<InChapter>, origin: InChapter) {
         let index = self.push(kind, origin);
         self.open.push(index);
     }
@@ -728,7 +734,7 @@ impl Chapter<'_> {
                 let kind = match container {
                     Container::Quote => BlockKind::Quote,
                     Container::List(kind) => BlockKind::List(kind),
-                    Container::Item => BlockKind::Item(Task::None),
+                    Container::Item => BlockKind::Item(NoTask),
                     Container::Table => BlockKind::Table(Box::new([])),
                     Container::Row => BlockKind::Row(
                         match (node.parent_element()).map(|parent| parent.tag_name().name()) {
@@ -923,14 +929,16 @@ impl BookFlow {
     }
 
     pub fn within(&self, block: usize, span: &TextSpan) -> Option<Range<usize>> {
-        let text = self.texts.chapters.get(span.part.0)?;
+        let chapter = self.flow.blocks.get(block)?.origin.chapter;
+        let text = self.texts.chapters.get(chapter)?;
+        let chars = span.chars_in(Part(chapter), &**text)?;
         let found = text.blocks[text
             .blocks
             .binary_search_by_key(&block, |at| at.block)
             .ok()?];
         let length = self.flow.blocks[block].text()?.len();
-        let start = span.chars.start.max(found.start);
-        let end = span.chars.end.min(found.start + length);
+        let start = chars.start.max(found.start);
+        let end = chars.end.min(found.start + length);
         (start < end).then(|| start - found.start..end - found.start)
     }
 }
@@ -951,6 +959,10 @@ impl PartText for ChapterText {
     fn after(&self, char: usize) -> usize {
         (self.text.get(char..).and_then(|rest| rest.chars().next()))
             .map_or(self.text.len(), |next| char + next.len_utf8())
+    }
+
+    fn len(&self) -> usize {
+        self.text.len()
     }
 }
 

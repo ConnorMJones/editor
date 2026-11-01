@@ -174,7 +174,7 @@ fn extraction_finds_links_with_their_lines() {
 fn unresolved_links_parse_as_missing() {
     use model::picture::{Bitmap, Encoding};
     use state::render::markdown::{
-        self, Base, BlockKind, EmbedKind, Emphasis, ImageFile, ImagePlace, LocalImage,
+        self, Base, BlockKind, EmbedKind, Emphasis, ImageFile, ImagePlace, LocalImage, NoteBlock,
     };
     use std::path::Path;
     let index = vault(&["notes/here.md", "assets/pic.png"]);
@@ -204,7 +204,7 @@ fn unresolved_links_parse_as_missing() {
         missing,
         [("here", false), ("gone", true), (" ", false), ("x", false)]
     );
-    let BlockKind::Embed(image) = &parsed.blocks[1].kind else {
+    let BlockKind::Own(NoteBlock::Embed(image)) = &parsed.blocks[1].kind else {
         panic!("not an embed");
     };
     assert_eq!(
@@ -214,7 +214,7 @@ fn unresolved_links_parse_as_missing() {
             encoding: Encoding::Bitmap(Bitmap::Png),
         }))
     );
-    let BlockKind::Embed(note) = &parsed.blocks[2].kind else {
+    let BlockKind::Own(NoteBlock::Embed(note)) = &parsed.blocks[2].kind else {
         panic!("not an embed");
     };
     assert_eq!(note.kind, EmbedKind::Note(file("notes/here.md")));

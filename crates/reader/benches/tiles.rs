@@ -30,6 +30,10 @@ fn screen_of_tiles(c: &mut Criterion) {
             },
         );
         c.bench_function(
+            &format!("{name}, every tile at level 3, in one block"),
+            |b| b.iter(|| black_box(document.render_tiles(row(0..grid.rows)).unwrap())),
+        );
+        c.bench_function(
             &format!("{name}, every tile at level 3, two rows at a time"),
             |b| {
                 b.iter(|| {

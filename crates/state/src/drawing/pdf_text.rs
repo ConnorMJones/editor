@@ -1,10 +1,10 @@
 use library::Place;
-use model::sheet::{PageIndex, SheetView};
+use model::sheet::SheetView;
 
 use crate::drawing::pen::{PenPhase, PenSample};
 use crate::drawing::{InkTabs, PdfFile, PdfMode};
 use crate::job::Job;
-use crate::reading::{Press, Reading};
+use crate::reading::{Press, ReaderKind, Reading};
 use crate::view::tab::Tab;
 use crate::{Effect, State};
 
@@ -41,19 +41,19 @@ pub fn pen(
     let stack = file.pages();
     let frame = view.frame(stack, sample.viewport);
     let press = match phase {
-        PenPhase::Down(_) => Press::Down,
+        PenPhase::Down(_, taps) => Press::Down(taps),
         PenPhase::Move => Press::Move,
         PenPhase::Up => Press::Up,
         PenPhase::Cancel => Press::Cancel,
     };
     let page = match (press, &*reading) {
-        (Press::Down, _) => frame.hit(stack, sample.at).map(|(page, _)| page.index),
-        (Press::Move | Press::Up | Press::Cancel, Reading::Selecting { part, .. }) => {
-            Some(PageIndex(part.0))
+        (Press::Down(_), _) | (Press::Move | Press::Up, Reading::Selecting { .. }) => {
+            frame.hit(stack, sample.at).map(|(page, _)| page.index)
         }
-        (
-            Press::Move | Press::Up | Press::Cancel,
-            Reading::Idle | Reading::Selected(_) | Reading::OnHighlight(_),
+        (Press::Cancel, _)
+        | (
+            Press::Move | Press::Up,
+            Reading::Idle | Reading::Selected(_) | Reading::OnHighlight(_) | Reading::Writing(_),
         ) => None,
     };
     let at = page.and_then(|page| {
@@ -63,5 +63,11 @@ pub fn pen(
             char: document.text(page.0)?.nearest(point)?,
         })
     });
-    *reading = std::mem::replace(reading, Reading::Idle).step(press, at, document, &file.notes);
+    *reading = std::mem::replace(reading, Reading::Idle).step(
+        press,
+        at,
+        ReaderKind::Pdf,
+        document,
+        &file.notes,
+    );
 }

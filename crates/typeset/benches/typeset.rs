@@ -107,7 +107,7 @@ fn document_incremental(c: &mut Criterion) {
     }
     let marker = source.find("000000").expect("marker");
     let pages = typesetter
-        .typst_pages(dir.path(), &main, &source)
+        .typst_pages(dir.path(), &main, &source, 0..usize::MAX)
         .result
         .expect("compiles");
     assert_eq!(pages.pages.len(), 5);
@@ -118,7 +118,7 @@ fn document_incremental(c: &mut Criterion) {
             source.replace_range(marker..marker + 6, &format!("{:06}", counter % 1_000_000));
             black_box(
                 typesetter
-                    .typst_pages(dir.path(), &main, &source)
+                    .typst_pages(dir.path(), &main, &source, 0..usize::MAX)
                     .result
                     .expect("compiles"),
             )
@@ -132,7 +132,7 @@ fn document_incremental(c: &mut Criterion) {
             typst::comemo::evict(0);
             black_box(
                 typesetter
-                    .typst_pages(dir.path(), &main, &source)
+                    .typst_pages(dir.path(), &main, &source, 0..usize::MAX)
                     .result
                     .expect("compiles"),
             )

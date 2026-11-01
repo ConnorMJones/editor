@@ -7,6 +7,7 @@ use inline::inline;
 use media::{code_box, figure_element, picture, placeholder};
 
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -20,11 +21,11 @@ use model::theme::{Modifiers, Theme};
 use state::State;
 use state::book::BookId;
 use state::project::links::{self, Origin as LinkOrigin, Resolution};
-use state::render::book::{Align, BookTarget, InChapter, Layout};
+use state::render::book::{Align, BookTarget, InChapter, Layout, NoTask};
 use state::render::document::BlockClick;
 use state::render::flow::{Flow, Lines, Origin};
 use state::render::markdown::{
-    self, BlockKind, CalloutFold, Column, EmbedKind, LinkTarget, ListKind, RowKind, Task,
+    self, BlockKind, CalloutFold, Column, EmbedKind, LinkTarget, ListKind, NoteBlock, RowKind, Task,
 };
 use state::render::typeset::Figures;
 use state::text::buffer::BufferId;
@@ -40,18 +41,18 @@ const MEASURE: f32 = 45.0;
 /// Heading sizes relative to prose, `#` to `######`.
 const SCALES: [f32; 6] = [1.6, 1.4, 1.25, 1.12, 1.05, 1.0];
 
-struct Draw<'a, O: Drawable> {
-    theme: &'a Theme,
-    fonts: &'a Fonts,
-    flow: &'a Flow<O>,
-    key: O::Key,
-    version: u64,
-    toggled: &'a [u32],
-    marked: &'a dyn Fn(usize) -> Tints,
-    figures: &'a Figures,
-    pictures: &'a Rc<RefCell<Pictures>>,
-    pane: PaneId,
-    workspace: WeakEntity<Workspace>,
+pub struct Draw<'a, O: Drawable> {
+    pub theme: &'a Theme,
+    pub fonts: &'a Fonts,
+    pub flow: &'a Flow<O>,
+    pub key: O::Key,
+    pub version: u64,
+    pub toggled: &'a [u32],
+    pub marked: &'a dyn Fn(usize) -> Tints,
+    pub figures: &'a Figures,
+    pub pictures: &'a Rc<RefCell<Pictures>>,
+    pub pane: PaneId,
+    pub workspace: WeakEntity<Workspace>,
 }
 
 pub trait Drawable: Origin + Sized + 'static {
@@ -65,9 +66,11 @@ pub trait Drawable: Origin + Sized + 'static {
 
     fn arrange(&self, fonts: &Fonts, block: Div) -> Div;
 
-    fn note(key: Self::Key) -> Option<BufferId>;
-
     fn book(key: Self::Key) -> Option<BookId>;
+
+    fn task(draw: &Draw<Self>, task: Self::Task) -> Option<(AnyElement, Ink)>;
+
+    fn own(draw: &Draw<Self>, index: usize, own: &Self::Own, ink: Ink) -> AnyElement;
 }
 
 impl Drawable for Lines {
@@ -99,12 +102,210 @@ impl Drawable for Lines {
         block
     }
 
-    fn note(buffer: BufferId) -> Option<BufferId> {
-        Some(buffer)
-    }
-
     fn book(_: BufferId) -> Option<BookId> {
         None
+    }
+
+    fn task(draw: &Draw<Lines>, task: Task) -> Option<(AnyElement, Ink)> {
+        let (marker, ink) = match task {
+            Task::Open { marker } => (marker, Ink::Plain),
+            Task::Done { marker } => (marker, Ink::Done),
+            Task::None => return None,
+        };
+        let theme = draw.theme;
+        let fonts = draw.fonts;
+        let (workspace, buffer, version) = (draw.workspace.clone(), draw.key, draw.version);
+        let accent = hsla(theme.chrome.accent);
+        let checkbox = div()
+            .id(("task", marker))
+            .mt(fonts.prose_size * 0.25)
+            .size(fonts.prose_size)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .border_1()
+            .text_size(fonts.prose_size * 0.75)
+            .cursor_pointer()
+            .hover(move |style| style.border_color(accent))
+            .on_click(move |_: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                update(&workspace, window, cx, |this| {
+                    state::render::document::toggle_task(&mut this.state, buffer, version, marker)
+                });
+            });
+        let checkbox = match ink {
+            Ink::Plain => checkbox.border_color(hsla(theme.prose.checkbox)),
+            Ink::Done => checkbox
+                .border_color(accent)
+                .bg(accent)
+                .text_color(hsla(theme.background))
+                .child("✓"),
+        };
+        Some((checkbox.into_any_element(), ink))
+    }
+
+    fn own(draw: &Draw<Lines>, index: usize, own: &NoteBlock, ink: Ink) -> AnyElement {
+        let theme = draw.theme;
+        let fonts = draw.fonts;
+        let children = || draw.flow.children(index);
+        match own {
+            NoteBlock::Callout(callout) => {
+                let color = hsla(theme.prose[callout.kind]);
+                let icon = match callout.kind {
+                    CalloutKind::Note => "✎",
+                    CalloutKind::Abstract | CalloutKind::Example => "☰",
+                    CalloutKind::Info => "ℹ",
+                    CalloutKind::Todo => "☑",
+                    CalloutKind::Tip => "✦",
+                    CalloutKind::Success => "✔",
+                    CalloutKind::Question => "?",
+                    CalloutKind::Warning => "⚠",
+                    CalloutKind::Failure => "✘",
+                    CalloutKind::Danger => "⚡",
+                    CalloutKind::Bug => "✱",
+                    CalloutKind::Quote => "❝",
+                };
+                let fold = callout.shown(draw.toggled);
+                let chevron = match fold {
+                    CalloutFold::Static => "",
+                    CalloutFold::Open => "▾",
+                    CalloutFold::Closed => "▸",
+                };
+                let (workspace, pane, ordinal) = (draw.workspace.clone(), draw.pane, callout.index);
+                let header = div()
+                    .id(("callout", index))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_color(color)
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(icon)
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(SharedString::from(callout.title.clone())),
+                    )
+                    .child(chevron);
+                let header =
+                    match fold {
+                        CalloutFold::Static => header,
+                        CalloutFold::Open | CalloutFold::Closed => header
+                            .cursor_pointer()
+                            .on_click(move |_: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                update(&workspace, window, cx, |this| {
+                                    state::render::document::toggle_fold(
+                                        &mut this.state,
+                                        pane,
+                                        ordinal,
+                                    )
+                                });
+                            }),
+                    };
+                let body = match fold {
+                    CalloutFold::Static | CalloutFold::Open => Some(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(children().map(|child| block(draw, child, ink))),
+                    ),
+                    CalloutFold::Closed => None,
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_sm()
+                    .border_l(px(3.))
+                    .border_color(color)
+                    .bg(color.opacity(0.08))
+                    .child(header)
+                    .children(body)
+                    .into_any_element()
+            }
+            NoteBlock::Math(math) => clickable(draw, index)
+                .child(figure_element(draw, math.figure, &math.tex))
+                .into_any_element(),
+            NoteBlock::Mermaid(mermaid) => clickable(draw, index)
+                .child(figure_element(draw, mermaid.figure, &mermaid.src))
+                .into_any_element(),
+            NoteBlock::Embed(embed) => match &embed.kind {
+                EmbedKind::Image(file) => clickable(draw, index)
+                    .child(picture(draw, file, &embed.link.target))
+                    .into_any_element(),
+                EmbedKind::Note(resolution) => {
+                    let (label, shown) = match resolution {
+                        Resolution::File(path) => ("embedded note", format!("⧉ {path}")),
+                        Resolution::Missing(path) => {
+                            ("embedded note not found", format!("⧉ {path}"))
+                        }
+                        Resolution::Invalid => ("embed", format!("⧉ {}", embed.link.target)),
+                    };
+                    let shown = placeholder(theme, fonts, label, SharedString::from(shown));
+                    let (workspace, buffer, pane) = (draw.workspace.clone(), draw.key, draw.pane);
+                    let target = LinkTarget::Wiki(embed.link.clone());
+                    div()
+                        .id(("embed", index))
+                        .cursor_pointer()
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            update(&workspace, window, cx, |this| {
+                                links::follow(
+                                    &mut this.state,
+                                    buffer,
+                                    &target,
+                                    LinkOrigin::Document(pane),
+                                    &mut this.effects,
+                                )
+                            });
+                        })
+                        .child(shown)
+                        .into_any_element()
+                }
+            },
+            NoteBlock::Html(html) => clickable(draw, index)
+                .child(code_box(
+                    theme,
+                    fonts,
+                    Some(SharedString::from("html")),
+                    SharedString::from(html.clone()),
+                    None,
+                ))
+                .into_any_element(),
+            NoteBlock::Frontmatter(text) => clickable(draw, index)
+                .child(code_box(
+                    theme,
+                    fonts,
+                    Some(SharedString::from("properties")),
+                    SharedString::from(text.clone()),
+                    None,
+                ))
+                .into_any_element(),
+            NoteBlock::Footnote { label } => div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .text_size(fonts.prose_size * 0.9)
+                .text_color(hsla(theme.muted))
+                .child(
+                    div()
+                        .flex_none()
+                        .child(SharedString::from(format!("[{label}]"))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .children(children().map(|child| block(draw, child, ink))),
+                )
+                .into_any_element(),
+        }
     }
 }
 
@@ -142,18 +343,22 @@ impl Drawable for InChapter {
             })
     }
 
-    fn note(_: BookId) -> Option<BufferId> {
+    fn book(book: BookId) -> Option<BookId> {
+        Some(book)
+    }
+
+    fn task(_: &Draw<InChapter>, _: NoTask) -> Option<(AnyElement, Ink)> {
         None
     }
 
-    fn book(book: BookId) -> Option<BookId> {
-        Some(book)
+    fn own(_: &Draw<InChapter>, _: usize, own: &Infallible, _: Ink) -> AnyElement {
+        match *own {}
     }
 }
 
 /// How a block's text is inked: done tasks read struck through and muted.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Ink {
+pub enum Ink {
     Plain,
     Done,
 }
@@ -291,24 +496,25 @@ fn kind<O: Drawable>(draw: &Draw<O>, index: usize, ink: Ink) -> AnyElement {
                 .gap_1()
                 .children(children().enumerate().map(|(n, item)| {
                     let task = match flow.blocks[item].kind {
-                        BlockKind::Item(task) => task,
-                        _ => Task::None,
+                        BlockKind::Item(task) => O::task(draw, task),
+                        _ => None,
                     };
-                    let marker = match (task, kind) {
-                        (Task::Open { marker }, _) => checkbox(draw, marker, Ink::Plain),
-                        (Task::Done { marker }, _) => checkbox(draw, marker, Ink::Done),
-                        (Task::None, ListKind::Bullet) => div()
-                            .text_color(hsla(theme.prose.marker))
-                            .child(bullet)
-                            .into_any_element(),
-                        (Task::None, ListKind::Ordered { start }) => div()
-                            .text_color(hsla(theme.prose.marker))
-                            .child(format!("{}.", start + n as u64))
-                            .into_any_element(),
-                    };
-                    let ink = match task {
-                        Task::Done { .. } => Ink::Done,
-                        Task::Open { .. } | Task::None => ink,
+                    let (marker, ink) = match (task, kind) {
+                        (Some(marked), _) => marked,
+                        (None, ListKind::Bullet) => (
+                            div()
+                                .text_color(hsla(theme.prose.marker))
+                                .child(bullet)
+                                .into_any_element(),
+                            ink,
+                        ),
+                        (None, ListKind::Ordered { start }) => (
+                            div()
+                                .text_color(hsla(theme.prose.marker))
+                                .child(format!("{}.", start + n as u64))
+                                .into_any_element(),
+                            ink,
+                        ),
                     };
                     div()
                         .flex()
@@ -347,81 +553,6 @@ fn kind<O: Drawable>(draw: &Draw<O>, index: usize, ink: Ink) -> AnyElement {
             .text_color(hsla(theme.prose.quote_text))
             .children(children().map(|child| block(draw, child, ink)))
             .into_any_element(),
-        BlockKind::Callout(callout) => {
-            let color = hsla(theme.prose[callout.kind]);
-            let icon = match callout.kind {
-                CalloutKind::Note => "✎",
-                CalloutKind::Abstract | CalloutKind::Example => "☰",
-                CalloutKind::Info => "ℹ",
-                CalloutKind::Todo => "☑",
-                CalloutKind::Tip => "✦",
-                CalloutKind::Success => "✔",
-                CalloutKind::Question => "?",
-                CalloutKind::Warning => "⚠",
-                CalloutKind::Failure => "✘",
-                CalloutKind::Danger => "⚡",
-                CalloutKind::Bug => "✱",
-                CalloutKind::Quote => "❝",
-            };
-            let fold = callout.shown(draw.toggled);
-            let chevron = match fold {
-                CalloutFold::Static => "",
-                CalloutFold::Open => "▾",
-                CalloutFold::Closed => "▸",
-            };
-            let (workspace, pane, ordinal) = (draw.workspace.clone(), draw.pane, callout.index);
-            let header = div()
-                .id(("callout", index))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .text_color(color)
-                .font_weight(gpui::FontWeight::BOLD)
-                .child(icon)
-                .child(
-                    div()
-                        .flex_1()
-                        .child(SharedString::from(callout.title.clone())),
-                )
-                .child(chevron);
-            let header = match fold {
-                CalloutFold::Static => header,
-                CalloutFold::Open | CalloutFold::Closed => {
-                    header
-                        .cursor_pointer()
-                        .on_click(move |_: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            update(&workspace, window, cx, |this| {
-                                state::render::document::toggle_fold(&mut this.state, pane, ordinal)
-                            });
-                        })
-                }
-            };
-            let body = match fold {
-                CalloutFold::Static | CalloutFold::Open => Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children(children().map(|child| block(draw, child, ink))),
-                ),
-                CalloutFold::Closed => None,
-            };
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .rounded_sm()
-                .border_l(px(3.))
-                .border_color(color)
-                .bg(color.opacity(0.08))
-                .child(header)
-                .children(body)
-                .into_any_element()
-        }
         BlockKind::Code(code) => {
             let runs = flow.highlights.get(&code.hash).map(|runs| {
                 let mut start = 0;
@@ -453,12 +584,6 @@ fn kind<O: Drawable>(draw: &Draw<O>, index: usize, ink: Ink) -> AnyElement {
                 ))
                 .into_any_element()
         }
-        BlockKind::Math(math) => clickable(draw, index)
-            .child(figure_element(draw, math.figure, &math.tex))
-            .into_any_element(),
-        BlockKind::Mermaid(mermaid) => clickable(draw, index)
-            .child(figure_element(draw, mermaid.figure, &mermaid.src))
-            .into_any_element(),
         BlockKind::Table(columns) => {
             let columns = columns.clone();
             div()
@@ -515,124 +640,12 @@ fn kind<O: Drawable>(draw: &Draw<O>, index: usize, ink: Ink) -> AnyElement {
         BlockKind::Image(image) => clickable(draw, index)
             .child(picture(draw, &image.file, &image.src))
             .into_any_element(),
-        BlockKind::Embed(embed) => match &embed.kind {
-            EmbedKind::Image(file) => clickable(draw, index)
-                .child(picture(draw, file, &embed.link.target))
-                .into_any_element(),
-            EmbedKind::Note(resolution) => {
-                let (label, shown) = match resolution {
-                    Resolution::File(path) => ("embedded note", format!("⧉ {path}")),
-                    Resolution::Missing(path) => ("embedded note not found", format!("⧉ {path}")),
-                    Resolution::Invalid => ("embed", format!("⧉ {}", embed.link.target)),
-                };
-                let shown = placeholder(theme, fonts, label, SharedString::from(shown));
-                match O::note(draw.key) {
-                    Some(buffer) => {
-                        let (workspace, pane) = (draw.workspace.clone(), draw.pane);
-                        let target = LinkTarget::Wiki(embed.link.clone());
-                        div()
-                            .id(("embed", index))
-                            .cursor_pointer()
-                            .on_click(move |_: &ClickEvent, window, cx| {
-                                cx.stop_propagation();
-                                update(&workspace, window, cx, |this| {
-                                    links::follow(
-                                        &mut this.state,
-                                        buffer,
-                                        &target,
-                                        LinkOrigin::Document(pane),
-                                        &mut this.effects,
-                                    )
-                                });
-                            })
-                            .child(shown)
-                            .into_any_element()
-                    }
-                    None => shown,
-                }
-            }
-        },
+        BlockKind::Own(own) => O::own(draw, index, own, ink),
         BlockKind::Rule => div()
             .my_2()
             .h(px(1.))
             .w_full()
             .bg(hsla(theme.chrome.border))
             .into_any_element(),
-        BlockKind::Html(html) => clickable(draw, index)
-            .child(code_box(
-                theme,
-                fonts,
-                Some(SharedString::from("html")),
-                SharedString::from(html.clone()),
-                None,
-            ))
-            .into_any_element(),
-        BlockKind::Frontmatter(text) => clickable(draw, index)
-            .child(code_box(
-                theme,
-                fonts,
-                Some(SharedString::from("properties")),
-                SharedString::from(text.clone()),
-                None,
-            ))
-            .into_any_element(),
-        BlockKind::Footnote { label } => div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .text_size(fonts.prose_size * 0.9)
-            .text_color(hsla(theme.muted))
-            .child(
-                div()
-                    .flex_none()
-                    .child(SharedString::from(format!("[{label}]"))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .children(children().map(|child| block(draw, child, ink))),
-            )
-            .into_any_element(),
     }
-}
-
-/// A clickable task checkbox flipping the `[ ]` at byte `marker` of the source.
-fn checkbox<O: Drawable>(draw: &Draw<O>, marker: usize, ink: Ink) -> AnyElement {
-    let theme = draw.theme;
-    let fonts = draw.fonts;
-    let (workspace, version) = (draw.workspace.clone(), draw.version);
-    let accent = hsla(theme.chrome.accent);
-    let box_ = div()
-        .id(("task", marker))
-        .mt(fonts.prose_size * 0.25)
-        .size(fonts.prose_size)
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.))
-        .border_1()
-        .text_size(fonts.prose_size * 0.75);
-    let box_ = match O::note(draw.key) {
-        Some(buffer) => box_
-            .cursor_pointer()
-            .hover(move |style| style.border_color(accent))
-            .on_click(move |_: &ClickEvent, window, cx| {
-                cx.stop_propagation();
-                update(&workspace, window, cx, |this| {
-                    state::render::document::toggle_task(&mut this.state, buffer, version, marker)
-                });
-            }),
-        None => box_,
-    };
-    match ink {
-        Ink::Plain => box_.border_color(hsla(theme.prose.checkbox)),
-        Ink::Done => box_
-            .border_color(accent)
-            .bg(accent)
-            .text_color(hsla(theme.background))
-            .child("✓"),
-    }
-    .into_any_element()
 }

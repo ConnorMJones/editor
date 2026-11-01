@@ -7,11 +7,12 @@ use model::notice::Notice;
 use state::input::picker::Items;
 use state::project::files::{FileIndex, Indexed};
 use state::project::path::RelPath;
-use state::sidebar::tree::{RowKind, TreeAction, TreeTarget};
+use state::sidebar::Pick;
+use state::sidebar::tree::{RowKind, TreeAction, TreeEdit, TreeTarget};
 use state::text::buffer::{Disk, Highlight, ParseJob};
 use state::text::highlight;
 use state::view::layout::Node;
-use state::view::panes;
+use state::view::panes::{self, Click};
 use state::{Files, Overlay, Repo, Sidebar, State};
 
 use crate::harness::{Harness, canonical};
@@ -596,4 +597,96 @@ fn an_empty_pane_is_not_split() {
     h.keys("<C-w>v");
     assert_eq!(h.state.layout.panes().len(), 1);
     assert!(matches!(h.state.notice, Some(Notice::NothingToSplit)));
+}
+
+#[test]
+fn picked_tree_entries_are_deleted_together() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("docs")).unwrap();
+    for name in ["docs/inner.txt", "a.txt", "b.txt", "c.txt", "d.txt"] {
+        fs::write(dir.path().join(name), "").unwrap();
+    }
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>e");
+    let click = |h: &mut Harness, path: &str, pick| {
+        let at = row(h, path);
+        h.run(|state, out| panes::click_tree(state, at, Click::Single, pick, out));
+    };
+    click(&mut h, "a.txt", Pick::Only);
+    click(&mut h, "c.txt", Pick::Extend);
+    assert_eq!(h.state.tree.selected.len(), 3);
+    click(&mut h, "b.txt", Pick::Toggle);
+    assert_eq!(h.state.tree.selected.len(), 2, "a and c are left");
+
+    let c = row(&h, "c.txt");
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(c), TreeAction::Delete, out));
+    h.keys("y<ret>");
+    assert!(!dir.path().join("a.txt").exists());
+    assert!(!dir.path().join("c.txt").exists());
+    assert!(dir.path().join("b.txt").exists());
+    assert!(h.state.tree.selected.is_empty());
+
+    // A folder and a file inside it go in one delete; a row outside the pick acts alone.
+    click(&mut h, "docs", Pick::Only);
+    click(&mut h, "docs/inner.txt", Pick::Toggle);
+    let d = row(&h, "d.txt");
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(d), TreeAction::Delete, out));
+    assert!(
+        h.state.tree.selected.is_empty(),
+        "right-clicking outside the pick drops it"
+    );
+    h.keys("<esc>");
+    click(&mut h, "docs", Pick::Toggle);
+    click(&mut h, "d.txt", Pick::Toggle);
+    click(&mut h, "docs/inner.txt", Pick::Toggle);
+    let docs = row(&h, "docs");
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(docs), TreeAction::Delete, out));
+    match &h.state.sidebar {
+        Sidebar::Files(Files::Edit(TreeEdit::Delete { first, rest, .. })) => {
+            assert_eq!((first.path.as_str(), rest.len()), ("docs", 0))
+        }
+        other => panic!("{other:?}"),
+    }
+    h.keys("y<ret>");
+    assert!(!dir.path().join("docs").exists());
+    assert!(dir.path().join("d.txt").exists());
+}
+
+#[test]
+fn shift_arrows_pick_tree_rows_and_d_deletes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        fs::write(dir.path().join(name), "").unwrap();
+    }
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>e");
+    h.state.tree.cursor = row(&h, "a.txt");
+    h.keys("<S-down><S-down>");
+    let mut picked: Vec<&str> = h
+        .state
+        .tree
+        .selected
+        .iter()
+        .map(|path| path.as_str())
+        .collect();
+    picked.sort();
+    assert_eq!(picked, ["a.txt", "b.txt", "c.txt"]);
+    h.keys("<S-up>");
+    let mut picked: Vec<&str> = h
+        .state
+        .tree
+        .selected
+        .iter()
+        .map(|path| path.as_str())
+        .collect();
+    picked.sort();
+    assert_eq!(
+        picked,
+        ["a.txt", "b.txt"],
+        "moving back lets go of the row left"
+    );
+    h.keys("dy<ret>");
+    assert!(!dir.path().join("a.txt").exists());
+    assert!(!dir.path().join("b.txt").exists());
+    assert!(dir.path().join("c.txt").exists());
 }

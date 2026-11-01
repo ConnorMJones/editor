@@ -1,6 +1,7 @@
 //! The state decides what to typeset and keeps the results; the host owns the typesetter.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use model::color::{Palette, Rgb};
 use model::notice::Notice;
 use model::sheet::{PageSize, Stack};
 use model::typeset::{
-    Compilation, Diagnostic, DocumentError, Jump, Origin, PagePoint, SourceFile, Svg,
+    Compilation, Diagnostic, DocumentError, Jump, Origin, PageHash, PagePoint, SourceFile, Svg,
 };
 use model::units::Pt;
 use slotmap::SlotMap;
@@ -22,7 +23,7 @@ use crate::render::flow;
 #[cfg(feature = "typeset")]
 use crate::render::markdown::FigureKind;
 use crate::render::markdown::{
-    Block, BlockKind, Embed, EmbedKind, Figure, Image, ImageFile, LocalImage, SpanKind,
+    Block, BlockKind, Figure, Image, ImageFile, LocalImage, OwnBlock, SpanKind,
 };
 use crate::render::pages::{self, Compiles, Locating};
 use crate::text::buffer::{Buffer, BufferId};
@@ -56,6 +57,13 @@ pub enum Request {
         root: PathBuf,
         main: PathBuf,
         text: Rope,
+        drawn: Range<usize>,
+    },
+    Page {
+        buffer: BufferId,
+        main: PathBuf,
+        page: usize,
+        hash: PageHash,
     },
     /// Where byte `cursor` of `main` landed on its pages.
     Locate {
@@ -91,6 +99,12 @@ pub enum Done {
         buffer: BufferId,
         version: u64,
         compiled: Compilation,
+    },
+    Page {
+        buffer: BufferId,
+        page: usize,
+        hash: PageHash,
+        svg: Option<Svg>,
     },
     Pdf {
         out: PathBuf,
@@ -174,10 +188,21 @@ pub struct Typst {
 
 pub struct Compiled {
     pub version: u64,
-    pub pages: Vec<Svg>,
+    pub pages: Vec<TypstPage>,
     /// The pages' sizes stacked, in step with `pages`.
     pub stack: Stack,
     pub warnings: Vec<Diagnostic>,
+}
+
+pub struct TypstPage {
+    pub hash: PageHash,
+    pub svg: PageSvg,
+}
+
+pub enum PageSvg {
+    Absent,
+    Pending,
+    Ready(Svg),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,8 +237,10 @@ pub fn root_of<'a>(root: &'a Path, main: &'a Path) -> &'a Path {
 pub fn each_figure<O: flow::Origin>(blocks: &[Block<O>], mut f: impl FnMut(Figure, &str)) {
     for block in blocks {
         match &block.kind {
-            BlockKind::Math(math) => f(math.figure, &math.tex),
-            BlockKind::Mermaid(mermaid) => f(mermaid.figure, &mermaid.src),
+            BlockKind::Own(own) => match own.figure() {
+                Some((figure, text)) => f(figure, text),
+                None => {}
+            },
             _ => match block.inline() {
                 Some(inline) => {
                     for span in inline.spans.iter() {
@@ -240,11 +267,11 @@ pub fn each_image<O: flow::Origin>(blocks: &[Block<O>], mut f: impl FnMut(&Local
             BlockKind::Image(Image {
                 file: ImageFile::Local(local),
                 ..
-            })
-            | BlockKind::Embed(Embed {
-                kind: EmbedKind::Image(ImageFile::Local(local)),
-                ..
             }) => f(local),
+            BlockKind::Own(own) => match own.image() {
+                Some(local) => f(local),
+                None => {}
+            },
             _ => {}
         }
     }
@@ -382,10 +409,10 @@ pub fn request_pages(
     compiles: &mut Compiles,
     buffers: &SlotMap<BufferId, Buffer>,
     root: &Path,
-    shown: &[BufferId],
+    shown: &[(BufferId, Range<usize>)],
     out: &mut Vec<Effect>,
 ) {
-    for &id in shown {
+    for (id, drawn) in shown.iter().cloned() {
         let (Some(Buffer { path, doc, .. }), Some(typst)) = (buffers.get(id), compiles.get_mut(id))
         else {
             continue;
@@ -402,6 +429,7 @@ pub fn request_pages(
                     root: root_of(root, path).to_owned(),
                     main: path.clone(),
                     text: doc.text.clone(),
+                    drawn,
                 }));
             }
         }
@@ -499,10 +527,28 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                         .and_then(Stack::new);
                     match sizes {
                         Some(stack) => {
+                            let mut kept: HashMap<PageHash, Svg> = (typst.pages.take())
+                                .into_iter()
+                                .flat_map(|compiled| compiled.pages)
+                                .filter_map(|page| match page.svg {
+                                    PageSvg::Ready(svg) => Some((page.hash, svg)),
+                                    PageSvg::Absent | PageSvg::Pending => None,
+                                })
+                                .collect();
+                            let mut drawn: HashMap<usize, Svg> = pages.drawn.into_iter().collect();
+                            let pages_now = (pages.pages.iter().enumerate())
+                                .map(|(index, info)| TypstPage {
+                                    hash: info.hash,
+                                    svg: match (drawn.remove(&index), kept.remove(&info.hash)) {
+                                        (Some(svg), _) | (None, Some(svg)) => PageSvg::Ready(svg),
+                                        (None, None) => PageSvg::Absent,
+                                    },
+                                })
+                                .collect();
                             typst.pages = Some(Compiled {
                                 version,
                                 stack,
-                                pages: pages.pages,
+                                pages: pages_now,
                                 warnings: pages.warnings,
                             });
                             typst.outcome = Outcome::Compiled;
@@ -531,6 +577,22 @@ pub fn finish(state: &mut State, done: Done, out: &mut Vec<Effect>) {
                     }
                     typst.outcome = Outcome::Failed(errors);
                 }
+            }
+        }
+        Done::Page {
+            buffer,
+            page,
+            hash,
+            svg,
+        } => {
+            let slot = (state.compiles.get_mut(buffer))
+                .and_then(|typst| typst.pages.as_mut())
+                .and_then(|compiled| compiled.pages.get_mut(page))
+                .filter(|slot| slot.hash == hash);
+            match (slot, svg) {
+                (Some(slot), Some(svg)) => slot.svg = PageSvg::Ready(svg),
+                (Some(slot), None) => slot.svg = PageSvg::Absent,
+                (None, _) => {}
             }
         }
         Done::Located { buffer, at } => {
@@ -634,14 +696,26 @@ pub fn run(typesetter: &mut ::typeset::Typesetter, request: Request, text: &mut 
             root,
             main,
             text: rope,
+            drawn,
         } => {
             source(&rope);
             Done::Pages {
                 buffer,
                 version,
-                compiled: typesetter.typst_pages(&root, &main, text),
+                compiled: typesetter.typst_pages(&root, &main, text, drawn),
             }
         }
+        Request::Page {
+            buffer,
+            main,
+            page,
+            hash,
+        } => Done::Page {
+            buffer,
+            page,
+            hash,
+            svg: typesetter.page(&main, page, hash),
+        },
         Request::Locate {
             buffer,
             main,

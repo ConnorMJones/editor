@@ -10,7 +10,9 @@ use state::project::backlinks::Build;
 use state::project::files::{FileIndex, Indexed, OnIndexed};
 use state::project::path::RelPath;
 use state::render::document::{self, DocumentScroll};
-use state::render::markdown::{BlockKind, EmbedKind, ImageFile, ImagePlace, LocalImage};
+use state::render::markdown::{
+    BlockKind, EmbedKind, ImageFile, ImagePlace, Lines, LocalImage, NoteBlock,
+};
 
 use state::view::tab::{Showing, TextTabs};
 use state::{Confirm, Overlay, input};
@@ -218,9 +220,12 @@ fn embedded_images_resolve_from_other_folders() {
     h.keys(":o notes/gallery.md<ret><space>V");
     let doc = &h.state.buffers[h.view().buffer()].doc;
     let parsed = document::markdown(&h.state.documents, h.view().buffer(), doc).expect("parsed");
-    let kinds: Vec<&BlockKind> = parsed.blocks.iter().map(|block| &block.kind).collect();
+    let kinds: Vec<&BlockKind<Lines>> = parsed.blocks.iter().map(|block| &block.kind).collect();
     match kinds.as_slice() {
-        [BlockKind::Embed(image), BlockKind::Embed(note)] => {
+        [
+            BlockKind::Own(NoteBlock::Embed(image)),
+            BlockKind::Own(NoteBlock::Embed(note)),
+        ] => {
             assert_eq!(
                 image.kind,
                 EmbedKind::Image(ImageFile::Local(LocalImage {

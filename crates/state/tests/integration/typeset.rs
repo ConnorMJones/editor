@@ -7,7 +7,7 @@ use model::units::Px;
 use state::render::document;
 use state::render::markdown::Figure;
 use state::render::pages::{self, Locating};
-use state::render::typeset::{self, Outcome, Render, SPARE, Typst};
+use state::render::typeset::{self, Outcome, PageSvg, Render, SPARE, Typst};
 
 use state::view::layout::PaneId;
 use state::view::tab::{Showing, TextTabs};
@@ -310,4 +310,27 @@ fn pages_fit_the_pane_and_keys_move_between_them() {
     let after = view(&h).centre;
     let down = (after.page, after.at.y) > (top.centre.page, top.centre.at.y);
     assert!(down, "half a pane down: {top:?} {after:?}");
+}
+
+#[test]
+fn only_typst_pages_around_the_view_hold_their_drawing() {
+    let mut text = String::from("#set page(width: 10cm, height: 6cm)\n");
+    for page in 1..=10 {
+        text.push_str(&format!("= Page {page}\n#pagebreak()\n"));
+    }
+    let (_dir, mut h) = open("main.typ", &text);
+    h.keys("<space>V");
+    let drawn = |h: &Harness| -> Vec<usize> {
+        let compiled = typst(h).1.pages.as_ref().expect("compiled");
+        (compiled.pages.iter().enumerate())
+            .filter(|(_, page)| matches!(page.svg, PageSvg::Ready(_)))
+            .map(|(index, _)| index)
+            .collect()
+    };
+    assert_eq!(typst(&h).1.pages.as_ref().unwrap().pages.len(), 11);
+    assert_eq!(drawn(&h), [0, 1]);
+    h.keys("ge");
+    assert_eq!(drawn(&h), [9, 10], "the first pages are let go");
+    h.keys("gg");
+    assert_eq!(drawn(&h), [0, 1]);
 }

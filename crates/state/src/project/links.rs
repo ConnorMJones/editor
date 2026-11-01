@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use helix_core::SmallVec;
 use helix_stdx::rope::RopeSliceExt;
+use library::{AnnotationId, Part};
 use model::command::Shown;
 use model::config::OpenAs;
 use model::notice::Notice;
@@ -16,6 +17,7 @@ use crate::apply::{self, FocusedText, focused_text};
 use crate::project::files::FileIndex;
 use crate::project::path::TextKind;
 use crate::project::path::{Folder, RelPath};
+use crate::reading::{Landing, Locate};
 use crate::render::markdown::{self, BlockKind, LinkTarget, Markdown, WikiLink};
 use crate::text::buffer::{BufferId, Target, TextDoc};
 use crate::view::layout::{NotInLayout, PaneId};
@@ -330,9 +332,32 @@ pub fn follow(
         Resolution::File(path) => {
             let full = path.to_path(state.project.root.path());
             // Block references (`#^id`) only open the note.
+            let part = |heading: &str| {
+                let number = |text: &str| text.parse::<usize>().ok()?.checked_sub(1);
+                let (mut locate, mut note) = (None, None);
+                for pair in heading.split('&') {
+                    match pair.split_once('=') {
+                        Some(("page", page)) => locate = Some(Locate::Page(Part(number(page)?))),
+                        Some(("chapter", chapter)) => {
+                            locate = Some(Locate::Chapter(number(chapter)?))
+                        }
+                        Some(("note", id)) => note = Some(AnnotationId::parse(id)?),
+                        Some(_) | None => return None,
+                    }
+                }
+                let landing = match (note, locate) {
+                    (Some(note), Some(or)) => Landing::Noted { note, or },
+                    (Some(note), None) => Landing::Annotation(note),
+                    (None, Some(locate)) => Landing::Locate(locate),
+                    (None, None) => return None,
+                };
+                Some(Target::Reader(landing))
+            };
             let to = heading
                 .filter(|heading| !heading.is_empty() && !heading.starts_with('^'))
-                .map(|heading| Target::Heading(heading.to_owned()));
+                .map(|heading| {
+                    part(heading).unwrap_or_else(|| Target::Heading(heading.to_owned()))
+                });
             apply::open(state, full, arrive, to, OpenAs::Permanent, out);
         }
     }

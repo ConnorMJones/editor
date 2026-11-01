@@ -10,6 +10,7 @@ mod insert;
 mod keymap;
 mod launch;
 mod layout;
+mod literature;
 mod markdown;
 mod movement;
 mod naming;

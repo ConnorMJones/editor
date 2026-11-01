@@ -9,13 +9,14 @@ mod world;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use model::color::{Base16, Palette, Rgb};
 pub use model::typeset::{
     Compilation, Diagnostic, Diagnostics, Display, DocumentError, Jump, LineColumn, Origin,
-    PackageFile, PagePoint, Pages, SourceFile, Svg,
+    PackageFile, PageHash, PageInfo, PagePoint, Pages, SourceFile, Svg,
 };
 pub use model::units::{Pt, Px};
 use typst::diag::{FileError, SourceDiagnostic, Warned};
@@ -90,9 +91,6 @@ pub struct Typesetter {
     pub mermaid: Option<Mermaid>,
     /// Reused buffer for the generated math document.
     pub math_text: String,
-    /// SVG of each page from the last `typst_pages`, keyed by the page's hash, so an edit
-    /// re-exports only the pages it changed.
-    pub exported_pages: Vec<(u128, Svg)>,
     /// Last good document of each main file, for `locate` and `click`.
     pub documents: HashMap<PathBuf, Kept>,
     /// Math size per prose size that gives both the same x-height.
@@ -136,7 +134,6 @@ impl Typesetter {
             },
             mermaid: None,
             math_text: String::new(),
-            exported_pages: Vec::new(),
             documents: HashMap::new(),
             math_scale: (prose_x / math_x) as f32,
         })
@@ -297,7 +294,13 @@ impl Typesetter {
     }
 
     /// Compiles `main` to pages, keeping the document for `locate` and `click`.
-    pub fn typst_pages(&mut self, root: &Path, main: &Path, source: &str) -> Compilation {
+    pub fn typst_pages(
+        &mut self,
+        root: &Path,
+        main: &Path,
+        source: &str,
+        drawn: Range<usize>,
+    ) -> Compilation {
         let compiled = self.compile_document(root, main, source);
         let deps = match &compiled {
             Err(DocumentError::OutsideRoot { .. }) => Vec::new(),
@@ -317,17 +320,12 @@ impl Typesetter {
             }
         };
         let result = compiled.map(|(id, Warned { output, warnings })| {
-            let exported: Vec<(u128, Svg)> = (output.pages().iter().enumerate())
-                .map(|(index, page)| {
-                    let hash = typst::utils::hash128(page);
-                    match self.exported_pages.get(index) {
-                        Some((cached, svg)) if *cached == hash => (hash, svg.clone()),
-                        _ => (hash, page_svg(page)),
-                    }
-                })
+            let pages = (output.pages().iter()).map(page_info).collect();
+            let drawn = (output.pages().iter().enumerate())
+                .skip(drawn.start)
+                .take(drawn.len())
+                .map(|(index, page)| (index, page_svg(page)))
                 .collect();
-            let pages = exported.iter().map(|(_, svg)| svg.clone()).collect();
-            self.exported_pages = exported;
             let warnings = self.diagnostics(&warnings);
             // The main source as compiled; the world's slots move on with the next root.
             let source = self
@@ -341,9 +339,18 @@ impl Typesetter {
                     document: output,
                 },
             );
-            Pages { pages, warnings }
+            Pages {
+                pages,
+                drawn,
+                warnings,
+            }
         });
         Compilation { result, deps }
+    }
+
+    pub fn page(&self, main: &Path, page: usize, hash: PageHash) -> Option<Svg> {
+        let page = self.documents.get(main)?.document.pages().get(page)?;
+        (page_info(page).hash == hash).then(|| page_svg(page))
     }
 
     /// Where byte `cursor` of `main` landed in its last compiled document; off text, the first
@@ -537,6 +544,15 @@ fn equation_baseline(frame: &Frame, offset: Abs) -> Option<Abs> {
         FrameItem::Group(group) => equation_baseline(&group.frame, offset + position.y),
         _ => None,
     })
+}
+
+fn page_info(page: &Page) -> PageInfo {
+    let size = page.frame.size().max(Size::splat(Abs::pt(1.0)));
+    PageInfo {
+        width: Pt(size.x.to_pt() as f32),
+        height: Pt(size.y.to_pt() as f32),
+        hash: PageHash(typst::utils::hash128(page)),
+    }
 }
 
 fn page_svg(page: &Page) -> Svg {

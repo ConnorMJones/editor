@@ -8,7 +8,7 @@ use crate::State;
 use crate::render::{Opening, document};
 use crate::view::layout::{Pane, PaneId};
 use crate::view::scroll;
-use crate::view::tab::{Beside, BesideMut, NoMode, Share, Showing, ShowingMut, TextTabs};
+use crate::view::tab::{Beside, BesideMut, NoMode, Share, Showing, ShowingMut, Tab, TextTabs};
 
 /// `space d`, `space V`: the focused tab in `shown`, or back to its source from there.
 pub fn toggle(state: &mut State, shown: Shown) {
@@ -97,6 +97,10 @@ pub fn show(state: &mut State, shown: Shown) {
 
 /// `C-w <`, `C-w >`, `C-w =`: the focused split's source side narrower, wider or even.
 pub fn resize(state: &mut State, resize: Resize) {
+    match (state.layout.focused_mut().active_mut()).and_then(Tab::writing_mut) {
+        Some(writing) => return writing.share = writing.share.resized(resize),
+        None => {}
+    }
     match (state.layout.focused_mut().active_text_mut()).map(TextTabs::showing_mut) {
         Some(
             ShowingMut::Document(_, _, BesideMut::Source(_, share))
@@ -114,6 +118,13 @@ pub fn resize(state: &mut State, resize: Resize) {
 
 /// The host dragged `pane`'s split divider to `share`; ignored once the tab has left the split.
 pub fn drag(state: &mut State, pane: PaneId, share: Share) {
+    match (state.layout.find_pane(pane))
+        .and_then(Pane::active_mut)
+        .and_then(Tab::writing_mut)
+    {
+        Some(writing) => return writing.share = share,
+        None => {}
+    }
     match (state.layout.find_pane(pane))
         .and_then(Pane::active_text_mut)
         .map(TextTabs::showing_mut)

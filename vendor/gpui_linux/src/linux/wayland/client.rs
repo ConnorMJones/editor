@@ -453,6 +453,31 @@ struct TabletTool {
     buttons: PenButtons,
     /// Phase transitions received since the last `frame`, each with the window it targets.
     pending: SmallVec<[(PenPhase, WaylandWindowStatePtr); 4]>,
+    taps: Taps,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Taps {
+    last: Option<(Duration, Point<Pixels>)>,
+    count: usize,
+}
+
+impl Taps {
+    fn press(self, time: Duration, at: Point<Pixels>) -> Taps {
+        let count = match self.last {
+            Some((last, from))
+                if time.saturating_sub(last) < DOUBLE_CLICK_INTERVAL
+                    && is_within_click_distance(from, at) =>
+            {
+                self.count + 1
+            }
+            Some(_) | None => 1,
+        };
+        Taps {
+            last: Some((time, at)),
+            count,
+        }
+    }
 }
 
 struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowStatePtr> {
@@ -2857,6 +2882,7 @@ impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for WaylandClientStatePtr
                         distance: 0.0,
                         buttons: PenButtons::default(),
                         pending: SmallVec::new(),
+                        taps: Taps::default(),
                     },
                 );
             }
@@ -3084,6 +3110,18 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr
                     };
                     tool.pending.push((phase, focus.window.clone()));
                 }
+                let time = Duration::from_millis(u64::from(time));
+                for (phase, _) in &tool.pending {
+                    match phase {
+                        PenPhase::Down => tool.taps = tool.taps.press(time, position),
+                        PenPhase::Up
+                        | PenPhase::Move
+                        | PenPhase::Hover
+                        | PenPhase::Enter
+                        | PenPhase::Leave => {}
+                    }
+                }
+                let click_count = tool.taps.count;
                 let (kind, pressure, tilt, distance, buttons) = (
                     tool.kind,
                     tool.pressure,
@@ -3103,7 +3141,8 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for WaylandClientStatePtr
                         distance,
                         buttons,
                         modifiers,
-                        time: Duration::from_millis(u64::from(time)),
+                        time,
+                        click_count,
                     }));
                 }
             }

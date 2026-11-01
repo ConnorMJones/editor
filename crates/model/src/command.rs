@@ -148,6 +148,7 @@ pub enum Command {
     Document(DocumentCommand),
     Drawing(DrawingCommand),
     Reading(ReadingCommand),
+    Comment(CommentCommand),
     View(ViewCommand),
     Export(ExportAs),
 }
@@ -482,6 +483,7 @@ pub enum TreeCommand {
     FocusEditor,
     Up,
     Down,
+    Extend(Direction),
     /// Expands a directory or opens a file.
     Open,
     /// Collapses a directory or moves to its parent.
@@ -516,6 +518,7 @@ pub enum ChangesCommand {
     FocusEditor,
     Up,
     Down,
+    Extend(Direction),
     /// Opens the file's diff, or its text when it has conflicts.
     Open,
     Stage,
@@ -594,14 +597,24 @@ pub enum ReadingCommand {
     FindNext(Direction),
     Annotate(Annotate),
     Clear,
+    ExportNotes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Annotate {
     Highlight,
     Comment,
+    Write,
     Remove,
     Bookmark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentCommand {
+    Finish,
+    Drop,
+    Swap,
+    Expand,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

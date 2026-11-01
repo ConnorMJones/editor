@@ -1,11 +1,11 @@
 //! The binding tables, one per context, after helix's defaults.
 
 use model::command::{
-    Align, Annotate, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
-    DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join, Motion,
-    ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand, Pending, PickerCommand,
-    PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, ReadingCommand, RegexOp,
-    Resize, ScrollBy, Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand,
+    Align, Annotate, Answer, Case, ChangesCommand, Command, CommentCommand, Cycle, Direction,
+    DocumentCommand, DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool,
+    Join, Motion, ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand, Pending,
+    PickerCommand, PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, ReadingCommand,
+    RegexOp, Resize, ScrollBy, Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand,
     WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
@@ -401,9 +401,40 @@ const DRAWING_TEXT: Bindings = &[(&[Key::code(KeyCode::Esc)], ink(InkCommand::Fi
 
 const SELECT: Bindings = &[(&[Key::char('v')], Command::NormalMode)];
 
+const CHECKPOINT: Bindings = &[(&[Key::ctrl('s')], Command::CommitUndoCheckpoint)];
+
+const COMMENT_SAVE: Bindings = &[(&[Key::ctrl('s')], Command::Write)];
+
+const COMMENT: Bindings = &[
+    (
+        &[Key::code(KeyCode::Esc)],
+        Command::Comment(CommentCommand::Finish),
+    ),
+    (&[Key::ctrl('s')], Command::Write),
+    (
+        &[SPACE, Key::char('q')],
+        Command::Comment(CommentCommand::Drop),
+    ),
+    (
+        &[SPACE, Key::char('v')],
+        Command::Comment(CommentCommand::Swap),
+    ),
+    (
+        &[CTRL_W, Key::char('<')],
+        Command::ResizeSplit(Resize::Narrow),
+    ),
+    (
+        &[CTRL_W, Key::char('>')],
+        Command::ResizeSplit(Resize::Widen),
+    ),
+    (
+        &[CTRL_W, Key::char('=')],
+        Command::ResizeSplit(Resize::Even),
+    ),
+];
+
 const INSERT: Bindings = &[
     (&[Key::code(KeyCode::Esc)], Command::NormalMode),
-    (&[Key::ctrl('s')], Command::CommitUndoCheckpoint),
     (&[Key::ctrl('r')], Command::Await(Pending::InsertRegister)),
     (&[Key::ctrl('w')], Command::DeleteWordBackward),
     (
@@ -474,6 +505,7 @@ const fn prompt_delete(motion: PromptMotion) -> Command {
 /// Helix's prompt line editing, from `helix-term/src/ui/prompt.rs`.
 const PROMPT: Bindings = &[
     (&[Key::code(KeyCode::Esc)], Command::PromptCancel),
+    (&[Key::ctrl('v')], Command::Comment(CommentCommand::Expand)),
     (&[Key::ctrl('c')], Command::PromptCancel),
     (&[Key::code(KeyCode::Enter)], Command::PromptSubmit),
     (&[Key::alt('b')], prompt_move(PromptMotion::WordBackward)),
@@ -786,6 +818,14 @@ const TREE: Bindings = &[
     ),
     (&[Key::char('k')], Command::Tree(TreeCommand::Up)),
     (&[Key::code(KeyCode::Up)], Command::Tree(TreeCommand::Up)),
+    (
+        &[with(KeyCode::Down, Mods::SHIFT)],
+        Command::Tree(TreeCommand::Extend(Direction::Forward)),
+    ),
+    (
+        &[with(KeyCode::Up, Mods::SHIFT)],
+        Command::Tree(TreeCommand::Extend(Direction::Backward)),
+    ),
     (&[Key::char('l')], Command::Tree(TreeCommand::Open)),
     (
         &[Key::code(KeyCode::Right)],
@@ -871,6 +911,14 @@ const CHANGES: Bindings = &[
     (
         &[Key::code(KeyCode::Up)],
         Command::Changes(ChangesCommand::Up),
+    ),
+    (
+        &[with(KeyCode::Down, Mods::SHIFT)],
+        Command::Changes(ChangesCommand::Extend(Direction::Forward)),
+    ),
+    (
+        &[with(KeyCode::Up, Mods::SHIFT)],
+        Command::Changes(ChangesCommand::Extend(Direction::Backward)),
     ),
     (
         &[Key::char('h')],
@@ -1190,6 +1238,10 @@ const READER: Bindings = &[
         Command::Reading(ReadingCommand::Annotate(Annotate::Comment)),
     ),
     (
+        &[Key::char('I')],
+        Command::Reading(ReadingCommand::Annotate(Annotate::Write)),
+    ),
+    (
         &[Key::char('d')],
         Command::Reading(ReadingCommand::Annotate(Annotate::Remove)),
     ),
@@ -1240,7 +1292,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         CONFLICTS,
         MARKDOWN,
     ],
-    &[INSERT],
+    &[CHECKPOINT, INSERT],
     &[
         COMMON,
         ESCAPE,
@@ -1345,4 +1397,15 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         SPACE_WINDOW,
         GOTO_BUFFER,
     ],
+    &[
+        COMMENT,
+        COMMON,
+        NORMAL,
+        VIEW,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[COMMENT_SAVE, INSERT],
 ];

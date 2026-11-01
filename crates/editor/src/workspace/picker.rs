@@ -8,6 +8,7 @@ use gpui::{
 use model::command::PickerCommand;
 use state::input::keymap::{self, Context as KeyContext};
 use state::input::picker::{Grep, Items, PALETTE, Referrers, Search};
+use state::literature;
 use state::reading::ReaderKind;
 use state::{Overlay, view::panes};
 
@@ -61,6 +62,33 @@ impl Workspace {
             | Items::Notebook(_) => {
                 format!("{}/{}", picker.matches.len(), picker.items.len())
             }
+        };
+        let export = match &picker.items {
+            Items::Notebook(notebook) => {
+                let file = notebook.file;
+                Some(
+                    div()
+                        .id("export-notes")
+                        .ml_2()
+                        .px_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(hsla(theme.chrome.hover)))
+                        .child("Export notes")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            literature::export(&mut this.state, file, &mut this.effects);
+                            this.changed(cx);
+                        })),
+                )
+            }
+            Items::Files(_)
+            | Items::Images(_)
+            | Items::Buffers(_)
+            | Items::Commands
+            | Items::Grep(_)
+            | Items::Backlinks(_)
+            | Items::Outline(_)
+            | Items::Annotations(_) => None,
         };
         let list = uniform_list(
             "picker",
@@ -206,7 +234,8 @@ impl Workspace {
                                 .border_b_1()
                                 .border_color(hsla(theme.chrome.border))
                                 .child(div().flex_1().child(format!("> {}", picker.query)))
-                                .child(div().text_color(hsla(theme.muted)).child(status)),
+                                .child(div().text_color(hsla(theme.muted)).child(status))
+                                .children(export),
                         )
                         .child(body),
                 ),

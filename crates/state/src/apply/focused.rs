@@ -11,7 +11,10 @@ use model::notice::Notice;
 use slotmap::SlotMap;
 
 use crate::State;
+use crate::book::BookTab;
+use crate::drawing::{InkTabs, PdfMode, PdfTab};
 use crate::git::diffview::{self, Right};
+use crate::reading::Reading;
 use crate::text::buffer::{Buffer, BufferId, HistoryStep, TextDoc, Uncommitted};
 use crate::view::layout::{Edited, Editing, Layout};
 use crate::view::tab::{Opened, Tab, TextTabs};
@@ -68,7 +71,7 @@ impl Edited<'_> {
     pub fn buffer(&self) -> Option<BufferId> {
         match self {
             Edited::Buffer { buffer, .. } => Some(*buffer),
-            Edited::Mark => None,
+            Edited::Mark | Edited::Comment { .. } => None,
         }
     }
 }
@@ -79,6 +82,24 @@ pub fn focused<'a>(
 ) -> Focused<'a> {
     let tab = match layout.focused_mut().active_mut() {
         None => return Focused::Empty,
+        Some(Tab::Book(BookTab {
+            reading: Reading::Writing(writing),
+            ..
+        }))
+        | Some(Tab::Ink(InkTabs::Pdf(PdfTab {
+            mode: PdfMode::Read(Reading::Writing(writing)),
+            ..
+        }))) => {
+            return Focused::Text(FocusedText {
+                view: Editing {
+                    selection: &mut writing.selection,
+                    edited: Edited::Comment {
+                        scroll: &mut writing.scroll,
+                    },
+                },
+                doc: &mut writing.doc,
+            });
+        }
         Some(Tab::Image(_) | Tab::Book(_)) => return Focused::NotText,
         Some(Tab::Ink(ink)) => {
             return match ink.text_box() {

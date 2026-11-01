@@ -45,7 +45,7 @@ pub fn motion(state: &mut State, motion: Motion) {
     let extend = behaviour == Movement::Extend;
     let shown = match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
         Some(FocusedText { view, .. }) => match view.edited {
-            Edited::Buffer { scroll, .. } => *scroll,
+            Edited::Buffer { scroll, .. } | Edited::Comment { scroll } => *scroll,
             // A drawing's text is not drawn in cells, so it has no soft wrap or pages.
             Edited::Mark => Scroll::default(),
         },
@@ -190,7 +190,8 @@ pub fn motion(state: &mut State, motion: Motion) {
                 ..
             } = state;
             let Some(Pointed {
-                view,
+                selection,
+                scroll,
                 doc,
                 padding,
                 right: Right::Live,
@@ -201,10 +202,10 @@ pub fn motion(state: &mut State, motion: Motion) {
             let text = doc.text.slice(..);
             let format = text_format(shown, Indent::of(doc, languages));
             let annotations = scroll::annotations(text, padding);
-            let anchor = view.scroll.anchor.min(text.len_chars());
+            let anchor = scroll.anchor.min(text.len_chars());
             let height = viewport.rows as usize;
             let scrolloff = SCROLLOFF.min(height.saturating_sub(1) / 2);
-            let max_rows = (height as isize + view.scroll.rows).max(0) as usize;
+            let max_rows = (height as isize + scroll.rows).max(0) as usize;
             // Last row that shows text; shorter documents end above the bottom edge.
             let last = match visual_offset_from_anchor(
                 text,
@@ -214,7 +215,7 @@ pub fn motion(state: &mut State, motion: Motion) {
                 &annotations,
                 max_rows,
             ) {
-                Ok((pos, _)) => (pos.row as isize - view.scroll.rows).max(0) as usize,
+                Ok((pos, _)) => (pos.row as isize - scroll.rows).max(0) as usize,
                 Err(_) => height.saturating_sub(1),
             };
             let row = match align {
@@ -223,9 +224,8 @@ pub fn motion(state: &mut State, motion: Motion) {
                 Align::Bottom => last.saturating_sub(scrolloff + count - 1),
             };
             let row = row.max(scrolloff).min(last.saturating_sub(scrolloff));
-            let pos = scroll::char_at(text, view.scroll, row as u16, 0, &format, &annotations);
-            view.selection = view
-                .selection
+            let pos = scroll::char_at(text, *scroll, row as u16, 0, &format, &annotations);
+            *selection = selection
                 .clone()
                 .transform(|range| range.put_cursor(text, pos, extend))
                 .ensure_invariants(text);
@@ -376,7 +376,8 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
         ..
     } = state;
     let Some(Pointed {
-        view,
+        selection,
+        scroll,
         doc,
         padding,
         right: Right::Live,
@@ -385,8 +386,8 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
         return;
     };
     let text = doc.text.slice(..);
-    let viewport = view.scroll.viewport;
-    let format = text_format(view.scroll, Indent::of(doc, languages));
+    let viewport = scroll.viewport;
+    let format = text_format(*scroll, Indent::of(doc, languages));
     let padded = scroll::annotations(text, padding);
     let height = viewport.rows as isize;
     let sign = match dir {
@@ -401,33 +402,32 @@ pub fn scroll(state: &mut State, dir: Direction, by: ScrollBy) {
             };
             let (moved_view, moved) = scroll::scroll(
                 text,
-                &view.selection,
-                view.scroll,
+                selection,
+                *scroll,
                 sign * rows,
                 mode,
                 padding.lead,
                 &format,
                 &padded,
             );
-            view.scroll = moved_view;
-            if let Some(selection) = moved {
-                view.selection = selection.ensure_invariants(text);
+            *scroll = moved_view;
+            if let Some(dragged) = moved {
+                *selection = dragged.ensure_invariants(text);
             }
         }
         ScrollBy::HalfPageCursor => {
             let rows = height / 2;
-            (view.scroll.anchor, view.scroll.rows) = scroll::offset(
+            (scroll.anchor, scroll.rows) = scroll::offset(
                 text,
-                view.scroll.anchor,
-                view.scroll.rows,
+                scroll.anchor,
+                scroll.rows,
                 sign * rows,
                 padding.lead,
                 &format,
                 &padded,
             );
             let mut annotations = TextAnnotations::default();
-            view.selection = view
-                .selection
+            *selection = selection
                 .clone()
                 .transform(|range| {
                     movement::move_vertically_visual(
@@ -454,7 +454,8 @@ pub fn align_view(state: &mut State, align: Align) {
         ..
     } = state;
     let Some(Pointed {
-        view,
+        selection,
+        scroll,
         doc,
         padding,
         right: Right::Live,
@@ -463,16 +464,16 @@ pub fn align_view(state: &mut State, align: Align) {
         return;
     };
     let text = doc.text.slice(..);
-    let format = text_format(view.scroll, Indent::of(doc, languages));
+    let format = text_format(*scroll, Indent::of(doc, languages));
     let annotations = scroll::annotations(text, padding);
-    let last_row = view.scroll.viewport.rows.saturating_sub(1) as isize;
+    let last_row = scroll.viewport.rows.saturating_sub(1) as isize;
     let row = match align {
         Align::Top => 0,
         Align::Center => last_row / 2,
         Align::Bottom => last_row,
     };
-    let cursor = view.selection.primary().cursor(text);
-    (view.scroll.anchor, view.scroll.rows) =
+    let cursor = selection.primary().cursor(text);
+    (scroll.anchor, scroll.rows) =
         scroll::offset(text, cursor, 0, -row, padding.lead, &format, &annotations);
 }
 

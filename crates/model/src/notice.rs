@@ -49,6 +49,8 @@ pub enum Notice {
     NotADrawing,
     NotAPdf,
     NotReading,
+    NotWriting,
+    NothingToExport,
     NotMarkingUp,
     NoHits {
         query: String,
@@ -278,6 +280,8 @@ impl std::fmt::Display for Notice {
             }
             Notice::NotAPdf => f.write_str("only a PDF is read rather than drawn on"),
             Notice::NotReading => f.write_str("only a PDF or a book is read"),
+            Notice::NotWriting => f.write_str("no comment is being written"),
+            Notice::NothingToExport => f.write_str("no highlights or bookmarks to export"),
             Notice::NotMarkingUp => f.write_str("space tab or space d marks the PDF up"),
             Notice::NotADrawing => f.write_str("not a drawing"),
             Notice::NoImagesHere => f.write_str("images go into drawings and notes"),

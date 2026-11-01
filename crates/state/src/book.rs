@@ -9,7 +9,7 @@ use model::notice::Notice;
 use reader::epub::{Book, Contents, EpubError};
 use slotmap::{SlotMap, new_key_type};
 
-use crate::reading::{Found, Notes, Press, Reading};
+use crate::reading::{Found, Notes, Press, ReaderKind, Reading};
 use crate::render::book::{BookFlow, BookTarget, convert};
 use crate::render::document::{Placed, TopItem};
 use crate::render::flow::{ImagePlace, LocalImage};
@@ -27,6 +27,7 @@ new_key_type! {
 pub struct BookFile {
     pub path: Arc<Path>,
     pub title: String,
+    pub authors: Vec<String>,
     pub contents: Vec<Contents>,
     pub flow: BookFlow,
     pub notes: Notes,
@@ -38,6 +39,7 @@ pub type BookFiles = SlotMap<BookId, BookFile>;
 
 pub struct BookRead {
     pub title: String,
+    pub authors: Vec<String>,
     pub contents: Vec<Contents>,
     pub flow: BookFlow,
     pub images: Vec<(LocalImage, Probe)>,
@@ -86,6 +88,7 @@ impl BookFile {
         BookFile {
             path: path.into(),
             title: read.title,
+            authors: read.authors,
             contents: read.contents,
             flow: read.flow,
             notes: read.notes,
@@ -96,6 +99,7 @@ impl BookFile {
 
     pub fn replace(&mut self, read: BookRead, disk: Disk) {
         self.title = read.title;
+        self.authors = read.authors;
         self.contents = read.contents;
         self.flow = read.flow;
         self.notes = read.notes;
@@ -133,6 +137,7 @@ pub fn read(path: &Path, file: File, library: &Library) -> Result<BookRead, Book
     let (notes, said) = crate::reading::notes(library, path, hash, metadata.len(), &*flow.texts);
     Ok(BookRead {
         title: book.title,
+        authors: book.authors,
         contents: book.contents,
         flow,
         images,
@@ -188,7 +193,7 @@ pub struct Pressed {
 pub fn press(state: &mut State, pane: PaneId, file: BookId, at: Option<Pressed>, press: Press) {
     let State { layout, books, .. } = state;
     match press {
-        Press::Down => match layout.set_focus(pane) {
+        Press::Down(_) => match layout.set_focus(pane) {
             Ok(()) => {}
             Err(_) => return,
         },
@@ -201,7 +206,7 @@ pub fn press(state: &mut State, pane: PaneId, file: BookId, at: Option<Pressed>,
         (Some(Tab::Book(tab)), Some(book)) if tab.file == file => {
             let at = at.and_then(|at| book.flow.point(at.block, at.byte));
             let reading = std::mem::replace(&mut tab.reading, Reading::Idle);
-            tab.reading = reading.step(press, at, &*book.flow.texts, &book.notes);
+            tab.reading = reading.step(press, at, ReaderKind::Book, &*book.flow.texts, &book.notes);
         }
         (Some(_), _) | (None, _) => {}
     }

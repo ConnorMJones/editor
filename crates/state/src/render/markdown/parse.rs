@@ -21,7 +21,7 @@ use super::targets::{link_target, locate, vault_image};
 use super::{
     Base, Block, BlockKind, Callout, CalloutFold, Code, Column, Embed, EmbedKind, Emphasis, Figure,
     FigureKind, Flow, Image, InlineBuf, Level, Lines, Link, LinkTarget, ListKind, Markdown, Math,
-    Mermaid, RowKind, SpanKind, Task, WikiLink, hash,
+    Mermaid, NoteBlock, RowKind, SpanKind, Task, WikiLink, hash,
 };
 
 fn figure(kind: FigureKind, text: &str) -> Figure {
@@ -115,7 +115,7 @@ impl Builder<'_> {
         start..last + 1
     }
 
-    fn push(&mut self, kind: BlockKind, bytes: Range<usize>) -> usize {
+    fn push(&mut self, kind: BlockKind<Lines>, bytes: Range<usize>) -> usize {
         let index = self.blocks.len();
         let lines = self.lines(&bytes);
         self.blocks.push(Block {
@@ -174,11 +174,11 @@ impl Builder<'_> {
             (InlineOwner::Cell, _) => BlockKind::Cell(self.inline.take()),
             (InlineOwner::Paragraph | InlineOwner::Implicit, Sole::Math(tex)) => {
                 self.inline.take();
-                BlockKind::Math(Math {
+                BlockKind::Own(NoteBlock::Math(Math {
                     figure: figure(FigureKind::Math(Display::Block), &tex),
                     tex: Arc::from(tex.as_str()),
                     display: Display::Block,
-                })
+                }))
             }
             (InlineOwner::Paragraph | InlineOwner::Implicit, Sole::Image(image)) => {
                 self.inline.take();
@@ -186,7 +186,7 @@ impl Builder<'_> {
             }
             (InlineOwner::Paragraph | InlineOwner::Implicit, Sole::Embed(embed)) => {
                 self.inline.take();
-                BlockKind::Embed(embed)
+                BlockKind::Own(NoteBlock::Embed(embed))
             }
             (InlineOwner::Paragraph | InlineOwner::Implicit, Sole::Empty) if blank => {
                 self.inline.take();
@@ -289,7 +289,7 @@ impl Builder<'_> {
             }
             Tag::BlockQuote(_) => {
                 let kind = match self.callout(range.clone()) {
-                    Some(callout) => BlockKind::Callout(callout),
+                    Some(callout) => BlockKind::Own(NoteBlock::Callout(callout)),
                     None => BlockKind::Quote,
                 };
                 let index = self.push(kind, range);
@@ -308,9 +308,9 @@ impl Builder<'_> {
                 self.open.push(Open::Container(index));
             }
             Tag::FootnoteDefinition(label) => {
-                let kind = BlockKind::Footnote {
+                let kind = BlockKind::Own(NoteBlock::Footnote {
                     label: Arc::from(label.as_ref()),
-                };
+                });
                 let index = self.push(kind, range);
                 self.open.push(Open::Container(index));
             }
@@ -426,23 +426,36 @@ impl Builder<'_> {
                     return;
                 };
                 let text = self.raw.strip_suffix('\n').unwrap_or(&self.raw);
+                let mut uncommented = text.trim();
+                while let Some((_, after)) =
+                    (uncommented.strip_prefix("<!--")).and_then(|inner| inner.split_once("-->"))
+                {
+                    uncommented = after.trim_start();
+                }
                 let kind = match (owner, lang.as_deref()) {
-                    (RawOwner::Code, Some("mermaid")) => BlockKind::Mermaid(Mermaid {
-                        figure: figure(FigureKind::Mermaid, text),
-                        src: Arc::from(text),
-                    }),
-                    (RawOwner::Code, Some("math")) => BlockKind::Math(Math {
+                    (RawOwner::Html, _) if uncommented.is_empty() => return,
+                    (RawOwner::Code, Some("mermaid")) => {
+                        BlockKind::Own(NoteBlock::Mermaid(Mermaid {
+                            figure: figure(FigureKind::Mermaid, text),
+                            src: Arc::from(text),
+                        }))
+                    }
+                    (RawOwner::Code, Some("math")) => BlockKind::Own(NoteBlock::Math(Math {
                         figure: figure(FigureKind::Math(Display::Block), text),
                         tex: Arc::from(text),
                         display: Display::Block,
-                    }),
+                    })),
                     (RawOwner::Code, _) => BlockKind::Code(Code {
                         hash: hash(text) ^ lang.as_deref().map_or(0, hash),
                         lang,
                         text: Arc::from(text),
                     }),
-                    (RawOwner::Html, _) => BlockKind::Html(Arc::from(text.trim_end())),
-                    (RawOwner::Frontmatter, _) => BlockKind::Frontmatter(Arc::from(text)),
+                    (RawOwner::Html, _) => {
+                        BlockKind::Own(NoteBlock::Html(Arc::from(text.trim_end())))
+                    }
+                    (RawOwner::Frontmatter, _) => {
+                        BlockKind::Own(NoteBlock::Frontmatter(Arc::from(text)))
+                    }
                 };
                 self.push(kind, start..range.end);
             }
