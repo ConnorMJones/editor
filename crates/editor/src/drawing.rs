@@ -129,7 +129,7 @@ impl Element for DrawingElement {
                         pages: SmallVec::new(),
                     }
                 }
-                Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => {
+                Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None => {
                     return Pictured::default();
                 }
             };
@@ -244,7 +244,7 @@ impl Element for DrawingElement {
                     let frame = frame::board(board, &tab.view, viewport);
                     paint_ink::<Board>(&frame, &tab.hand, board, &screen, pictured, window)
                 }
-                Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => {}
+                Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None => {}
             }
         });
     }

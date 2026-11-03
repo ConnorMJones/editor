@@ -265,9 +265,9 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::GotoFile => links::goto_file(state, out),
         Command::Write => match crate::comment::write(state, out) {
             Ok(()) => {}
-            Err(crate::comment::NotWriting) => write_focused(state, Dirs::Existing, out),
+            Err(crate::draft::NotWriting) => write_focused(state, Dirs::Existing, out),
         },
-        Command::Comment(command) => crate::comment::command(state, command, out),
+        Command::Draft(command) => crate::draft::command(state, command, out),
         Command::ForceWrite => write_focused(state, Dirs::Create, out),
         Command::WriteAs(path, dirs) => {
             let path = helix_stdx::path::normalize(state.project.root.path().join(path));
@@ -344,10 +344,8 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
                 (Overlay::Confirm(Confirm::Discard { path, how }), Answer::Yes) => {
                     stage::discard(state, path, how, out)
                 }
-                (Overlay::Confirm(Confirm::DropComment), Answer::No) => {}
-                (Overlay::Confirm(Confirm::DropComment), Answer::Yes) => {
-                    crate::comment::dropped(state)
-                }
+                (Overlay::Confirm(Confirm::DropDraft), Answer::No) => {}
+                (Overlay::Confirm(Confirm::DropDraft), Answer::Yes) => crate::draft::dropped(state),
                 (Overlay::Confirm(Confirm::Create(_)), Answer::No) => {
                     state.notice = Some(Notice::CreateNotConfirmed)
                 }
@@ -374,6 +372,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::Document(command) => document::command(state, command),
         Command::View(command) => view::sheet::command(state, command),
         Command::Drawing(command) => drawing::command::command(state, command, out),
+        Command::JsonCanvas(command) => crate::json_canvas::command(state, command),
         Command::Reading(command) => crate::reading::command(state, command, out),
         Command::Export(to) => crate::export::export(state, to, out),
     }

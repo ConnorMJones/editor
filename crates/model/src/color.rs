@@ -135,3 +135,13 @@ impl Index<Base16> for Palette {
         &self.0[slot as usize]
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Purple,
+}

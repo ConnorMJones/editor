@@ -631,7 +631,7 @@ fn shift_i_writes_a_comment_beside_the_pdf_and_esc_saves_it() {
     h.keys(":o paper.pdf<ret>");
     select_hello(&mut h);
     h.keys("I");
-    assert_eq!(input::context(&h.state), Context::CommentInsert);
+    assert_eq!(input::context(&h.state), Context::DraftInsert);
     h.keys("first line<ret>second line<C-s>");
     let saved = &notebook(&h).highlights[0];
     assert_eq!(
@@ -646,12 +646,12 @@ fn shift_i_writes_a_comment_beside_the_pdf_and_esc_saves_it() {
         Some("first line\u{2026}".to_owned())
     );
     h.keys("<esc>");
-    assert_eq!(input::context(&h.state), Context::Comment);
+    assert_eq!(input::context(&h.state), Context::Draft);
     h.keys("<space>v");
-    assert_eq!(writing(&h).spread, state::comment::Spread::Full);
+    assert_eq!(writing(&h).beside.spread, state::draft::Spread::Full);
     h.keys("<space>v<C-w><");
-    assert_eq!(writing(&h).spread, state::comment::Spread::Split);
-    assert!(writing(&h).share.get() < 0.5);
+    assert_eq!(writing(&h).beside.spread, state::draft::Spread::Split);
+    assert!(writing(&h).beside.share.get() < 0.5);
     h.keys("ggA, edited<esc>:w<ret>");
     assert_eq!(
         notebook(&h).highlights[0]
@@ -666,7 +666,10 @@ fn shift_i_writes_a_comment_beside_the_pdf_and_esc_saves_it() {
 
     // `i` on a comment of several lines writes it out in full too.
     h.keys("i");
-    assert_eq!(writing(&h).doc.text, "first line, edited\nsecond line");
+    assert_eq!(
+        writing(&h).draft.doc.text,
+        "first line, edited\nsecond line"
+    );
 }
 
 #[test]
@@ -698,7 +701,7 @@ fn ctrl_v_carries_the_one_line_comment_into_the_full_view() {
     h.keys(":o paper.pdf<ret>");
     select_hello(&mut h);
     h.keys("ishort<C-v>");
-    assert_eq!(writing(&h).doc.text, "short");
+    assert_eq!(writing(&h).draft.doc.text, "short");
     assert!(notebook(&h).highlights.is_empty(), "nothing saved yet");
     h.keys(" and long<esc><esc>");
     assert_eq!(

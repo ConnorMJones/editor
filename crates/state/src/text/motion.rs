@@ -45,7 +45,7 @@ pub fn motion(state: &mut State, motion: Motion) {
     let extend = behaviour == Movement::Extend;
     let shown = match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
         Some(FocusedText { view, .. }) => match view.edited {
-            Edited::Buffer { scroll, .. } | Edited::Comment { scroll } => *scroll,
+            Edited::Buffer { scroll, .. } | Edited::Draft { scroll } => *scroll,
             // A drawing's text is not drawn in cells, so it has no soft wrap or pages.
             Edited::Mark => Scroll::default(),
         },

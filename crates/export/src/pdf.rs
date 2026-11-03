@@ -15,7 +15,7 @@ use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule};
 use krilla::pdf::PdfDocument;
-use krilla::surface::Surface as Canvas;
+use krilla::surface::Surface as JsonCanvas;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::{Data, Document};
 use krilla_svg::{SurfaceExt, SvgSettings};
@@ -82,7 +82,7 @@ pub fn pdf<'a>(
 }
 
 fn draw(
-    surface: &mut Canvas,
+    surface: &mut JsonCanvas,
     mark: &Mark,
     fonts: &Fonts,
     faces: &mut HashMap<FontId, Font>,
@@ -113,7 +113,7 @@ fn draw(
 
 /// Each run of glyphs sharing a font, size and baseline is drawn from its first glyph.
 fn glyphs(
-    surface: &mut Canvas,
+    surface: &mut JsonCanvas,
     text: &TextInk,
     color: Paint,
     fonts: &Fonts,
@@ -163,7 +163,7 @@ fn glyphs(
     Ok(())
 }
 
-fn picture(surface: &mut Canvas, image: &ImageInk) -> Result<(), ExportError> {
+fn picture(surface: &mut JsonCanvas, image: &ImageInk) -> Result<(), ExportError> {
     let size = Size::from_wh(image.extent.width.get(), image.extent.height.get())
         .ok_or(ExportError::Empty)?;
     let data = || Data::from(image.encoded.to_vec());

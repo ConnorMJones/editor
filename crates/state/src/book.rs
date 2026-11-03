@@ -153,7 +153,7 @@ pub fn moved(state: &mut State, motion: ReadMove) {
             let items = books[tab.file].flow.flow.roots.len();
             tab.scroll = tab.scroll.moved(motion, items)
         }
-        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None => {}
+        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::JsonCanvas(_)) | None => {}
     }
 }
 
@@ -172,7 +172,10 @@ pub fn follow(
                 Some(Tab::Book(tab)) if tab.file == file => {
                     tab.scroll = Placed::item(books[file].flow.item(spot))
                 }
-                Some(Tab::Book(_) | Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None => {}
+                Some(
+                    Tab::Book(_) | Tab::JsonCanvas(_) | Tab::Text(_) | Tab::Ink(_) | Tab::Image(_),
+                )
+                | None => {}
             }
         }
     }
@@ -181,7 +184,8 @@ pub fn follow(
 pub fn scrolled(state: &mut State, pane: PaneId, file: BookId, to: TopItem) {
     match state.layout.find_pane(pane).and_then(Pane::active_mut) {
         Some(Tab::Book(tab)) if tab.file == file => tab.scroll = Placed::At(to),
-        Some(Tab::Book(_) | Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None => {}
+        Some(Tab::Book(_) | Tab::JsonCanvas(_) | Tab::Text(_) | Tab::Ink(_) | Tab::Image(_))
+        | None => {}
     }
 }
 

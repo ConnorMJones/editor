@@ -14,6 +14,7 @@ use model::config::OpenAs;
 use model::notice::Notice;
 
 use crate::apply::{self, FocusedText, focused_text};
+use crate::json_canvas::JsonCanvasId;
 use crate::project::files::FileIndex;
 use crate::project::path::TextKind;
 use crate::project::path::{Folder, RelPath};
@@ -50,13 +51,9 @@ impl Index {
     }
 }
 
-/// A link's file part as written, without heading or alias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dest<S> {
-    /// `[[target]]`: a name or a path suffix anywhere in the vault.
     Wiki(S),
-    /// A markdown link's percent-decoded path, relative to the note or, with a leading `/`,
-    /// to the vault root.
     Path(S),
 }
 
@@ -72,15 +69,10 @@ impl<S: AsRef<str>> Dest<S> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
     File(RelPath),
-    /// No such file; following the link offers to create it here.
     Missing(RelPath),
-    /// Leaves the vault or names nothing.
     Invalid,
 }
 
-/// Resolves `dest` from a note in folder `dir` by Obsidian's rules: names match
-/// case-insensitively as `name.md` and then as written; among several files, an exact-case
-/// match wins, then the shallowest path, then one in `dir`, then the shortest and first.
 pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
     match dest {
         Dest::Wiki(name) => {
@@ -92,7 +84,6 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
                 Some(found) => Resolution::File(found),
                 None => {
                     let note = with_md(path.as_str());
-                    // A bare name is created beside the linking note.
                     match path.folder() {
                         Folder::Root => Resolution::Missing(Folder::of(dir).join(&note)),
                         Folder::Sub(_) => match RelPath::parse(&note) {
@@ -133,7 +124,6 @@ pub fn resolve(index: &Index, dir: &str, dest: Dest<&str>) -> Resolution {
     }
 }
 
-/// The best file named `wanted` (a name or a path suffix), as a note first.
 fn lookup(index: &Index, dir: &str, wanted: &str) -> Option<RelPath> {
     let note = with_md(wanted);
     let names: SmallVec<[&str; 2]> = match note == wanted {
@@ -190,15 +180,11 @@ fn with_md(name: &str) -> String {
     }
 }
 
-/// `rest` applied to folder `base`; `None` when `..` climbs out of the vault or it lands on the
-/// root itself.
 fn normalize(base: &str, rest: &str) -> Option<RelPath> {
     let parts = model::href::normalize(base, rest)?;
     RelPath::parse(&parts.join("/")).ok()
 }
 
-/// Groups links by the file name they name, case-folded and without `.md`: only a file with
-/// the same key can be a link's target.
 pub fn link_key(name: &str) -> u64 {
     let lower = name.to_lowercase();
     let stem = lower.strip_suffix(".md").unwrap_or(&lower);
@@ -207,7 +193,6 @@ pub fn link_key(name: &str) -> u64 {
     hasher.finish()
 }
 
-/// Heading text compared loosely: case, and spaces against hyphens, do not matter.
 pub fn slug(heading: &str) -> String {
     heading
         .trim()
@@ -219,8 +204,6 @@ pub fn slug(heading: &str) -> String {
         .collect()
 }
 
-/// Source line of the heading `heading` names (its last `#` part), from the parsed note or a
-/// scan of ATX headings outside code fences.
 pub fn heading_line(doc: &TextDoc, parsed: Option<&Markdown>, heading: &str) -> Option<usize> {
     let wanted = slug(heading.rsplit('#').next().unwrap_or(heading));
     match parsed {
@@ -270,24 +253,25 @@ enum Fence {
     In,
 }
 
-/// Where a followed link was clicked or typed: the pane opens the target, rendered for a
-/// rendered view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     Text(PaneId),
     Document(PaneId),
 }
 
-/// Follows `target` of note `note`: URLs open in the browser, headings move within the note,
-/// and files open in the origin's pane at their heading. An unresolved note asks to be created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkFrom {
+    Note(BufferId),
+    JsonCanvas(JsonCanvasId),
+}
+
 pub fn follow(
     state: &mut State,
-    note: BufferId,
+    from: LinkFrom,
     target: &LinkTarget,
     origin: Origin,
     out: &mut Vec<Effect>,
 ) {
-    // A link followed from a rendering opens the target rendered too, when its kind has one.
     let (pane, arrive) = match origin {
         Origin::Text(pane) => (pane, Arrive::In(Shown::Source)),
         Origin::Document(pane) => (pane, Arrive::In(Shown::Render)),
@@ -296,27 +280,37 @@ pub fn follow(
         Ok(()) => {}
         Err(NotInLayout(_)) => return,
     }
-    let (dest, heading) = match target {
-        LinkTarget::Url(url) => return out.push(Effect::OpenUrl(url.clone())),
-        LinkTarget::Heading(heading) => {
+    let (dest, heading) = match (target, from) {
+        (LinkTarget::Url(url), _) => return out.push(Effect::OpenUrl(url.clone())),
+        (LinkTarget::Heading(heading), LinkFrom::Note(note)) => {
             return apply::place(state, pane, note, Target::Heading(heading.clone()));
         }
-        LinkTarget::Wiki(WikiLink {
-            target, heading, ..
-        }) if target.trim().is_empty() => match heading {
+        (
+            LinkTarget::Wiki(WikiLink {
+                target, heading, ..
+            }),
+            LinkFrom::Note(note),
+        ) if target.trim().is_empty() => match heading {
             Some(heading) => {
                 return apply::place(state, pane, note, Target::Heading(heading.clone()));
             }
             None => return,
         },
-        LinkTarget::Wiki(link) => (Dest::Wiki(link.target.as_str()), link.heading.as_deref()),
-        LinkTarget::Path { path, heading } => (Dest::Path(path.as_str()), heading.as_deref()),
+        (LinkTarget::Heading(_), LinkFrom::JsonCanvas(_)) => return,
+        (LinkTarget::Wiki(WikiLink { target, .. }), LinkFrom::JsonCanvas(_))
+            if target.trim().is_empty() =>
+        {
+            return;
+        }
+        (LinkTarget::Wiki(link), _) => (Dest::Wiki(link.target.as_str()), link.heading.as_deref()),
+        (LinkTarget::Path { path, heading }, _) => (Dest::Path(path.as_str()), heading.as_deref()),
+    };
+    let path = match from {
+        LinkFrom::Note(note) => state.buffers.get(note).map(|buffer| buffer.path.as_path()),
+        LinkFrom::JsonCanvas(canvas) => state.json_canvases.get(canvas).map(|canvas| &*canvas.path),
     };
     // Notes outside the vault resolve from its root.
-    let note = state
-        .buffers
-        .get(note)
-        .and_then(|b| RelPath::new(state.project.root.path(), &b.path).ok());
+    let note = path.and_then(|path| RelPath::new(state.project.root.path(), path).ok());
     let dir = note.as_ref().map_or("", RelPath::folder_path);
     let FileIndex::Ready(indexed) = &mut state.project.index else {
         return state.notice = Some(Notice::IndexLoading);
@@ -363,8 +357,6 @@ pub fn follow(
     }
 }
 
-/// The markdown link under byte `at` of `line`: a wikilink or embed, an inline link, an
-/// autolink or a bare URL.
 pub fn link_at(line: &str, at: usize) -> Option<LinkTarget> {
     let mut from = 0;
     while let Some(open) = line[from..].find("[[").map(|found| from + found) {
@@ -449,15 +441,12 @@ pub fn link_at(line: &str, at: usize) -> Option<LinkTarget> {
 /// How far around the cursor `gf` looks for a path, as in helix.
 const LOOKAROUND: usize = 1000;
 
-/// `gf`: follows the link under the primary cursor of a markdown buffer, else opens the URL
-/// or file path under it (or the selected text) relative to the buffer's folder or the root.
 pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
     let pane = state.layout.focus();
     let (buffer, rope, range) =
         match focused_text(&mut state.layout, &mut state.buffers, &mut state.notice) {
             Some(FocusedText { view, doc }) => match view.edited.buffer() {
                 Some(buffer) => (buffer, doc.text.clone(), view.selection.primary()),
-                // A drawing's text has no folder to resolve links from.
                 None => return state.notice = Some(Notice::NothingToFollow),
             },
             None => return,
@@ -476,7 +465,15 @@ pub fn goto_file(state: &mut State, out: &mut Vec<Effect>) {
         TextKind::Typst | TextKind::Code => None,
     };
     match link {
-        Some(link) => return follow(state, buffer, &link, Origin::Text(pane), out),
+        Some(link) => {
+            return follow(
+                state,
+                LinkFrom::Note(buffer),
+                &link,
+                Origin::Text(pane),
+                out,
+            );
+        }
         None => {}
     }
     let picked = match range.len() {

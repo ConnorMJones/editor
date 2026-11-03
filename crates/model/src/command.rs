@@ -147,8 +147,9 @@ pub enum Command {
     Read(ReadCommand),
     Document(DocumentCommand),
     Drawing(DrawingCommand),
+    JsonCanvas(JsonCanvasCommand),
     Reading(ReadingCommand),
-    Comment(CommentCommand),
+    Draft(DraftCommand),
     View(ViewCommand),
     Export(ExportAs),
 }
@@ -574,6 +575,17 @@ pub enum Resize {
     Even,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonCanvasCommand {
+    Delete,
+    Duplicate,
+    AddText,
+    Group,
+    Write,
+    Recolor(Option<crate::color::Preset>),
+    Unpick,
+}
+
 /// Keys on a focused drawing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawingCommand {
@@ -610,7 +622,7 @@ pub enum Annotate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CommentCommand {
+pub enum DraftCommand {
     Finish,
     Drop,
     Swap,

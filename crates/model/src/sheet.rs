@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use crate::geom::{Affine, Pane, Point, Sheet, Surface, Vector};
+use crate::geom::{Affine, Pane, Point, Rect, Sheet, Surface, Vector};
 use crate::scroll_bar::Thumb;
 use crate::units::{Positive, Px};
 
@@ -12,6 +12,7 @@ pub const GAP: f32 = 16.0;
 
 /// Scales closer than this share of each other look the same.
 pub const SAME_SCALE: f32 = 0.01;
+pub const FIT_MARGIN: f32 = 0.9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageIndex(pub usize);
@@ -490,6 +491,16 @@ impl PlaneView {
     pub fn pan(&mut self, by: Vector<Pane>) {
         let scale = self.zoom.get();
         self.centre = self.centre + Vector::new(by.x / scale, by.y / scale);
+    }
+
+    pub fn fitted(bounds: Rect<Surface>, viewport: Viewport) -> PlaneView {
+        let (min, max) = (bounds.min(), bounds.max());
+        let (width, height) = ((max.x - min.x).max(1.0), (max.y - min.y).max(1.0));
+        let fits = (viewport.width.get() / width).min(viewport.height.get() / height) * FIT_MARGIN;
+        PlaneView {
+            centre: Point::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0),
+            zoom: Zoom::clamped(fits.min(1.0)),
+        }
     }
 
     /// Zooms by `factor`, keeping the point under `at` there.

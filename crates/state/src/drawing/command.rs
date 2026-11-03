@@ -62,7 +62,9 @@ pub fn command(state: &mut State, command: DrawingCommand, out: &mut Vec<Effect>
             let file = &mut pdfs[tab.file()];
             pdf(tab, file, command, fonts, out)
         }
-        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => Err(Notice::NotADrawing),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None => {
+            Err(Notice::NotADrawing)
+        }
     };
     match result {
         Ok(After::Nothing) => {}
@@ -218,7 +220,7 @@ fn follow(layout: &mut Layout, file: PagedId, edit: StackEdit) {
                 Tab::Ink(InkTabs::Paged(tab)) if tab.file() == file && pane != focus => {
                     tab.view.follow(edit)
                 }
-                Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => {}
+                Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_) => {}
             }
         }
     }
@@ -323,6 +325,7 @@ pub fn step(state: &mut State, step: Step) {
         pageds,
         boards,
         pdfs,
+        json_canvases,
         notice,
         ..
     } = state;
@@ -338,6 +341,10 @@ pub fn step(state: &mut State, step: Step) {
         Some(Tab::Ink(InkTabs::Pdf(tab))) => {
             tab.hand.cancel_stroke();
             history(&mut pdfs[tab.file()].ink, step)
+        }
+        Some(Tab::JsonCanvas(tab)) => {
+            let file = &mut json_canvases[tab.file()];
+            crate::json_canvas::history(tab, file, step)
         }
         Some(Tab::Image(_) | Tab::Book(_)) => Err(Notice::ReadOnly),
         Some(Tab::Text(_)) | None => Err(Notice::NotADrawing),

@@ -685,8 +685,35 @@ fn shift_arrows_pick_tree_rows_and_d_deletes_them() {
         ["a.txt", "b.txt"],
         "moving back lets go of the row left"
     );
+    h.keys("<down><up>");
+    assert!(
+        h.state.tree.selected.is_empty(),
+        "a plain move lets go of the pick"
+    );
+    h.keys("<up><S-down>");
     h.keys("dy<ret>");
     assert!(!dir.path().join("a.txt").exists());
     assert!(!dir.path().join("b.txt").exists());
     assert!(dir.path().join("c.txt").exists());
+}
+
+#[test]
+fn renaming_edits_the_name_and_keeps_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("notes/old")).unwrap();
+    fs::write(dir.path().join("notes/old/a.md"), "a").unwrap();
+    let mut h = Harness::new(dir.path());
+    h.keys("<space>e");
+    let notes = row(&h, "notes");
+    h.state.tree.cursor = notes;
+    h.keys("l");
+    let old = row(&h, "notes/old");
+    h.run(|state, out| panes::tree_action(state, TreeTarget::Row(old), TreeAction::Rename, out));
+    assert!(matches!(
+        &h.state.sidebar,
+        Sidebar::Files(Files::Edit(state::sidebar::tree::TreeEdit::Rename { line, .. })) if line == "old"
+    ));
+    h.keys("<bs><bs><bs>new<ret>");
+    assert!(dir.path().join("notes/new/a.md").is_file());
+    assert!(!dir.path().join("new").exists());
 }

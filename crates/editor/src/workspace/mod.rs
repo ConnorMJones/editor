@@ -39,7 +39,7 @@ mod sidebar;
 mod status;
 
 pub use drops::DraggedTab;
-pub use sidebar::{DragPreview, DraggedEntry, TreeMenu};
+pub use sidebar::{DragPreview, DraggedEntry, TreeDrop, TreeMenu};
 
 use crate::fonts::{Fonts, hsla};
 use crate::page_tiles::PageTiles;
@@ -77,6 +77,7 @@ pub struct Workspace {
     pub shown_tab: Option<(PaneId, usize)>,
     /// The file tree context menu, opened by a right click at `at`.
     pub tree_menu: Option<TreeMenu>,
+    pub tree_drop: TreeDrop,
     pub rendered: SecondaryMap<PaneId, RenderedPane>,
     pub typeset: mpsc::Sender<Request>,
     /// Pictures decoded for the last frame.
@@ -412,7 +413,7 @@ impl Render for Workspace {
                 ..,
             ) => format!("delete untracked {}? y/n", relative(path)),
             (Overlay::Confirm(Confirm::Create(path)), ..) => format!("create {path}? y/n"),
-            (Overlay::Confirm(Confirm::DropComment), ..) => {
+            (Overlay::Confirm(Confirm::DropDraft), ..) => {
                 "leave the comment without saving? y/n".to_owned()
             }
             (

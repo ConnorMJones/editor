@@ -217,9 +217,11 @@ pub fn list(state: &mut State, command: ChangesCommand, out: &mut Vec<Effect>) {
         }
         (ChangesCommand::FocusEditor, ..) => panes::focus_editor(state),
         (ChangesCommand::Up, Some(at), _) => {
+            state.changes.selected.clear();
             state.changes.cursor = cursor_at(changes, &folds, at.saturating_sub(1))
         }
         (ChangesCommand::Down, Some(at), _) => {
+            state.changes.selected.clear();
             let last = list_len(changes, &folds).saturating_sub(1);
             state.changes.cursor = cursor_at(changes, &folds, (at + 1).min(last))
         }

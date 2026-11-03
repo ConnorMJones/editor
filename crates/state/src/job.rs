@@ -25,6 +25,7 @@ use crate::export::ExportFailed;
 use crate::git::diff::{Base, BaseRead, Lines, Outcome, Stamp};
 use crate::git::{self, IndexError, IndexOp, RepoPath};
 use crate::input::picker::{self, Hit, Preview, Search};
+use crate::json_canvas::{self, JsonCanvasId, JsonCanvasRead};
 use crate::literature::ExportNotesError;
 use crate::project::files::{self, Rescan, Walked};
 use crate::project::path::{FileKind, TextKind};
@@ -51,6 +52,7 @@ pub enum Job {
     Open {
         read: ReadId,
         path: PathBuf,
+        root: PathBuf,
         languages: Arc<Loader>,
         fonts: Fonts,
         library: Library,
@@ -147,6 +149,10 @@ pub enum Job {
     },
     /// Reads the size of an image a document shows.
     Probe(LocalImage),
+    JsonCanvasFiles {
+        file: JsonCanvasId,
+        wanted: Vec<(jsoncanvas::NodeId, PathBuf)>,
+    },
     Preview {
         root: PathBuf,
         path: RelPath,
@@ -319,6 +325,10 @@ pub enum JobResult {
         into: Destination,
         read: Result<embed::Read, ProbeError>,
     },
+    JsonCanvasFiles {
+        file: JsonCanvasId,
+        files: Vec<(jsoncanvas::NodeId, json_canvas::Embedded)>,
+    },
     Probed {
         image: LocalImage,
         result: Result<Probed, ProbeError>,
@@ -375,9 +385,22 @@ pub struct Written {
 /// What a write saves, at the revision it was taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Saving {
-    Text { buffer: BufferId, revision: usize },
-    Paged { file: PagedId, revision: Revision },
-    Board { file: BoardId, revision: Revision },
+    Text {
+        buffer: BufferId,
+        revision: usize,
+    },
+    Paged {
+        file: PagedId,
+        revision: Revision,
+    },
+    Board {
+        file: BoardId,
+        revision: Revision,
+    },
+    JsonCanvas {
+        file: JsonCanvasId,
+        revision: jsoncanvas::Revision,
+    },
 }
 
 impl Saving {
@@ -386,6 +409,7 @@ impl Saving {
             Saving::Text { buffer, .. } => Opened::Text(buffer),
             Saving::Paged { file, .. } => Opened::Paged(file),
             Saving::Board { file, .. } => Opened::Board(file),
+            Saving::JsonCanvas { file, .. } => Opened::JsonCanvas(file),
         }
     }
 }
@@ -456,6 +480,10 @@ pub enum OpenRead {
         read: BookRead,
         disk: Disk,
     },
+    JsonCanvas {
+        read: JsonCanvasRead,
+        disk: Disk,
+    },
     NotUtf8,
     NotAFile,
     Failed(io::Error),
@@ -474,6 +502,8 @@ pub enum Unreadable {
     Markup(#[from] export::markup::MarkupError),
     #[error(transparent)]
     Book(#[from] BookError),
+    #[error(transparent)]
+    JsonCanvas(#[from] jsoncanvas::JsonCanvasError),
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +514,7 @@ pub enum Reload {
     Pdf(PdfId, Library, Fonts),
     Image(ImageId, Encoding),
     Book(BookId, Library),
+    JsonCanvas(JsonCanvasId, PathBuf),
 }
 
 pub enum Reloaded {
@@ -493,6 +524,10 @@ pub enum Reloaded {
     Pdf(PdfId, DiskRead<PdfRead, Unreadable>),
     Image(ImageId, DiskRead<PageSize, ProbeError>),
     Book(BookId, DiskRead<BookRead, BookError>),
+    JsonCanvas(
+        JsonCanvasId,
+        DiskRead<JsonCanvasRead, jsoncanvas::JsonCanvasError>,
+    ),
 }
 
 pub enum DiskRead<T, E> {
@@ -565,6 +600,7 @@ pub fn run(job: Job) -> JobResult {
         Job::Grep { .. } => "grep",
         Job::Embed { .. } => "embed",
         Job::Probe { .. } => "probe",
+        Job::JsonCanvasFiles { .. } => "canvas files",
         Job::Preview { .. } => "preview",
         Job::Links { .. } => "links",
         Job::DiffBase { .. } => "diff base",
@@ -578,12 +614,13 @@ pub fn run(job: Job) -> JobResult {
         Job::Open {
             read,
             path,
+            root,
             languages,
             fonts,
             library,
         } => JobResult::Opened {
             read,
-            result: read_file(&path, &languages, &fonts, &library),
+            result: read_file(&path, &root, &languages, &fonts, &library),
         },
         Job::Write {
             path,
@@ -800,6 +837,15 @@ pub fn run(job: Job) -> JobResult {
                         |file| book::read(&path, file, &library),
                     ),
                 ),
+                Reload::JsonCanvas(id, root) => Reloaded::JsonCanvas(
+                    id,
+                    read_again(
+                        &path,
+                        when,
+                        |path: &Path| std::fs::read_to_string(path),
+                        |text| json_canvas::parse(&text, &root, path.parent().unwrap_or(&root)),
+                    ),
+                ),
             };
             JobResult::Reloaded { read, policy }
         }
@@ -899,6 +945,12 @@ pub fn run(job: Job) -> JobResult {
             path,
             into,
         },
+        Job::JsonCanvasFiles { file, wanted } => JobResult::JsonCanvasFiles {
+            file,
+            files: (wanted.into_iter())
+                .map(|(node, path)| (node, json_canvas::embedded(&path)))
+                .collect(),
+        },
         Job::Probe(image) => JobResult::Probed {
             result: match &image.place {
                 ImagePlace::File(path) => viewer::read(path, image.encoding),
@@ -994,6 +1046,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         JobResult::Grepped { .. } => "grepped",
         JobResult::Embedded { .. } => "embedded",
         JobResult::Probed { .. } => "probed",
+        JobResult::JsonCanvasFiles { .. } => "canvas files",
         JobResult::Previewed { .. } => "previewed",
         JobResult::Linked { .. } => "linked",
         JobResult::Bases { .. } => "bases",
@@ -1063,6 +1116,7 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
         } => picker::grepped(state, generation, hits, search, out),
         JobResult::Embedded { path, into, read } => embed::embedded(state, path, into, read),
         JobResult::Probed { image, result } => typeset::probed(&mut state.figures, image, result),
+        JobResult::JsonCanvasFiles { file, files } => json_canvas::embeds_read(state, file, files),
         JobResult::Previewed { path, preview } => picker::previewed(state, path, preview),
         JobResult::Linked { stamp, reads } => backlinks::linked(state, stamp, reads, out),
         JobResult::Bases {
@@ -1089,7 +1143,13 @@ pub fn complete(state: &mut State, result: JobResult, out: &mut Vec<Effect>) {
 }
 
 /// Reads `path` into a document; a missing file opens empty, to be created on write.
-pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts, library: &Library) -> OpenRead {
+pub fn read_file(
+    path: &Path,
+    root: &Path,
+    languages: &Loader,
+    fonts: &Fonts,
+    library: &Library,
+) -> OpenRead {
     let _span = tracing::info_span!("read", ?path).entered();
     match FileKind::of(path) {
         FileKind::Text(kind) => read_text(path, kind, languages),
@@ -1124,6 +1184,19 @@ pub fn read_file(path: &Path, languages: &Loader, fonts: &Fonts, library: &Libra
                 },
                 Err(error) => OpenRead::Unreadable(error.into()),
             },
+            (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
+            (Err(error), _) | (Ok(_), Err(error)) => OpenRead::Failed(error),
+        },
+        FileKind::JsonCanvas => match (std::fs::read_to_string(path), modified(path)) {
+            (Ok(text), Ok(mtime)) => {
+                match json_canvas::parse(&text, root, path.parent().unwrap_or(root)) {
+                    Ok(read) => OpenRead::JsonCanvas {
+                        read,
+                        disk: Disk::Synced { mtime },
+                    },
+                    Err(error) => OpenRead::Unreadable(error.into()),
+                }
+            }
             (Err(error), _) if error.kind() == io::ErrorKind::IsADirectory => OpenRead::NotAFile,
             (Err(error), _) | (Ok(_), Err(error)) => OpenRead::Failed(error),
         },

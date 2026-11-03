@@ -1,0 +1,22 @@
+{
+	"nodes":[
+		{"id":"group-notes","type":"group","label":"Notes in this vault","x":380,"y":-80,"width":760,"height":660},
+		{"id":"group-media","type":"group","label":"Media","x":-420,"y":360,"width":740,"height":300,"color":"5"},
+		{"id":"intro","type":"text","text":"# Canvas showcase\n\nCards hold **markdown**, notes, images and links.\n\n- [[index]] is the vault's start\n- math renders: $\\int_0^1 x^2\\,dx = \\tfrac13$\n- [ ] a task in a card","x":-420,"y":-80,"width":420,"height":340,"color":"4"},
+		{"id":"index","type":"file","file":"index.md","x":420,"y":-40,"width":320,"height":280},
+		{"id":"math","type":"file","file":"math.md","subpath":"#Integrals","x":780,"y":-40,"width":320,"height":280,"color":"6"},
+		{"id":"daily","type":"file","file":"notes/daily.md","x":420,"y":280,"width":320,"height":260},
+		{"id":"diagrams","type":"file","file":"diagrams.md","x":780,"y":280,"width":320,"height":260,"color":"#d08770"},
+		{"id":"gradient","type":"file","file":"assets/gradient.png","x":-400,"y":400,"width":320,"height":220},
+		{"id":"spec","type":"link","url":"https://jsoncanvas.org/spec/1.0/","x":-40,"y":420,"width":320,"height":100,"color":"2"},
+		{"id":"aside","type":"text","text":"Double-click a file or link card to open it.","x":-40,"y":540,"width":320,"height":80,"color":"3"}
+	],
+	"edges":[
+		{"id":"intro-index","fromNode":"intro","fromSide":"right","toNode":"index","toSide":"left","label":"start here"},
+		{"id":"index-math","fromNode":"index","fromSide":"right","toNode":"math","toSide":"left","color":"6"},
+		{"id":"index-daily","fromNode":"index","fromSide":"bottom","toNode":"daily","toSide":"top","fromEnd":"arrow","toEnd":"arrow","label":"both ways"},
+		{"id":"math-diagrams","fromNode":"math","toNode":"diagrams","toEnd":"none","color":"1"},
+		{"id":"intro-gradient","fromNode":"intro","fromSide":"bottom","toNode":"gradient","toSide":"top","label":"an image"},
+		{"id":"gradient-spec","fromNode":"gradient","fromSide":"right","toNode":"spec","toSide":"left"}
+	]
+}

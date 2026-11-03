@@ -445,7 +445,7 @@ pub fn reopen(state: &State, opened: Opened, saved: Saved) -> Option<Tab> {
                 mode.mode(),
             ))))
         }
-        (Opened::Text(_) | Opened::Image(_) | Opened::Book(_), _)
+        (Opened::Text(_) | Opened::Image(_) | Opened::Book(_) | Opened::JsonCanvas(_), _)
         | (Opened::Paged(_), Saved::Board { .. } | Saved::Pdf { .. })
         | (Opened::Board(_), Saved::Paged { .. } | Saved::Pdf { .. })
         | (Opened::Pdf(_), Saved::Paged { .. } | Saved::Board { .. }) => None,

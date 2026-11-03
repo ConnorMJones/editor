@@ -1615,6 +1615,7 @@ dependencies = [
  "helix-core",
  "image",
  "ink",
+ "jsoncanvas",
  "library",
  "model",
  "reader",
@@ -3443,6 +3444,15 @@ checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
 dependencies = [
  "serde",
  "ucd-trie",
+]
+
+[[package]]
+name = "jsoncanvas"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6241,6 +6251,7 @@ dependencies = [
  "image",
  "imara-diff",
  "ink",
+ "jsoncanvas",
  "library",
  "miniz_oxide 0.8.9",
  "model",

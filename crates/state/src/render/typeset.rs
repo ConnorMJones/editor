@@ -17,6 +17,7 @@ use slotmap::SlotMap;
 
 use crate::book::BookFiles;
 use crate::job::Job;
+use crate::json_canvas::{JsonCanvasFile, JsonCanvasFiles};
 use crate::project::path::TextKind;
 use crate::render::document::Documents;
 use crate::render::flow;
@@ -282,6 +283,7 @@ pub fn mark(
     figures: &mut Figures,
     documents: &Documents,
     books: &BookFiles,
+    json_canvases: &JsonCanvasFiles,
     out: &mut Vec<Effect>,
 ) {
     figures.clock += 1;
@@ -308,7 +310,12 @@ pub fn mark(
             }
         });
     }
-    for markdown in documents.values().map(|parsed| &parsed.markdown) {
+    let cards = json_canvases.values().flat_map(JsonCanvasFile::cards);
+    for markdown in documents
+        .values()
+        .map(|parsed| &parsed.markdown)
+        .chain(cards)
+    {
         each_figure(&markdown.blocks, |figure, source| {
             match entries.get_mut(&figure) {
                 Some(entry) => entry.used = *clock,

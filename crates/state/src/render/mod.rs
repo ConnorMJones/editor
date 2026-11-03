@@ -43,9 +43,10 @@ pub fn read(state: &mut State, command: ReadCommand) {
             return crate::book::moved(state, motion);
         }
         (ReadCommand::Leave, _) => return mode::show(state, Shown::Source),
-        (ReadCommand::Move(motion), Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None) => {
-            motion
-        }
+        (
+            ReadCommand::Move(motion),
+            Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::JsonCanvas(_)) | None,
+        ) => motion,
     };
     let State {
         layout,

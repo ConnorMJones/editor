@@ -198,7 +198,7 @@ pub fn settle_on(state: &mut State, which: impl Fn(Opened) -> bool) -> Result<()
                     Doing::Ink { .. } => {}
                 }
             }
-            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => {}
+            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_) => {}
         }
     }
     Ok(())
@@ -229,7 +229,7 @@ pub fn sync(state: &mut State) {
         .flat_map(|(_, pane)| pane.items_mut().iter_mut())
         .filter_map(|item| match &mut item.tab {
             Tab::Ink(ink) => ink.text_box(),
-            Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => None,
+            Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_) => None,
         });
     for text in boxes.filter(|text| text.laid_version != text.doc.version) {
         text.laid = fonts.lay_out(&String::from(&text.doc.text), &text.style, text.wrap);

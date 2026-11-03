@@ -78,6 +78,9 @@ pub enum Notice {
     NoImageOnClipboard,
     /// A drop landed off every page.
     OffThePages,
+    FileOutsideProject {
+        path: PathBuf,
+    },
     NoteOutsideProject {
         path: PathBuf,
     },
@@ -88,6 +91,10 @@ pub enum Notice {
     NoLayer,
     LayerHidden,
     NothingPicked,
+    NotAJsonCanvas,
+    JsonCanvasRefused {
+        reason: String,
+    },
     DrawingRefused {
         reason: String,
     },
@@ -287,6 +294,9 @@ impl std::fmt::Display for Notice {
             Notice::NoImagesHere => f.write_str("images go into drawings and notes"),
             Notice::OffThePages => f.write_str("drop images onto a page"),
             Notice::NoImageOnClipboard => f.write_str("the clipboard holds no image"),
+            Notice::FileOutsideProject { path } => {
+                write!(f, "{} is outside the project", path.display())
+            }
             Notice::NoteOutsideProject { path } => {
                 write!(
                     f,
@@ -301,6 +311,8 @@ impl std::fmt::Display for Notice {
             Notice::NoLayer => f.write_str("the active layer is gone"),
             Notice::LayerHidden => f.write_str("the active layer is hidden"),
             Notice::NothingPicked => f.write_str("nothing is selected"),
+            Notice::NotAJsonCanvas => f.write_str("not a canvas"),
+            Notice::JsonCanvasRefused { reason } => write!(f, "canvas change refused: {reason}"),
             Notice::DrawingRefused { reason } => write!(f, "drawing refused: {reason}"),
             Notice::Unreadable { path, reason } => {
                 write!(f, "cannot read {}: {reason}", path.display())

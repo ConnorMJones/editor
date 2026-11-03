@@ -13,13 +13,10 @@ use state::view::tab::{Opened, Tab};
 use crate::fonts::hsla;
 use crate::workspace::{DragPreview, DraggedEntry, DraggedTab, Workspace};
 
-/// Top edge of every tab; the focused pane's active tab draws it in the accent colour.
 const INDICATOR: gpui::Pixels = px(2.);
-/// Hover group of a tab, which shows its close button.
 const GROUP: &str = "tab";
 
 impl Workspace {
-    /// Zed-style: preview tabs in italics, a modified dot that becomes a close button on hover.
     pub fn tab_bar(
         &self,
         pane: PaneId,
@@ -115,6 +112,7 @@ impl Workspace {
                 Tab::Ink(_) => Some("✎"),
                 Tab::Image(_) => Some("▣"),
                 Tab::Book(_) => Some("❧"),
+                Tab::JsonCanvas(_) => Some("◫"),
             }
             .map(|icon| div().text_color(hsla(theme.muted)).child(icon));
             // Ids from different stores can be equal, so the kind is part of the name.
@@ -125,6 +123,7 @@ impl Workspace {
                 Opened::Pdf(id) => ("tab-pdf", "tab-close-pdf", id.data().as_ffi()),
                 Opened::Image(id) => ("tab-image", "tab-close-image", id.data().as_ffi()),
                 Opened::Book(id) => ("tab-book", "tab-close-book", id.data().as_ffi()),
+                Opened::JsonCanvas(id) => ("tab-canvas", "tab-close-canvas", id.data().as_ffi()),
             };
             let close = div()
                 .id(ElementId::NamedInteger(close_name.into(), key))

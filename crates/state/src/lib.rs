@@ -1,12 +1,14 @@
 pub mod apply;
 pub mod book;
 pub mod comment;
+pub mod draft;
 pub mod drawing;
 pub mod export;
 pub mod git;
 pub mod input;
 pub mod insert;
 pub mod job;
+pub mod json_canvas;
 pub mod literature;
 pub mod project;
 pub mod reading;
@@ -186,6 +188,7 @@ pub struct State {
     pub library: library::Library,
     pub images: viewer::ImageFiles,
     pub books: book::BookFiles,
+    pub json_canvases: json_canvas::JsonCanvasFiles,
     /// What new ink tabs draw with.
     pub ink: drawing::InkSettings,
 }
@@ -262,6 +265,7 @@ impl State {
             library,
             images: SlotMap::with_key(),
             books: SlotMap::with_key(),
+            json_canvases: SlotMap::with_key(),
             ink: drawing::InkSettings::default(),
         })
     }
@@ -274,6 +278,7 @@ impl State {
             .chain(self.pdfs.keys().map(Opened::Pdf))
             .chain(self.images.keys().map(Opened::Image))
             .chain(self.books.keys().map(Opened::Book))
+            .chain(self.json_canvases.keys().map(Opened::JsonCanvas))
     }
 
     pub fn file(&self, opened: Opened) -> &dyn OpenFile {
@@ -284,6 +289,7 @@ impl State {
             Opened::Pdf(id) => &self.pdfs[id].ink,
             Opened::Image(id) => &self.images[id],
             Opened::Book(id) => &self.books[id],
+            Opened::JsonCanvas(id) => &self.json_canvases[id],
         }
     }
 
@@ -324,6 +330,9 @@ impl State {
             Opened::Book(id) => {
                 self.books.remove(id);
             }
+            Opened::JsonCanvas(id) => {
+                self.json_canvases.remove(id);
+            }
         }
     }
 
@@ -336,6 +345,9 @@ impl State {
             Opened::Pdf(id) => job::Reload::Pdf(id, self.library.clone(), self.fonts.clone()),
             Opened::Image(id) => job::Reload::Image(id, self.images[id].encoding),
             Opened::Book(id) => job::Reload::Book(id, self.library.clone()),
+            Opened::JsonCanvas(id) => {
+                job::Reload::JsonCanvas(id, self.project.root.path().to_owned())
+            }
         }
     }
 
@@ -651,7 +663,7 @@ pub enum Confirm {
     },
     /// Creates the empty note an unresolved link names, and opens it.
     Create(RelPath),
-    DropComment,
+    DropDraft,
 }
 
 pub enum Repo {
@@ -709,6 +721,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     tracing::trace_span!("typing").in_scope(|| drawing::typing::sync(state));
     tracing::trace_span!("pdf text").in_scope(|| drawing::pdf_text::sync(state, out));
     tracing::trace_span!("reading place").in_scope(|| reading::sync(state, out));
+    tracing::trace_span!("json_canvases").in_scope(|| json_canvas::sync(state, out));
 }
 
 pub trait OpenFile {
@@ -758,6 +771,20 @@ impl OpenFile for viewer::ImageFile {
 
     fn is_modified(&self) -> bool {
         false
+    }
+}
+
+impl OpenFile for json_canvas::JsonCanvasFile {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disk(&self) -> text::buffer::Disk {
+        self.disk
+    }
+
+    fn is_modified(&self) -> bool {
+        json_canvas::JsonCanvasFile::is_modified(self)
     }
 }
 

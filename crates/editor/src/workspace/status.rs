@@ -7,10 +7,11 @@ use model::command::Shown;
 use model::mode::Mode;
 use model::sheet::{Fit, Zoom};
 use state::State;
-use state::comment::{Edits, Writing};
+use state::draft::{Draft, Edits};
 use state::drawing::{InkTabs, PdfMode, PdfTab};
 use state::git::conflict;
 use state::git::diff::{self, Bases, Removal, Side};
+use state::json_canvas::Doing;
 use state::reading::{Found, Reading, bookmark_in_view};
 use state::text::buffer::{Disk, Highlight};
 use state::view::layout::{Pane, PaneId};
@@ -150,7 +151,9 @@ impl Workspace {
                     flags: format!(
                         "{}{}{}",
                         modified_flag(state, opened),
-                        active.and_then(Tab::writing).map_or("", comment_flag),
+                        active
+                            .and_then(Tab::drafting)
+                            .map_or("", |(draft, _)| draft_flag(draft)),
                         disk_flag(disk)
                     ),
                     parts: [
@@ -267,12 +270,36 @@ impl Workspace {
                     ],
                 }
             }
+            Some(Tab::JsonCanvas(tab)) => {
+                let file = &state.json_canvases[tab.file()];
+                let (label, draft) = match &tab.doing {
+                    Doing::Writing(writing) => (Label::Mode, draft_flag(&writing.draft)),
+                    Doing::Arranging(_) => (Label::View, ""),
+                };
+                let opened = Opened::JsonCanvas(tab.file());
+                Status {
+                    label,
+                    file: name(state, opened),
+                    flags: format!(
+                        "{}{}{}",
+                        modified_flag(state, opened),
+                        draft,
+                        disk_flag(file.disk)
+                    ),
+                    parts: [
+                        Part::plain(format!("{} cards", file.canvas().nodes().len())),
+                        Part::plain(percent(tab.view.zoom)),
+                        Part::NONE,
+                        Part::NONE,
+                    ],
+                }
+            }
             Some(Tab::Book(tab)) => {
                 let file = &state.books[tab.file()];
                 let items = file.flow.flow.roots.len();
                 let read = (tab.scroll.at().item + 1) * 100 / items;
                 let (label, flags) = match &tab.reading {
-                    Reading::Writing(writing) => (Label::Mode, comment_flag(writing)),
+                    Reading::Writing(writing) => (Label::Mode, draft_flag(&writing.draft)),
                     Reading::Idle
                     | Reading::Selecting { .. }
                     | Reading::Selected(_)
@@ -366,8 +393,8 @@ fn disk_flag(disk: Disk) -> &'static str {
     }
 }
 
-fn comment_flag(writing: &Writing) -> &'static str {
-    match writing.edits() {
+fn draft_flag(draft: &Draft) -> &'static str {
+    match draft.edits() {
         Edits::Unsaved => "[+]",
         Edits::Saved => "",
     }

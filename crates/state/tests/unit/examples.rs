@@ -118,3 +118,31 @@ fn only_the_deliberate_wikilink_is_unresolved() {
     }
     assert_eq!(missing, ["not-yet-written"]);
 }
+
+#[test]
+fn example_canvases_read_and_every_file_card_finds_its_file() {
+    let root = examples();
+    let vault = root.join("vault");
+    let json_canvases: Vec<_> = std::fs::read_dir(&vault)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "canvas")
+        })
+        .collect();
+    assert!(!json_canvases.is_empty());
+    for path in json_canvases {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let read = state::json_canvas::parse(&text, &root, &vault)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        for (node, file) in &read.files {
+            assert!(
+                !matches!(file, state::json_canvas::Embedded::Missing(_)),
+                "{}: {} names a missing file",
+                path.display(),
+                node.as_str()
+            );
+        }
+    }
+}

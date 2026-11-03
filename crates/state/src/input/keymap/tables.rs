@@ -1,12 +1,13 @@
 //! The binding tables, one per context, after helix's defaults.
 
+use model::color::Preset;
 use model::command::{
-    Align, Annotate, Answer, Case, ChangesCommand, Command, CommentCommand, Cycle, Direction,
-    DocumentCommand, DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool,
-    Join, Motion, ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand, Pending,
-    PickerCommand, PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove, ReadingCommand,
-    RegexOp, Resize, ScrollBy, Shown, SyntaxObject, Take, TreeCommand, ViewCommand, WindowCommand,
-    WordBounds, Yanking, ZoomBy,
+    Align, Annotate, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
+    DraftCommand, DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join,
+    JsonCanvasCommand, Motion, ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand,
+    Pending, PickerCommand, PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove,
+    ReadingCommand, RegexOp, Resize, ScrollBy, Shown, SyntaxObject, Take, TreeCommand, ViewCommand,
+    WindowCommand, WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -403,22 +404,17 @@ const SELECT: Bindings = &[(&[Key::char('v')], Command::NormalMode)];
 
 const CHECKPOINT: Bindings = &[(&[Key::ctrl('s')], Command::CommitUndoCheckpoint)];
 
-const COMMENT_SAVE: Bindings = &[(&[Key::ctrl('s')], Command::Write)];
+const DRAFT_SAVE: Bindings = &[(&[Key::ctrl('s')], Command::Write)];
 
-const COMMENT: Bindings = &[
+const DRAFT: Bindings = &[
+    (&[Key::ctrl('v')], Command::Draft(DraftCommand::Expand)),
     (
         &[Key::code(KeyCode::Esc)],
-        Command::Comment(CommentCommand::Finish),
+        Command::Draft(DraftCommand::Finish),
     ),
     (&[Key::ctrl('s')], Command::Write),
-    (
-        &[SPACE, Key::char('q')],
-        Command::Comment(CommentCommand::Drop),
-    ),
-    (
-        &[SPACE, Key::char('v')],
-        Command::Comment(CommentCommand::Swap),
-    ),
+    (&[SPACE, Key::char('q')], Command::Draft(DraftCommand::Drop)),
+    (&[SPACE, Key::char('v')], Command::Draft(DraftCommand::Swap)),
     (
         &[CTRL_W, Key::char('<')],
         Command::ResizeSplit(Resize::Narrow),
@@ -505,7 +501,7 @@ const fn prompt_delete(motion: PromptMotion) -> Command {
 /// Helix's prompt line editing, from `helix-term/src/ui/prompt.rs`.
 const PROMPT: Bindings = &[
     (&[Key::code(KeyCode::Esc)], Command::PromptCancel),
-    (&[Key::ctrl('v')], Command::Comment(CommentCommand::Expand)),
+    (&[Key::ctrl('v')], Command::Draft(DraftCommand::Expand)),
     (&[Key::ctrl('c')], Command::PromptCancel),
     (&[Key::code(KeyCode::Enter)], Command::PromptSubmit),
     (&[Key::alt('b')], prompt_move(PromptMotion::WordBackward)),
@@ -1115,6 +1111,69 @@ const IMAGE_VIEWER: Bindings = &[
     (&SAVE_ALL, Command::WriteAll),
 ];
 
+const fn canvas(command: JsonCanvasCommand) -> Command {
+    Command::JsonCanvas(command)
+}
+
+const fn recolor(preset: Option<Preset>) -> Command {
+    canvas(JsonCanvasCommand::Recolor(preset))
+}
+
+const CANVAS: Bindings = &[
+    (&[Key::char('d')], canvas(JsonCanvasCommand::Delete)),
+    (
+        &[Key::code(KeyCode::Delete)],
+        canvas(JsonCanvasCommand::Delete),
+    ),
+    (&[Key::char('y')], canvas(JsonCanvasCommand::Duplicate)),
+    (&[Key::char('i')], canvas(JsonCanvasCommand::Write)),
+    (
+        &[Key::code(KeyCode::Enter)],
+        canvas(JsonCanvasCommand::Write),
+    ),
+    (
+        &[Key::char('a'), Key::char('t')],
+        canvas(JsonCanvasCommand::AddText),
+    ),
+    (
+        &[Key::char('a'), Key::char('g')],
+        canvas(JsonCanvasCommand::Group),
+    ),
+    (&[Key::char('c'), Key::char('0')], recolor(None)),
+    (
+        &[Key::char('c'), Key::char('1')],
+        recolor(Some(Preset::Red)),
+    ),
+    (
+        &[Key::char('c'), Key::char('2')],
+        recolor(Some(Preset::Orange)),
+    ),
+    (
+        &[Key::char('c'), Key::char('3')],
+        recolor(Some(Preset::Yellow)),
+    ),
+    (
+        &[Key::char('c'), Key::char('4')],
+        recolor(Some(Preset::Green)),
+    ),
+    (
+        &[Key::char('c'), Key::char('5')],
+        recolor(Some(Preset::Cyan)),
+    ),
+    (
+        &[Key::char('c'), Key::char('6')],
+        recolor(Some(Preset::Purple)),
+    ),
+    (
+        &[Key::code(KeyCode::Esc)],
+        canvas(JsonCanvasCommand::Unpick),
+    ),
+    (&[Key::char('u')], Command::Undo),
+    (&[Key::char('U')], Command::Redo),
+    (&[Key::char(':')], Command::CommandMode),
+    (&SAVE_ALL, Command::WriteAll),
+];
+
 /// A paged document or board.
 const fn tool(tool: InkTool) -> Command {
     Command::Drawing(DrawingCommand::Ink(InkCommand::Tool(tool)))
@@ -1356,6 +1415,15 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         GOTO_BUFFER,
     ],
     &[
+        CANVAS,
+        SHEET,
+        SHEET_VERTICAL,
+        WORKSPACE,
+        WINDOW,
+        SPACE_WINDOW,
+        GOTO_BUFFER,
+    ],
+    &[
         DRAWING_TEXT,
         COMMON,
         NORMAL,
@@ -1398,7 +1466,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         GOTO_BUFFER,
     ],
     &[
-        COMMENT,
+        DRAFT,
         COMMON,
         NORMAL,
         VIEW,
@@ -1407,5 +1475,5 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         SPACE_WINDOW,
         GOTO_BUFFER,
     ],
-    &[COMMENT_SAVE, INSERT],
+    &[DRAFT_SAVE, INSERT],
 ];

@@ -12,6 +12,7 @@ use crate::apply;
 use crate::book::BookTab;
 use crate::drawing::{self, InkTabs, ResumeIn};
 use crate::job::Job;
+use crate::json_canvas::{Arrival, JsonCanvasTab};
 use crate::project::path::{Folder, RelPath};
 use crate::render::Opening;
 use crate::render::document::DocumentScroll;
@@ -65,6 +66,7 @@ enum Reopen {
     Drawing(drawing::Saved),
     Image(SheetView),
     Book(usize),
+    JsonCanvas(PlaneView),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -113,6 +115,9 @@ pub enum SessionView {
     },
     Book {
         item: usize,
+    },
+    JsonCanvas {
+        plane: SessionPlane,
     },
 }
 
@@ -283,6 +288,9 @@ pub fn snapshot(state: &State) -> Session {
                             Tab::Book(tab) => SessionView::Book {
                                 item: tab.scroll.at().item,
                             },
+                            Tab::JsonCanvas(tab) => SessionView::JsonCanvas {
+                                plane: tab.view.into(),
+                            },
                         },
                     })
                     .collect(),
@@ -418,6 +426,9 @@ pub fn restore(
                 }
                 SessionView::Image { sheet } => Restoring::Reopen(Reopen::Image(sheet.into())),
                 SessionView::Book { item } => Restoring::Reopen(Reopen::Book(item)),
+                SessionView::JsonCanvas { plane } => {
+                    Restoring::Reopen(Reopen::JsonCanvas(plane.into()))
+                }
             };
             let (mode, ranges, primary, scroll) = match restoring {
                 Restoring::Text(mode, ranges, primary, scroll) => (mode, ranges, primary, scroll),
@@ -434,6 +445,9 @@ pub fn restore(
                             (Reopen::Image(view), Opened::Image(id)) => {
                                 Some(Tab::Image(ImageTab::new(id, view)))
                             }
+                            (Reopen::JsonCanvas(view), Opened::JsonCanvas(id)) => Some(
+                                Tab::JsonCanvas(JsonCanvasTab::new(id, view, Arrival::AsSaved)),
+                            ),
                             (Reopen::Book(item), Opened::Book(id)) => {
                                 let last = state.books[id].flow.flow.roots.len() - 1;
                                 Some(Tab::Book(BookTab::new(id, Placed::item(item.min(last)))))
@@ -444,7 +458,8 @@ pub fn restore(
                                 | Opened::Paged(_)
                                 | Opened::Board(_)
                                 | Opened::Pdf(_)
-                                | Opened::Book(_),
+                                | Opened::Book(_)
+                                | Opened::JsonCanvas(_),
                             )
                             | (
                                 Reopen::Book(_),
@@ -452,7 +467,17 @@ pub fn restore(
                                 | Opened::Paged(_)
                                 | Opened::Board(_)
                                 | Opened::Pdf(_)
-                                | Opened::Image(_),
+                                | Opened::Image(_)
+                                | Opened::JsonCanvas(_),
+                            )
+                            | (
+                                Reopen::JsonCanvas(_),
+                                Opened::Text(_)
+                                | Opened::Paged(_)
+                                | Opened::Board(_)
+                                | Opened::Pdf(_)
+                                | Opened::Image(_)
+                                | Opened::Book(_),
                             ) => None,
                         }
                         .ok_or(wrong_kind)?,
@@ -482,7 +507,8 @@ pub fn restore(
                             | Opened::Board(_)
                             | Opened::Pdf(_)
                             | Opened::Image(_)
-                            | Opened::Book(_),
+                            | Opened::Book(_)
+                            | Opened::JsonCanvas(_),
                         ) => {
                             return Err(wrong_kind);
                         }

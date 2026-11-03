@@ -30,11 +30,11 @@ pub fn context(state: &State) -> Context {
             Overlay::None,
             Sidebar::Hidden | Sidebar::Files(Files::Editor) | Sidebar::Changes(Focus::Editor),
         ) => match (
-            state.layout.focused().active().and_then(Tab::writing),
+            state.layout.focused().active().and_then(Tab::drafting),
             state.input.mode,
         ) {
-            (Some(_), Mode::Normal) => Context::Comment,
-            (Some(_), Mode::Insert) => Context::CommentInsert,
+            (Some(_), Mode::Normal) => Context::Draft,
+            (Some(_), Mode::Insert) => Context::DraftInsert,
             (Some(_), Mode::Select) => Context::Select,
             (None, _) => match state.layout.focused().active() {
                 Some(Tab::Ink(ink)) => match (ink.typed(), state.input.mode) {
@@ -54,6 +54,7 @@ pub fn context(state: &State) -> Context {
                     (Some(_), Mode::Insert | Mode::Select) => mode_context(state),
                 },
                 Some(Tab::Image(_)) => Context::ImageViewer,
+                Some(Tab::JsonCanvas(_)) => Context::JsonCanvas,
                 Some(Tab::Book(_)) => Context::Book,
                 Some(Tab::Text(text)) => match text.showing() {
                     Showing::Document(_, _, Beside::Alone) => Context::Document,
@@ -89,11 +90,11 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
         (Some(pending), context) => {
             complete_pending(state, pending, key, out);
             match context {
-                Context::Insert | Context::CommentInsert => state.input.last_insert.keys.push(key),
+                Context::Insert | Context::DraftInsert => state.input.last_insert.keys.push(key),
                 _ => {}
             }
         }
-        (None, context @ (Context::Insert | Context::CommentInsert)) => {
+        (None, context @ (Context::Insert | Context::DraftInsert)) => {
             if let Some(command) = step(state, context, key) {
                 run(state, command, out);
             }
@@ -101,7 +102,7 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
         }
         (
             None,
-            context @ (Context::Normal | Context::Select | Context::DrawingText | Context::Comment),
+            context @ (Context::Normal | Context::Select | Context::DrawingText | Context::Draft),
         ) => {
             let digit = match key.code {
                 KeyCode::Char(c) if key.mods.is_empty() && state.input.pending.len == 0 => {
@@ -150,6 +151,7 @@ pub fn key(state: &mut State, key: Key, out: &mut Vec<Effect>) {
             | Context::Pages
             | Context::Drawing
             | Context::ImageViewer
+            | Context::JsonCanvas
             | Context::PdfRead
             | Context::PdfMarkup
             | Context::Book),
@@ -342,7 +344,7 @@ pub fn text(state: &mut State, text: &str, out: &mut Vec<Effect>) {
 /// The command inserting `c` in contexts that take typed text.
 pub fn typed(context: Context, c: char) -> Option<Command> {
     match context {
-        Context::Insert | Context::CommentInsert => Some(Command::InsertChar(c)),
+        Context::Insert | Context::DraftInsert => Some(Command::InsertChar(c)),
         Context::Prompt => Some(Command::PromptInsert(c)),
         Context::Picker => Some(Command::Picker(PickerCommand::Insert(c))),
         Context::TreeInput => Some(Command::Tree(TreeCommand::EditInsert(c))),
@@ -355,10 +357,11 @@ pub fn typed(context: Context, c: char) -> Option<Command> {
         | Context::Pages
         | Context::Drawing
         | Context::ImageViewer
+        | Context::JsonCanvas
         | Context::PdfRead
         | Context::PdfMarkup
         | Context::Book
-        | Context::Comment
+        | Context::Draft
         | Context::DrawingText => None,
     }
 }

@@ -8,6 +8,7 @@ mod editing;
 mod git;
 #[path = "../support/harness.rs"]
 mod harness;
+mod json_canvas;
 mod loading;
 mod mouse;
 mod pdf;

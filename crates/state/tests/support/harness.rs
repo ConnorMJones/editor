@@ -320,6 +320,7 @@ impl Harness {
                     Tab::Ink(_) => "✎",
                     Tab::Image(_) => "▣",
                     Tab::Book(_) => "❧",
+                    Tab::JsonCanvas(_) => "◫",
                 };
                 match preview == Some(index) {
                     true => format!("{kind}{name}*"),

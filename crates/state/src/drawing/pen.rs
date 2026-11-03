@@ -110,7 +110,7 @@ pub fn pen(state: &mut State, pane: PaneId, phase: PenPhase, sample: PenSample) 
                 |board, layer| frame::board(board, &view, viewport).land::<Board>(at, layer),
             )
         }
-        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => Ok(()),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None => Ok(()),
     };
     match result {
         Ok(()) => {}

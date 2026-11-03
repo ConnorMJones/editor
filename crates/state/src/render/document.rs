@@ -180,6 +180,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         figures,
         documents,
         books,
+        json_canvases,
         ..
     } = state;
     let before = documents.len();
@@ -254,7 +255,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     }
     match parses {
         Parses::Kept => {}
-        Parses::Changed => typeset::mark(figures, documents, books, out),
+        Parses::Changed => typeset::mark(figures, documents, books, json_canvases, out),
     }
     for entry in &shown {
         let doc = &buffers[entry.buffer].doc;
@@ -367,7 +368,7 @@ pub fn command(state: &mut State, command: DocumentCommand) {
         Some(Tab::Book(tab)) => (books[tab.file()].flow.flow)
             .heading(tab.scroll.at(), direction)
             .map(|item| tab.scroll = Placed::item(item)),
-        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None => {
+        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::JsonCanvas(_)) | None => {
             let Some((text, view, _)) = layout.document_mut(focus) else {
                 return;
             };

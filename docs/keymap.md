@@ -57,7 +57,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space l` | normal, select, document, pages | Backlinks |
 | `:export-pdf` | typst | Export to PDF |
 
-## Drawings, images, PDFs and books
+## Drawings, images, PDFs, books and canvases
 
 | Keys | Context | Action |
 | --- | --- | --- |
@@ -76,18 +76,18 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space l h` / `space l n` | drawing | Hide / add a layer |
 | `space i`, `:image <path>` | drawing, note | Insert an image |
 | `space p`, `:paste-image` | drawing, note | Paste an image |
-| `+` / `-` / `=` | pages, drawing, image, PDF | Zoom in / out / fit |
-| `zf` | pages, drawing, image, PDF | Fit width / height |
-| `h j k l`, arrows | pages, drawing, image, PDF | Pan |
+| `+` / `-` / `=` | pages, drawing, image, PDF, canvas | Zoom in / out / fit |
+| `zf` | pages, drawing, image, PDF, canvas | Fit width / height |
+| `h j k l`, arrows | pages, drawing, image, PDF, canvas | Pan |
 | `:export-pdf` / `:export-svg` / `:export-png` | drawing | Export |
 | `v` | PDF, book | Highlight |
 | `i` | PDF, book | Highlight with a comment / edit the comment |
 | `I` | PDF, book | Write the comment beside the page |
 | `C-v` | comment prompt | Move to the full view |
 | `esc` | comment | Save and close |
-| `C-s`, `:w` | comment | Save |
-| `space q` | comment | Close without saving |
-| `space v` | comment | Full / split |
+| `C-s`, `:w` | comment, card | Save |
+| `space q` | comment, card | Close without saving |
+| `space v` | comment, card | Full / split |
 | `d` | PDF, book | Delete the highlight |
 | `y` | PDF, book | Copy |
 | `esc` | PDF, book | Clear the selection |
@@ -101,6 +101,19 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `:flatten` | PDF | Flatten the markup |
 | `:export-notes` | PDF, book | Write annotations to a note beside it |
 | `]]` / `[[` | book | Next / previous heading |
+| `d`, `del` | canvas | Delete |
+| `y` | canvas | Duplicate |
+| `at`, double click | canvas | New text card |
+| `i`, `ret`, double click | canvas | Write in the card |
+| `esc` | card | Keep the text and close |
+| `C-v` | card | In the card / beside |
+| `ag` | canvas | Group the selection |
+| drag a side dot | canvas | Connect |
+| `c1` … `c6` / `c0` | canvas | Colour / no colour |
+| `u` / `U` | canvas | Undo / redo |
+| `esc` | canvas | Clear the selection |
+| shift click | canvas | Add to the selection |
+| alt drag | canvas | Move without the grid |
 
 ## Typed commands (`:`)
 
@@ -645,7 +658,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | Keys | Command |
 | --- | --- |
 | `esc` | `PromptCancel` |
-| `C-v` | `Comment(Expand)` |
+| `C-v` | `Draft(Expand)` |
 | `C-c` | `PromptCancel` |
 | `ret` | `PromptSubmit` |
 | `A-b` | `Prompt(Move(WordBackward))` |
@@ -1052,6 +1065,77 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 
 | Keys | Command |
 | --- | --- |
+| `:` | `CommandMode` |
+| `C-k C-s` | `WriteAll` |
+| `+` | `View(Zoom(In))` |
+| `-` | `View(Zoom(Out))` |
+| `=` | `View(Zoom(Reset))` |
+| `z f` | `View(Fit)` |
+| `h` | `View(Pan(Left))` |
+| `left` | `View(Pan(Left))` |
+| `l` | `View(Pan(Right))` |
+| `right` | `View(Pan(Right))` |
+| `k` | `View(Pan(Up))` |
+| `up` | `View(Pan(Up))` |
+| `j` | `View(Pan(Down))` |
+| `down` | `View(Pan(Down))` |
+| `space e` | `Tree(Toggle)` |
+| `space f` | `Picker(Open(Files))` |
+| `space i` | `Picker(Open(Images))` |
+| `space b` | `Picker(Open(Buffers))` |
+| `space /` | `Picker(Open(Grep))` |
+| `space ?` | `Picker(Open(Commands))` |
+| `space g` | `Changes(Toggle)` |
+| `C-w v` | `Window(Split(Row))` |
+| `C-w s` | `Window(Split(Column))` |
+| `C-w w` | `Window(FocusNext)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w q` | `Window(Close)` |
+| `C-w o` | `Window(Only)` |
+| `space w v` | `Window(Split(Row))` |
+| `space w s` | `Window(Split(Column))` |
+| `space w w` | `Window(FocusNext)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w q` | `Window(Close)` |
+| `space w o` | `Window(Only)` |
+| `g n` | `CycleBuffer(Next)` |
+| `g p` | `CycleBuffer(Previous)` |
+
+## JsonCanvas
+
+| Keys | Command |
+| --- | --- |
+| `d` | `JsonCanvas(Delete)` |
+| `del` | `JsonCanvas(Delete)` |
+| `y` | `JsonCanvas(Duplicate)` |
+| `i` | `JsonCanvas(Write)` |
+| `ret` | `JsonCanvas(Write)` |
+| `a t` | `JsonCanvas(AddText)` |
+| `a g` | `JsonCanvas(Group)` |
+| `c 0` | `JsonCanvas(Recolor(None))` |
+| `c 1` | `JsonCanvas(Recolor(Some(Red)))` |
+| `c 2` | `JsonCanvas(Recolor(Some(Orange)))` |
+| `c 3` | `JsonCanvas(Recolor(Some(Yellow)))` |
+| `c 4` | `JsonCanvas(Recolor(Some(Green)))` |
+| `c 5` | `JsonCanvas(Recolor(Some(Cyan)))` |
+| `c 6` | `JsonCanvas(Recolor(Some(Purple)))` |
+| `esc` | `JsonCanvas(Unpick)` |
+| `u` | `Undo` |
+| `U` | `Redo` |
 | `:` | `CommandMode` |
 | `C-k C-s` | `WriteAll` |
 | `+` | `View(Zoom(In))` |
@@ -1547,14 +1631,15 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
 
-## Comment
+## Draft
 
 | Keys | Command |
 | --- | --- |
-| `esc` | `Comment(Finish)` |
+| `C-v` | `Draft(Expand)` |
+| `esc` | `Draft(Finish)` |
 | `C-s` | `Write` |
-| `space q` | `Comment(Drop)` |
-| `space v` | `Comment(Swap)` |
+| `space q` | `Draft(Drop)` |
+| `space v` | `Draft(Swap)` |
 | `C-w <` | `ResizeSplit(Narrow)` |
 | `C-w >` | `ResizeSplit(Widen)` |
 | `C-w =` | `ResizeSplit(Even)` |
@@ -1773,7 +1858,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
 
-## CommentInsert
+## DraftInsert
 
 | Keys | Command |
 | --- | --- |

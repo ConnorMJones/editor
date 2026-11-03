@@ -2,6 +2,7 @@ mod budget;
 mod drawing;
 mod fonts;
 mod input;
+mod json_canvas;
 mod page_tiles;
 mod pane_space;
 mod pictures;
@@ -40,7 +41,7 @@ use state::{Launch, State, project::session, project::watch};
 use typeset::{FontSource, Typesetter};
 
 use crate::fonts::Fonts;
-use crate::workspace::{Drag, SessionFile, Workspace};
+use crate::workspace::{Drag, SessionFile, TreeDrop, Workspace};
 
 #[cfg(any(debug_assertions, feature = "tracy"))]
 const LOG: &str = "info,simplecss=error";
@@ -233,6 +234,7 @@ fn main() -> anyhow::Result<()> {
                         session: session_file,
                         drag: Drag::Idle,
                         drop_zone: None,
+                        tree_drop: TreeDrop::Away,
                         resize_edge: None,
                         areas: Default::default(),
                         tab_scroll: Default::default(),

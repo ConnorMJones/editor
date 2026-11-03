@@ -97,9 +97,9 @@ pub fn show(state: &mut State, shown: Shown) {
 
 /// `C-w <`, `C-w >`, `C-w =`: the focused split's source side narrower, wider or even.
 pub fn resize(state: &mut State, resize: Resize) {
-    match (state.layout.focused_mut().active_mut()).and_then(Tab::writing_mut) {
-        Some(writing) => return writing.share = writing.share.resized(resize),
-        None => {}
+    match (state.layout.focused_mut().active_mut()).and_then(Tab::drafting_mut) {
+        Some((_, Some(beside))) => return beside.share = beside.share.resized(resize),
+        Some((_, None)) | None => {}
     }
     match (state.layout.focused_mut().active_text_mut()).map(TextTabs::showing_mut) {
         Some(
@@ -120,10 +120,10 @@ pub fn resize(state: &mut State, resize: Resize) {
 pub fn drag(state: &mut State, pane: PaneId, share: Share) {
     match (state.layout.find_pane(pane))
         .and_then(Pane::active_mut)
-        .and_then(Tab::writing_mut)
+        .and_then(Tab::drafting_mut)
     {
-        Some(writing) => return writing.share = share,
-        None => {}
+        Some((_, Some(beside))) => return beside.share = share,
+        Some((_, None)) | None => {}
     }
     match (state.layout.find_pane(pane))
         .and_then(Pane::active_text_mut)

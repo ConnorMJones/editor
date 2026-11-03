@@ -239,7 +239,7 @@ pub fn triangle_distance<S>(point: Point<S>, corners: [Point<S>; 3]) -> f32 {
     })
 }
 
-fn segment_distance<S>(point: Point<S>, from: Point<S>, to: Point<S>) -> f32 {
+pub fn segment_distance<S>(point: Point<S>, from: Point<S>, to: Point<S>) -> f32 {
     let along = to - from;
     let length = along.dot(along);
     // A segment of no length is its one point.

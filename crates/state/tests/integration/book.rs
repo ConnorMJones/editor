@@ -118,7 +118,9 @@ fn opened() -> (tempfile::TempDir, PathBuf, Harness) {
 fn tab(h: &Harness) -> &BookTab {
     match h.state.layout.focused().active() {
         Some(Tab::Book(tab)) => tab,
-        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_)) | None => panic!("a book is focused"),
+        Some(Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::JsonCanvas(_)) | None => {
+            panic!("a book is focused")
+        }
     }
 }
 

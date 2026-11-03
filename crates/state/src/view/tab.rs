@@ -5,6 +5,7 @@ use model::command::{Direction, Resize, Shown};
 use crate::book::{BookId, BookTab};
 use crate::drawing::{self, BoardId, InkTabs, PagedId, PdfId};
 use crate::git::diffview::DiffSides;
+use crate::json_canvas::{Arrival, JsonCanvasId, JsonCanvasTab};
 use crate::project::path::TextKind;
 use crate::render::document::Placed;
 use crate::render::document::{DocumentSeen, DocumentState};
@@ -351,6 +352,7 @@ pub enum Opened {
     Pdf(PdfId),
     Image(ImageId),
     Book(BookId),
+    JsonCanvas(JsonCanvasId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,6 +361,7 @@ pub enum Writable {
     Paged(PagedId),
     Board(BoardId),
     Pdf(PdfId),
+    JsonCanvas(JsonCanvasId),
 }
 
 impl Opened {
@@ -368,6 +371,7 @@ impl Opened {
             Opened::Paged(id) => Some(Writable::Paged(id)),
             Opened::Board(id) => Some(Writable::Board(id)),
             Opened::Pdf(id) => Some(Writable::Pdf(id)),
+            Opened::JsonCanvas(id) => Some(Writable::JsonCanvas(id)),
             Opened::Image(_) | Opened::Book(_) => None,
         }
     }
@@ -380,6 +384,7 @@ impl From<Writable> for Opened {
             Writable::Paged(id) => Opened::Paged(id),
             Writable::Board(id) => Opened::Board(id),
             Writable::Pdf(id) => Opened::Pdf(id),
+            Writable::JsonCanvas(id) => Opened::JsonCanvas(id),
         }
     }
 }
@@ -389,6 +394,7 @@ pub enum Tab {
     Ink(InkTabs),
     Image(ImageTab),
     Book(BookTab),
+    JsonCanvas(JsonCanvasTab),
 }
 
 impl Tab {
@@ -398,20 +404,21 @@ impl Tab {
             Tab::Ink(ink) => ink.opened(),
             Tab::Image(image) => Opened::Image(image.file()),
             Tab::Book(book) => Opened::Book(book.file()),
+            Tab::JsonCanvas(canvas) => Opened::JsonCanvas(canvas.file()),
         }
     }
 
     pub fn as_text(&self) -> Option<&TextTabs> {
         match self {
             Tab::Text(text) => Some(text),
-            Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) => None,
+            Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_) => None,
         }
     }
 
     pub fn as_text_mut(&mut self) -> Option<&mut TextTabs> {
         match self {
             Tab::Text(text) => Some(text),
-            Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) => None,
+            Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_) => None,
         }
     }
 }
@@ -425,6 +432,9 @@ impl Tab {
             Opened::Pdf(id) => Tab::Ink(drawing::open_pdf(state, id)),
             Opened::Image(id) => Tab::Image(ImageTab::open(id)),
             Opened::Book(id) => Tab::Book(BookTab::new(id, Placed::item(0))),
+            Opened::JsonCanvas(id) => {
+                Tab::JsonCanvas(JsonCanvasTab::open(id, &state.json_canvases[id]))
+            }
         }
     }
 
@@ -434,6 +444,11 @@ impl Tab {
             Tab::Ink(ink) => Tab::Ink(ink.copy()),
             Tab::Image(image) => Tab::Image(image.copy()),
             Tab::Book(book) => Tab::Book(book.copy()),
+            Tab::JsonCanvas(canvas) => Tab::JsonCanvas(JsonCanvasTab::new(
+                canvas.file(),
+                canvas.view,
+                Arrival::AsSaved,
+            )),
         }
     }
 }

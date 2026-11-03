@@ -62,6 +62,16 @@ pub fn changed(state: &mut State, paths: Vec<PathBuf>, out: &mut Vec<Effect>) {
                 policy: ReloadPolicy::KeepEdits,
             }));
         }
+        for (file, canvas) in &state.json_canvases {
+            let wanted: Vec<_> = (canvas.files.iter())
+                .filter(|(_, embedded)| embedded.path() == path)
+                .map(|(node, _)| (node.clone(), path.clone()))
+                .collect();
+            match wanted.as_slice() {
+                [] => {}
+                _ => out.push(Effect::Job(Job::JsonCanvasFiles { file, wanted })),
+            }
+        }
         match &state.project.git {
             Repo::Found { git_dir, .. } if path.starts_with(git_dir) => {
                 refresh_git = true;

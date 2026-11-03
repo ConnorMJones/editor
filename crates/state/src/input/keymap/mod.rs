@@ -24,16 +24,17 @@ pub enum Context {
     Pages,
     Drawing,
     ImageViewer,
+    JsonCanvas,
     DrawingText,
     PdfRead,
     PdfMarkup,
     Book,
-    Comment,
-    CommentInsert,
+    Draft,
+    DraftInsert,
 }
 
 impl Context {
-    pub const COUNT: usize = 19;
+    pub const COUNT: usize = 20;
     pub const ALL: [Context; Context::COUNT] = [
         Context::Normal,
         Context::Insert,
@@ -48,12 +49,13 @@ impl Context {
         Context::Pages,
         Context::Drawing,
         Context::ImageViewer,
+        Context::JsonCanvas,
         Context::DrawingText,
         Context::PdfRead,
         Context::PdfMarkup,
         Context::Book,
-        Context::Comment,
-        Context::CommentInsert,
+        Context::Draft,
+        Context::DraftInsert,
     ];
 }
 
@@ -157,12 +159,13 @@ impl Keymap {
             pages,
             drawing,
             image_viewer,
+            canvas,
             drawing_text,
             pdf_read,
             pdf_markup,
             book,
-            comment,
-            comment_insert,
+            draft,
+            draft_insert,
         ] = Context::ALL;
         Ok(Keymap {
             tries: [
@@ -179,12 +182,13 @@ impl Keymap {
                 build_trie(pages)?,
                 build_trie(drawing)?,
                 build_trie(image_viewer)?,
+                build_trie(canvas)?,
                 build_trie(drawing_text)?,
                 build_trie(pdf_read)?,
                 build_trie(pdf_markup)?,
                 build_trie(book)?,
-                build_trie(comment)?,
-                build_trie(comment_insert)?,
+                build_trie(draft)?,
+                build_trie(draft_insert)?,
             ],
         })
     }

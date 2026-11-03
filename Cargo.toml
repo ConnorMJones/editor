@@ -13,6 +13,7 @@ license = "GPL-3.0-or-later"
 cli = { path = "crates/cli" }
 export = { path = "crates/export" }
 reader = { path = "crates/reader" }
+jsoncanvas = { path = "crates/jsoncanvas" }
 library = { path = "crates/library" }
 ink = { path = "crates/ink" }
 model = { path = "crates/model" }

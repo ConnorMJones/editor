@@ -12,8 +12,10 @@ use slotmap::SlotMap;
 
 use crate::State;
 use crate::book::BookTab;
+use crate::draft::Draft;
 use crate::drawing::{InkTabs, PdfMode, PdfTab};
 use crate::git::diffview::{self, Right};
+use crate::json_canvas::{Doing, JsonCanvasTab};
 use crate::reading::Reading;
 use crate::text::buffer::{Buffer, BufferId, HistoryStep, TextDoc, Uncommitted};
 use crate::view::layout::{Edited, Editing, Layout};
@@ -71,7 +73,7 @@ impl Edited<'_> {
     pub fn buffer(&self) -> Option<BufferId> {
         match self {
             Edited::Buffer { buffer, .. } => Some(*buffer),
-            Edited::Mark | Edited::Comment { .. } => None,
+            Edited::Mark | Edited::Draft { .. } => None,
         }
     }
 }
@@ -90,17 +92,13 @@ pub fn focused<'a>(
             mode: PdfMode::Read(Reading::Writing(writing)),
             ..
         }))) => {
-            return Focused::Text(FocusedText {
-                view: Editing {
-                    selection: &mut writing.selection,
-                    edited: Edited::Comment {
-                        scroll: &mut writing.scroll,
-                    },
-                },
-                doc: &mut writing.doc,
-            });
+            return Focused::Text(drafted(&mut writing.draft));
         }
-        Some(Tab::Image(_) | Tab::Book(_)) => return Focused::NotText,
+        Some(Tab::JsonCanvas(JsonCanvasTab {
+            doing: Doing::Writing(writing),
+            ..
+        })) => return Focused::Text(drafted(&mut writing.draft)),
+        Some(Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) => return Focused::NotText,
         Some(Tab::Ink(ink)) => {
             return match ink.text_box() {
                 Some(text) => Focused::Text(FocusedText {
@@ -127,6 +125,18 @@ pub fn focused<'a>(
             doc: &mut buffer.doc,
         }),
         Right::Deleted => Focused::ReadOnly,
+    }
+}
+
+fn drafted(draft: &mut Draft) -> FocusedText<'_> {
+    FocusedText {
+        view: Editing {
+            selection: &mut draft.selection,
+            edited: Edited::Draft {
+                scroll: &mut draft.scroll,
+            },
+        },
+        doc: &mut draft.doc,
     }
 }
 

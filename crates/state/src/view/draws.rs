@@ -15,7 +15,7 @@ pub enum Part {
     Head,
     /// A diff's buffer side, which takes the keys.
     Buffer,
-    Comment,
+    Draft,
 }
 
 #[derive(Clone, Copy)]
@@ -75,14 +75,14 @@ impl<'a> Rows<'a> {
 
 pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
     let active = state.layout.panes().get(pane).and_then(Pane::active);
-    match (part, active.and_then(Tab::writing)) {
-        (Part::Comment, Some(writing)) => {
-            let doc = &writing.doc;
+    match (part, active.and_then(Tab::drafting)) {
+        (Part::Draft, Some((draft, _))) => {
+            let doc = &draft.doc;
             let lines = doc.text.len_lines();
             return Drawing {
                 draws: Draws::Editable {
-                    selection: &writing.selection,
-                    scroll: writing.scroll,
+                    selection: &draft.selection,
+                    scroll: draft.scroll,
                     doc,
                     rows: Rows::Conflicts(conflict::current(doc)),
                     tracked: None,
@@ -91,7 +91,7 @@ pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
                 lines,
             };
         }
-        (Part::Comment, None) | (Part::Text | Part::Head | Part::Buffer, _) => {}
+        (Part::Draft, None) | (Part::Text | Part::Head | Part::Buffer, _) => {}
     }
     let Some(tab) = state.layout.panes().get(pane).and_then(Pane::active_text) else {
         return Drawing {
@@ -155,7 +155,7 @@ pub fn drawing(state: &State, pane: PaneId, part: Part) -> Drawing<'_> {
             Part::Buffer | Part::Head,
             Showing::Source(_) | Showing::Document(..) | Showing::Pages(..),
         )
-        | (Part::Comment, _) => Draws::Absent,
+        | (Part::Draft, _) => Draws::Absent,
     };
     Drawing {
         draws,

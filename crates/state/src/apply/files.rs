@@ -21,6 +21,7 @@ use crate::job::{
     Data, DiskRead, Job, Missed, NotUtf8, OnChange, OpenRead, ReloadIf, ReloadPolicy, Reloaded,
     Saving, Written, read_file,
 };
+use crate::json_canvas::JsonCanvasFile;
 use crate::project::path::FileKind;
 use crate::reading::{self, ReaderId, Reading};
 use crate::render::typeset;
@@ -75,6 +76,11 @@ pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
         Ok(()) => {}
         Err(refused) => state.notice = Some(refused),
     }
+    let canvas = |id| opened == Opened::JsonCanvas(id);
+    match crate::json_canvas::keep_drafts(&mut state.layout, &mut state.json_canvases, canvas) {
+        Ok(()) => {}
+        Err(refused) => state.notice = Some(refused),
+    }
     state.layout.keep(file.into());
     let path = state.path_of(file.into()).to_owned();
     let write = |saving, data| Job::Write {
@@ -111,12 +117,22 @@ pub fn write_job(state: &mut State, file: Writable, dirs: Dirs) -> Job {
             let how = crate::job::PdfWriting::Save;
             crate::drawing::markup::write(id, &state.pdfs[id], &state.fonts, how)
         }
+        Writable::JsonCanvas(file) => {
+            let edited = &state.json_canvases[file].edited;
+            let bytes = jsoncanvas::write(edited.canvas()).into_bytes();
+            let revision = edited.revision();
+            write(Saving::JsonCanvas { file, revision }, Data::Bytes(bytes))
+        }
     }
 }
 
 /// Writes every modified file, returning what is being written.
 pub fn write_modified(state: &mut State, out: &mut Vec<Effect>) -> Vec<Opened> {
     match crate::drawing::typing::settle_on(state, |_| true) {
+        Ok(()) => {}
+        Err(refused) => state.notice = Some(refused),
+    }
+    match crate::json_canvas::keep_drafts(&mut state.layout, &mut state.json_canvases, |_| true) {
         Ok(()) => {}
         Err(refused) => state.notice = Some(refused),
     }
@@ -140,7 +156,8 @@ pub fn reload_job(state: &mut State, opened: Opened) -> Job {
         | Opened::Board(_)
         | Opened::Pdf(_)
         | Opened::Image(_)
-        | Opened::Book(_) => {}
+        | Opened::Book(_)
+        | Opened::JsonCanvas(_) => {}
     }
     Job::Reload {
         file: state.reload_of(opened),
@@ -231,6 +248,11 @@ fn insert(
                 state.books.insert(BookFile::new(&path, read, disk)),
             ))
         }
+        OpenRead::JsonCanvas { read, disk } => Ok(Opened::JsonCanvas(
+            state
+                .json_canvases
+                .insert(JsonCanvasFile::new(&path, read, disk)),
+        )),
         OpenRead::NotUtf8 => Err(Notice::NotUtf8 { path }),
         OpenRead::NotAFile => Err(Notice::NotAFile { path }),
         OpenRead::Failed(error) => Err(Notice::OpenFailed { path, error }),
@@ -256,6 +278,7 @@ pub fn load(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result<Fou
             out.push(Effect::Job(Job::Open {
                 read,
                 path,
+                root: state.project.root.path().to_owned(),
                 languages: state.languages.clone(),
                 fonts: state.fonts.clone(),
                 library: state.library.clone(),
@@ -271,7 +294,13 @@ pub fn read_now(state: &mut State, path: &Path, out: &mut Vec<Effect>) -> Result
     match open_file(state, &path) {
         Some(opened) => Ok(opened),
         None => {
-            let read = read_file(&path, &state.languages, &state.fonts, &state.library);
+            let read = read_file(
+                &path,
+                state.project.root.path(),
+                &state.languages,
+                &state.fonts,
+                &state.library,
+            );
             insert(state, path, read, out)
         }
     }
@@ -326,7 +355,8 @@ fn show(state: &mut State, opened: Opened, waiter: Waiter) {
             | Opened::Board(_)
             | Opened::Pdf(_)
             | Opened::Image(_)
-            | Opened::Book(_),
+            | Opened::Book(_)
+            | Opened::JsonCanvas(_),
         )
         | (None, _) => {}
     }
@@ -440,6 +470,13 @@ pub fn written(
                     }
                     None => {}
                 },
+                Saving::JsonCanvas { file, revision } => match state.json_canvases.get_mut(file) {
+                    Some(entry) => {
+                        entry.saved = revision;
+                        entry.disk = disk;
+                    }
+                    None => {}
+                },
             }
             state.notice = Some(Notice::Written { path, bytes });
             request_git(state, out);
@@ -464,6 +501,7 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
         pdfs,
         images,
         books,
+        json_canvases,
         figures,
         layout,
         languages,
@@ -593,9 +631,38 @@ pub fn reloaded(state: &mut State, read: Reloaded, policy: ReloadPolicy) {
                                     tab.reading = Reading::Idle;
                                     tab.found = reading::Found::Nothing;
                                 }
-                                Tab::Book(_) | Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) => {}
+                                Tab::Book(_)
+                                | Tab::JsonCanvas(_)
+                                | Tab::Text(_)
+                                | Tab::Ink(_)
+                                | Tab::Image(_) => {}
                             }
                         }
+                    }
+                }
+                DiskRead::Unreadable(error) => {
+                    *notice = Some(Notice::Unreadable {
+                        path: file.path.to_path_buf(),
+                        reason: error.to_string(),
+                    })
+                }
+                DiskRead::Missed(missed_read) => {
+                    missed(missed_read, &file.path, &mut file.disk, notice)
+                }
+            },
+            None => {}
+        },
+        Reloaded::JsonCanvas(id, read) => match json_canvases.get_mut(id) {
+            Some(file) => match read {
+                DiskRead::Changed { content, mtime } => {
+                    match policy.on_change(file.is_modified()) {
+                        OnChange::Flag => {
+                            file.disk = Disk::ChangedExternally { mtime };
+                            *notice = Some(Notice::ChangedOnDisk {
+                                path: file.path.to_path_buf(),
+                            });
+                        }
+                        OnChange::Replace => file.replace(content, Disk::Synced { mtime }),
                     }
                 }
                 DiskRead::Unreadable(error) => {
@@ -680,7 +747,7 @@ fn drawing_tabs(layout: &mut Layout, opened: Opened) -> impl Iterator<Item = &mu
         .flat_map(|(_, pane)| pane.items_mut())
         .filter_map(move |item| match &mut item.tab {
             Tab::Ink(ink) if ink.opened() == opened => Some(ink),
-            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) => None,
+            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_) => None,
         })
 }
 
@@ -717,9 +784,19 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
             entry.path = path;
             entry.disk = Disk::New;
         }
+        (Writable::JsonCanvas(id), FileKind::JsonCanvas) => {
+            let entry = &mut state.json_canvases[id];
+            entry.path = path.into();
+            entry.disk = Disk::New;
+        }
         (
             Writable::Text(_),
-            FileKind::Paged | FileKind::Board | FileKind::Pdf | FileKind::Book | FileKind::Image(_),
+            FileKind::Paged
+            | FileKind::Board
+            | FileKind::Pdf
+            | FileKind::Book
+            | FileKind::JsonCanvas
+            | FileKind::Image(_),
         )
         | (
             Writable::Paged(_),
@@ -727,6 +804,7 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
             | FileKind::Board
             | FileKind::Pdf
             | FileKind::Book
+            | FileKind::JsonCanvas
             | FileKind::Image(_),
         )
         | (
@@ -735,6 +813,7 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
             | FileKind::Paged
             | FileKind::Pdf
             | FileKind::Book
+            | FileKind::JsonCanvas
             | FileKind::Image(_),
         )
         | (
@@ -742,6 +821,16 @@ pub fn renamed(state: &mut State, file: Writable, path: PathBuf) -> Result<Writa
             FileKind::Text(_)
             | FileKind::Paged
             | FileKind::Board
+            | FileKind::Book
+            | FileKind::JsonCanvas
+            | FileKind::Image(_),
+        )
+        | (
+            Writable::JsonCanvas(_),
+            FileKind::Text(_)
+            | FileKind::Paged
+            | FileKind::Board
+            | FileKind::Pdf
             | FileKind::Book
             | FileKind::Image(_),
         ) => {

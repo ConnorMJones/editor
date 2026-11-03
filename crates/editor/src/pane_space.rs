@@ -36,8 +36,9 @@ pub fn report_measure(
         Some(_) | None => {
             let workspace = workspace.clone();
             window.defer(cx, move |_, cx| {
-                workspace.update(cx, |workspace, _| {
-                    state::view::sheet::measured(&mut workspace.state, pane, measure)
+                workspace.update(cx, |workspace, cx| {
+                    state::view::sheet::measured(&mut workspace.state, pane, measure);
+                    cx.notify();
                 })
             });
         }

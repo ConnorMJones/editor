@@ -265,7 +265,7 @@ fn links_follow_urls_headings_and_notes() {
     h.run(|state, out| {
         links::follow(
             state,
-            buffer,
+            links::LinkFrom::Note(buffer),
             &LinkTarget::Url("https://a.org".into()),
             origin,
             out,
@@ -273,7 +273,7 @@ fn links_follow_urls_headings_and_notes() {
     });
     assert_eq!(h.urls, ["https://a.org"]);
     let heading = LinkTarget::Heading("three".into());
-    h.run(|state, out| links::follow(state, buffer, &heading, origin, out));
+    h.run(|state, out| links::follow(state, links::LinkFrom::Note(buffer), &heading, origin, out));
     let focus = h.state.layout.focus();
     assert_eq!(rendered_in(&h, focus).scroll, DocumentScroll::item(6));
     let wiki = LinkTarget::Wiki(WikiLink {
@@ -281,13 +281,13 @@ fn links_follow_urls_headings_and_notes() {
         heading: None,
         alias: None,
     });
-    h.run(|state, out| links::follow(state, buffer, &wiki, origin, out));
+    h.run(|state, out| links::follow(state, links::LinkFrom::Note(buffer), &wiki, origin, out));
     assert_eq!(h.focused_tabs(), ["◉note.md", "◉other.md"]);
     let missing = LinkTarget::Path {
         path: "nope.md".into(),
         heading: None,
     };
-    h.run(|state, out| links::follow(state, buffer, &missing, origin, out));
+    h.run(|state, out| links::follow(state, links::LinkFrom::Note(buffer), &missing, origin, out));
     assert_eq!(
         h.confirm(),
         Some(&Confirm::Create(RelPath::parse("nope.md").unwrap()))

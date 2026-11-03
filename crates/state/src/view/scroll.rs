@@ -336,12 +336,12 @@ pub fn pane_text<'a>(
     let tab = match layout.find_pane(pane)?.active_mut()? {
         Tab::Text(tab) => tab,
         other => {
-            let writing = other.writing_mut()?;
+            let (draft, _) = other.drafting_mut()?;
             return Some(Pointed {
-                selection: &mut writing.selection,
-                scroll: &mut writing.scroll,
-                doc: &writing.doc,
-                padding: crate::git::conflict::padding(&writing.doc),
+                selection: &mut draft.selection,
+                scroll: &mut draft.scroll,
+                doc: &draft.doc,
+                padding: crate::git::conflict::padding(&draft.doc),
                 right: Right::Live,
             });
         }

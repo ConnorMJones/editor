@@ -183,7 +183,7 @@ fn rendered_views_follow_into_rendered_notes_at_headings() {
     h.run(|state, out| {
         state::project::links::follow(
             state,
-            buffer,
+            state::project::links::LinkFrom::Note(buffer),
             &target,
             state::project::links::Origin::Document(pane),
             out,

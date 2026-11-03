@@ -20,7 +20,8 @@ use model::markdown::CalloutKind;
 use model::theme::{Modifiers, Theme};
 use state::State;
 use state::book::BookId;
-use state::project::links::{self, Origin as LinkOrigin, Resolution};
+use state::json_canvas::JsonCanvasId;
+use state::project::links::{self, LinkFrom, Origin as LinkOrigin, Resolution};
 use state::render::book::{Align, BookTarget, InChapter, Layout, NoTask};
 use state::render::document::BlockClick;
 use state::render::flow::{Flow, Lines, Origin};
@@ -73,18 +74,43 @@ pub trait Drawable: Origin + Sized + 'static {
     fn own(draw: &Draw<Self>, index: usize, own: &Self::Own, ink: Ink) -> AnyElement;
 }
 
-impl Drawable for Lines {
-    type Key = BufferId;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKey {
+    Buffer(BufferId),
+    Card(JsonCanvasId, usize),
+}
 
-    fn flow(state: &State, buffer: BufferId) -> Option<&Flow<Lines>> {
-        let doc = &state.buffers.get(buffer)?.doc;
-        state::render::document::markdown(&state.documents, buffer, doc).map(|parsed| &parsed.flow)
+impl NoteKey {
+    fn from(self) -> LinkFrom {
+        match self {
+            NoteKey::Buffer(buffer) => LinkFrom::Note(buffer),
+            NoteKey::Card(canvas, _) => LinkFrom::JsonCanvas(canvas),
+        }
+    }
+}
+
+impl Drawable for Lines {
+    type Key = NoteKey;
+
+    fn flow(state: &State, key: NoteKey) -> Option<&Flow<Lines>> {
+        match key {
+            NoteKey::Buffer(buffer) => {
+                let doc = &state.buffers.get(buffer)?.doc;
+                state::render::document::markdown(&state.documents, buffer, doc)
+                    .map(|parsed| &parsed.flow)
+            }
+            NoteKey::Card(canvas, index) => {
+                let file = state.json_canvases.get(canvas)?;
+                file.card(&file.canvas().nodes().get(index)?.id)
+                    .map(|card| &card.flow)
+            }
+        }
     }
 
-    fn follow(this: &mut Workspace, buffer: BufferId, pane: PaneId, target: &LinkTarget) {
+    fn follow(this: &mut Workspace, key: NoteKey, pane: PaneId, target: &LinkTarget) {
         links::follow(
             &mut this.state,
-            buffer,
+            key.from(),
             target,
             LinkOrigin::Document(pane),
             &mut this.effects,
@@ -102,7 +128,7 @@ impl Drawable for Lines {
         block
     }
 
-    fn book(_: BufferId) -> Option<BookId> {
+    fn book(_: NoteKey) -> Option<BookId> {
         None
     }
 
@@ -114,7 +140,7 @@ impl Drawable for Lines {
         };
         let theme = draw.theme;
         let fonts = draw.fonts;
-        let (workspace, buffer, version) = (draw.workspace.clone(), draw.key, draw.version);
+        let (workspace, key, version) = (draw.workspace.clone(), draw.key, draw.version);
         let accent = hsla(theme.chrome.accent);
         let checkbox = div()
             .id(("task", marker))
@@ -125,15 +151,24 @@ impl Drawable for Lines {
             .justify_center()
             .rounded(px(3.))
             .border_1()
-            .text_size(fonts.prose_size * 0.75)
-            .cursor_pointer()
-            .hover(move |style| style.border_color(accent))
-            .on_click(move |_: &ClickEvent, window, cx| {
-                cx.stop_propagation();
-                update(&workspace, window, cx, |this| {
-                    state::render::document::toggle_task(&mut this.state, buffer, version, marker)
-                });
-            });
+            .text_size(fonts.prose_size * 0.75);
+        let checkbox = match key {
+            NoteKey::Buffer(buffer) => checkbox
+                .cursor_pointer()
+                .hover(move |style| style.border_color(accent))
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    update(&workspace, window, cx, |this| {
+                        state::render::document::toggle_task(
+                            &mut this.state,
+                            buffer,
+                            version,
+                            marker,
+                        )
+                    });
+                }),
+            NoteKey::Card(..) => checkbox,
+        };
         let checkbox = match ink {
             Ink::Plain => checkbox.border_color(hsla(theme.prose.checkbox)),
             Ink::Done => checkbox
@@ -247,7 +282,7 @@ impl Drawable for Lines {
                         Resolution::Invalid => ("embed", format!("⧉ {}", embed.link.target)),
                     };
                     let shown = placeholder(theme, fonts, label, SharedString::from(shown));
-                    let (workspace, buffer, pane) = (draw.workspace.clone(), draw.key, draw.pane);
+                    let (workspace, key, pane) = (draw.workspace.clone(), draw.key, draw.pane);
                     let target = LinkTarget::Wiki(embed.link.clone());
                     div()
                         .id(("embed", index))
@@ -257,7 +292,7 @@ impl Drawable for Lines {
                             update(&workspace, window, cx, |this| {
                                 links::follow(
                                     &mut this.state,
-                                    buffer,
+                                    key.from(),
                                     &target,
                                     LinkOrigin::Document(pane),
                                     &mut this.effects,
@@ -366,7 +401,15 @@ pub enum Ink {
 /// Root block `index` of `pane`'s document view, in the reading column.
 pub type Tints = SmallVec<[(Range<usize>, Hsla); 4]>;
 
+#[derive(Clone, Copy)]
+pub enum Margins {
+    Page,
+    Card,
+}
+
 pub struct From<'a, O: Drawable> {
+    pub fonts: &'a Fonts,
+    pub margins: Margins,
     pub flow: &'a Flow<O>,
     pub key: O::Key,
     pub version: u64,
@@ -381,8 +424,10 @@ pub fn item<O: Drawable>(
     index: usize,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let (theme, fonts) = (&this.theme, &this.fonts);
+    let theme = &this.theme;
     let From {
+        fonts,
+        margins,
         flow,
         key,
         version,
@@ -405,15 +450,17 @@ pub fn item<O: Drawable>(
         pane,
         workspace: cx.weak_entity(),
     };
-    let top = match index {
-        0 => fonts.prose_size * 1.5,
-        _ => fonts.prose_size * 0.375,
+    let (top, side) = match (margins, index) {
+        (Margins::Page, 0) => (fonts.prose_size * 1.5, gpui::px(24.0)),
+        (Margins::Page, _) => (fonts.prose_size * 0.375, gpui::px(24.0)),
+        (Margins::Card, 0) => (gpui::px(0.0), gpui::px(0.0)),
+        (Margins::Card, _) => (fonts.prose_size * 0.375, gpui::px(0.0)),
     };
     div()
         .w_full()
         .flex()
         .justify_center()
-        .px_6()
+        .px(side)
         .pt(top)
         .pb(fonts.prose_size * 0.375)
         .font(fonts.prose[0].clone())

@@ -28,6 +28,21 @@ pub struct Fonts {
 }
 
 impl Fonts {
+    pub fn scaled(&self, factor: f32) -> Fonts {
+        Fonts {
+            mono: self.mono.clone(),
+            mono_size: self.mono_size * factor,
+            cell: self.cell.map(|side| side * factor),
+            ui: self.ui.clone(),
+            ui_size: self.ui_size * factor,
+            ui_line: self.ui_line * factor,
+            bar: self.bar * factor,
+            prose: self.prose.clone(),
+            prose_size: self.prose_size * factor,
+            prose_depth: self.prose_depth * factor,
+        }
+    }
+
     /// `prose_extent` is the prose font's ascent and descent at 1px.
     pub fn new(config: &FontConfig, cell: Size<Pixels>, prose_extent: [f32; 2]) -> Fonts {
         let prose_size = config.prose().size_px;

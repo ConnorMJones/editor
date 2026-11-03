@@ -1,25 +1,19 @@
-use helix_core::{Rope, Selection};
 use library::{Annotation, Change, Comment, Highlight};
-use model::command::CommentCommand;
+use model::command::DraftCommand;
 use model::mode::Mode;
 use model::notice::Notice;
 
+use crate::draft::{Beside, Draft, Edits, NotWriting, Start};
 use crate::drawing::{InkTabs, PdfMode, PdfTab};
 use crate::reading::{Notes, Reader, ReaderId, Reading};
-use crate::text::buffer::TextDoc;
-use crate::view::layout::Scroll;
-use crate::view::tab::{Share, Tab};
+use crate::view::tab::Tab;
 use crate::{Confirm, Effect, Overlay, Prompt, PromptKind, State};
 
 pub struct Writing {
     pub highlight: Highlight,
     pub kept: Kept,
-    pub doc: TextDoc,
-    pub selection: Selection,
-    pub scroll: Scroll,
-    pub saved: Saved,
-    pub share: Share,
-    pub spread: Spread,
+    pub draft: Draft,
+    pub beside: Beside,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,30 +22,9 @@ pub enum Kept {
     New,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Saved {
-    At(u64),
-    Differs,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edits {
-    Saved,
-    Unsaved,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Spread {
-    Split,
-    Full,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotWriting;
-
 impl PartialEq for Writing {
     fn eq(&self, other: &Writing) -> bool {
-        self.highlight == other.highlight && self.doc.text == other.doc.text
+        self.highlight == other.highlight && self.draft.doc.text == other.draft.doc.text
     }
 }
 
@@ -61,86 +34,38 @@ impl std::fmt::Debug for Writing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Writing")
             .field("highlight", &self.highlight.id)
-            .field("text", &self.doc.text)
-            .field("saved", &self.saved)
+            .field("text", &self.draft.doc.text)
+            .field("saved", &self.draft.saved)
             .finish()
     }
 }
 
 impl Writing {
     pub fn new(highlight: Highlight, kept: Kept, text: &str) -> Writing {
-        let doc = TextDoc::plain(Rope::from(text));
         let stored = highlight.comment.as_ref().map_or("", Comment::as_str);
-        let saved = match (kept, stored == text) {
-            (Kept::Library, true) => Saved::At(doc.version),
-            (Kept::Library, false) | (Kept::New, _) => Saved::Differs,
+        let start = match (kept, stored == text) {
+            (Kept::Library, true) => Start::AsKept,
+            (Kept::Library, false) | (Kept::New, _) => Start::Unkept,
         };
         Writing {
-            selection: Selection::point(doc.text.len_chars()),
             highlight,
             kept,
-            doc,
-            scroll: Scroll::default(),
-            saved,
-            share: Share::EVEN,
-            spread: Spread::Split,
-        }
-    }
-
-    pub fn edits(&self) -> Edits {
-        match self.saved {
-            Saved::At(version) if version == self.doc.version => Edits::Saved,
-            Saved::At(_) | Saved::Differs => Edits::Unsaved,
+            draft: Draft::new(text, start),
+            beside: Beside::SPLIT,
         }
     }
 
     pub fn save(&mut self, file: ReaderId, notes: &Notes) -> Result<Effect, Notice> {
         let listed = notes.listed()?;
-        let text = self.doc.text.to_string();
+        let text = self.draft.doc.text.to_string();
         let written = Highlight {
             comment: Comment::new(text.trim_end().to_owned()),
             ..self.highlight.clone()
         };
         self.highlight = written.clone();
         self.kept = Kept::Library;
-        self.saved = Saved::At(self.doc.version);
+        self.draft.kept();
         Ok(listed.write(file, Change::Put(Annotation::Highlight(written))))
-    }
-}
-
-impl Tab {
-    pub fn writing(&self) -> Option<&Writing> {
-        match self {
-            Tab::Ink(InkTabs::Pdf(PdfTab {
-                mode: PdfMode::Read(Reading::Writing(writing)),
-                ..
-            })) => Some(writing),
-            Tab::Book(book) => match &book.reading {
-                Reading::Writing(writing) => Some(writing),
-                Reading::Idle
-                | Reading::Selecting { .. }
-                | Reading::Selected(_)
-                | Reading::OnHighlight(_) => None,
-            },
-            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => None,
-        }
-    }
-
-    pub fn writing_mut(&mut self) -> Option<&mut Writing> {
-        match self {
-            Tab::Ink(InkTabs::Pdf(PdfTab {
-                mode: PdfMode::Read(Reading::Writing(writing)),
-                ..
-            })) => Some(writing),
-            Tab::Book(book) => match &mut book.reading {
-                Reading::Writing(writing) => Some(writing),
-                Reading::Idle
-                | Reading::Selecting { .. }
-                | Reading::Selected(_)
-                | Reading::OnHighlight(_) => None,
-            },
-            Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => None,
-        }
     }
 }
 
@@ -167,10 +92,10 @@ pub fn write(state: &mut State, out: &mut Vec<Effect>) -> Result<(), NotWriting>
     Ok(())
 }
 
-pub fn command(state: &mut State, command: CommentCommand, out: &mut Vec<Effect>) {
+pub fn command(state: &mut State, command: DraftCommand, out: &mut Vec<Effect>) {
     match command {
-        CommentCommand::Expand => return expand(state),
-        CommentCommand::Finish | CommentCommand::Drop | CommentCommand::Swap => {}
+        DraftCommand::Expand => return expand(state),
+        DraftCommand::Finish | DraftCommand::Drop | DraftCommand::Swap => {}
     }
     let State {
         layout,
@@ -191,21 +116,16 @@ pub fn command(state: &mut State, command: CommentCommand, out: &mut Vec<Effect>
     let Reading::Writing(writing) = reading else {
         return *notice = Some(Notice::NotWriting);
     };
-    let written = Comment::new(writing.doc.text.to_string().trim_end().to_owned());
-    match (command, writing.edits(), writing.kept, written) {
-        (CommentCommand::Swap, ..) => {
-            writing.spread = match writing.spread {
-                Spread::Split => Spread::Full,
-                Spread::Full => Spread::Split,
-            }
-        }
-        (CommentCommand::Finish, Edits::Saved, Kept::Library, _)
-        | (CommentCommand::Finish, _, Kept::New, None)
-        | (CommentCommand::Drop, Edits::Saved, ..) => {
+    let written = Comment::new(writing.draft.doc.text.to_string().trim_end().to_owned());
+    match (command, writing.draft.edits(), writing.kept, written) {
+        (DraftCommand::Swap, ..) => writing.beside = writing.beside.swapped(),
+        (DraftCommand::Finish, Edits::Saved, Kept::Library, _)
+        | (DraftCommand::Finish, _, Kept::New, None)
+        | (DraftCommand::Drop, Edits::Saved, ..) => {
             *reading = leave(writing.highlight.clone(), writing.kept);
             input.mode = Mode::Normal;
         }
-        (CommentCommand::Finish, ..) => match writing.save(file, notes) {
+        (DraftCommand::Finish, ..) => match writing.save(file, notes) {
             Ok(effect) => {
                 out.push(effect);
                 *reading = leave(writing.highlight.clone(), Kept::Library);
@@ -213,10 +133,8 @@ pub fn command(state: &mut State, command: CommentCommand, out: &mut Vec<Effect>
             }
             Err(refused) => *notice = Some(refused),
         },
-        (CommentCommand::Drop, Edits::Unsaved, ..) => {
-            *overlay = Overlay::Confirm(Confirm::DropComment)
-        }
-        (CommentCommand::Expand, ..) => {}
+        (DraftCommand::Drop, Edits::Unsaved, ..) => *overlay = Overlay::Confirm(Confirm::DropDraft),
+        (DraftCommand::Expand, ..) => {}
     }
 }
 
@@ -264,7 +182,7 @@ pub fn dropped(state: &mut State) {
             ..
         })) => Some(reading),
         Tab::Book(book) => Some(&mut book.reading),
-        Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) => None,
+        Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::JsonCanvas(_) => None,
     });
     let Some(reading) = reading else {
         return;

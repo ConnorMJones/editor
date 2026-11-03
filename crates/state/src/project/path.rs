@@ -224,6 +224,7 @@ pub enum FileKind {
     Board,
     Pdf,
     Book,
+    JsonCanvas,
     Image(Encoding),
 }
 
@@ -245,6 +246,7 @@ impl FileKind {
             (None, Some("bdt")) => FileKind::Board,
             (None, Some("pdf")) => FileKind::Pdf,
             (None, Some("epub")) => FileKind::Book,
+            (None, Some("canvas")) => FileKind::JsonCanvas,
             (None, Some(_) | None) => FileKind::Text(TextKind::Code),
         }
     }

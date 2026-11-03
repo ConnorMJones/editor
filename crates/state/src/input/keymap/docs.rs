@@ -62,7 +62,7 @@ const MARKDOWN_VIEW: &str = "\
 ";
 
 const DRAWINGS: &str = "\
-## Drawings, images, PDFs and books
+## Drawings, images, PDFs, books and canvases
 
 | Keys | Context | Action |
 | --- | --- | --- |
@@ -81,18 +81,18 @@ const DRAWINGS: &str = "\
 | `space l h` / `space l n` | drawing | Hide / add a layer |
 | `space i`, `:image <path>` | drawing, note | Insert an image |
 | `space p`, `:paste-image` | drawing, note | Paste an image |
-| `+` / `-` / `=` | pages, drawing, image, PDF | Zoom in / out / fit |
-| `zf` | pages, drawing, image, PDF | Fit width / height |
-| `h j k l`, arrows | pages, drawing, image, PDF | Pan |
+| `+` / `-` / `=` | pages, drawing, image, PDF, canvas | Zoom in / out / fit |
+| `zf` | pages, drawing, image, PDF, canvas | Fit width / height |
+| `h j k l`, arrows | pages, drawing, image, PDF, canvas | Pan |
 | `:export-pdf` / `:export-svg` / `:export-png` | drawing | Export |
 | `v` | PDF, book | Highlight |
 | `i` | PDF, book | Highlight with a comment / edit the comment |
 | `I` | PDF, book | Write the comment beside the page |
 | `C-v` | comment prompt | Move to the full view |
 | `esc` | comment | Save and close |
-| `C-s`, `:w` | comment | Save |
-| `space q` | comment | Close without saving |
-| `space v` | comment | Full / split |
+| `C-s`, `:w` | comment, card | Save |
+| `space q` | comment, card | Close without saving |
+| `space v` | comment, card | Full / split |
 | `d` | PDF, book | Delete the highlight |
 | `y` | PDF, book | Copy |
 | `esc` | PDF, book | Clear the selection |
@@ -106,6 +106,19 @@ const DRAWINGS: &str = "\
 | `:flatten` | PDF | Flatten the markup |
 | `:export-notes` | PDF, book | Write annotations to a note beside it |
 | `]]` / `[[` | book | Next / previous heading |
+| `d`, `del` | canvas | Delete |
+| `y` | canvas | Duplicate |
+| `at`, double click | canvas | New text card |
+| `i`, `ret`, double click | canvas | Write in the card |
+| `esc` | card | Keep the text and close |
+| `C-v` | card | In the card / beside |
+| `ag` | canvas | Group the selection |
+| drag a side dot | canvas | Connect |
+| `c1` … `c6` / `c0` | canvas | Colour / no colour |
+| `u` / `U` | canvas | Undo / redo |
+| `esc` | canvas | Clear the selection |
+| shift click | canvas | Add to the selection |
+| alt drag | canvas | Move without the grid |
 ";
 
 pub fn reference() -> String {

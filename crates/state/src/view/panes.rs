@@ -15,7 +15,7 @@ use model::window::{Axis, Side};
 use nucleo::Matcher;
 
 use crate::apply::{Force, apply};
-use crate::comment::Edits;
+use crate::draft::Edits;
 use crate::drawing::InkTabs;
 use crate::input::picker::{
     self, AnnotationSearch, Grep, Items, Narrowing, Notebook, Outline, OutlineEntry, PALETTE,
@@ -106,7 +106,7 @@ pub fn show(
         }
         (
             Arrive::In(_) | Arrive::AsIs,
-            Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::Book(_),
+            Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_),
         ) => {}
     }
     tab
@@ -204,8 +204,12 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
             };
         }
         TreeCommand::FocusEditor => focus_editor(state),
-        TreeCommand::Up => state.tree.cursor = state.tree.cursor.saturating_sub(1),
+        TreeCommand::Up => {
+            state.tree.selected.clear();
+            state.tree.cursor = state.tree.cursor.saturating_sub(1)
+        }
         TreeCommand::Down => {
+            state.tree.selected.clear();
             state.tree.cursor = (state.tree.cursor + 1).min(state.tree.rows.len().saturating_sub(1))
         }
         TreeCommand::Extend(direction) => {
@@ -301,7 +305,7 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
         TreeCommand::Rename => match selected {
             Some(row) => {
                 state.sidebar = Sidebar::Files(Files::Edit(TreeEdit::Rename {
-                    line: row.path.as_str().to_owned(),
+                    line: row.path.name().to_owned(),
                     from: row.path,
                 }))
             }
@@ -382,15 +386,16 @@ pub fn tree(state: &mut State, command: TreeCommand, out: &mut Vec<Effect>) {
                         }
                     }
                 }
-                TreeEdit::Rename { from, line } => match RelPath::parse(line.trim_end_matches('/'))
-                {
-                    Ok(to) if to == from => return,
-                    Ok(to) => FsOp::Rename { from, to },
-                    Err(_) => {
-                        state.notice = Some(Notice::InvalidPath { input: line });
-                        return;
+                TreeEdit::Rename { from, line } => {
+                    match RelPath::parse(from.folder().join(line.trim_end_matches('/')).as_str()) {
+                        Ok(to) if to == from => return,
+                        Ok(to) => FsOp::Rename { from, to },
+                        Err(_) => {
+                            state.notice = Some(Notice::InvalidPath { input: line });
+                            return;
+                        }
                     }
-                },
+                }
                 TreeEdit::Delete { first, rest, line } => match line.as_str() {
                     "y" => {
                         state.tree.selected.clear();
@@ -486,7 +491,8 @@ pub fn picker(state: &mut State, command: PickerCommand, out: &mut Vec<Effect>) 
                                 })
                                 .collect()
                         }
-                        Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => {
+                        Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::JsonCanvas(_))
+                        | None => {
                             return state.notice = Some(Notice::NotReading);
                         }
                     };
@@ -817,8 +823,8 @@ pub fn request_close(state: &mut State) -> Close {
             .count()
         + (state.layout.panes().values())
             .flat_map(Pane::items)
-            .filter_map(|item| item.tab.writing())
-            .filter(|writing| writing.edits() == Edits::Unsaved)
+            .filter_map(|item| item.tab.drafting())
+            .filter(|(draft, _)| draft.edits() == Edits::Unsaved)
             .count();
     match unsaved {
         0 => Close::Allowed,
@@ -1167,6 +1173,16 @@ fn dropped_file(
         Err(NotInLayout(_)) => return,
     }
     focus_editor(state);
+    match (point, state.layout.focused().active()) {
+        (Some(point), Some(Tab::JsonCanvas(_))) => {
+            match crate::json_canvas::drop_file(state, into, path, point, out) {
+                Ok(()) => {}
+                Err(refused) => state.notice = Some(refused),
+            }
+            return;
+        }
+        (Some(_) | None, _) => {}
+    }
     let image = (point.zip(ImageFrom::file(path.clone()).ok()))
         .map(|(point, image)| insert::into_focused(state, Some(point)).map(|into| (into, image)));
     match image {

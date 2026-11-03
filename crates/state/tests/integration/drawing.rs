@@ -65,7 +65,9 @@ fn on_pane(h: &Harness, (x, y): (f32, f32)) -> Point<Pane> {
         Some(Tab::Ink(InkTabs::Board(tab))) => {
             tab.view.frame(viewport()).to_pane.apply(Point::new(x, y))
         }
-        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => panic!("no drawing is focused"),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None => {
+            panic!("no drawing is focused")
+        }
     }
 }
 
@@ -107,7 +109,9 @@ fn marks(h: &Harness) -> usize {
             let drawing = h.state.pdfs[tab.file()].ink.edited.drawing();
             drawing.marks(FIRST).unwrap().len()
         }
-        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => panic!("no drawing is focused"),
+        Some(Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None => {
+            panic!("no drawing is focused")
+        }
     }
 }
 

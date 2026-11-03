@@ -174,7 +174,7 @@ impl Element for TextElement {
             Part::Text => "text",
             Part::Head => "diff-head",
             Part::Buffer => "diff-buffer",
-            Part::Comment => "comment",
+            Part::Draft => "draft",
         };
         Some(ElementId::NamedInteger(
             name.into(),

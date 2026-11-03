@@ -785,7 +785,7 @@ pub enum Edited<'a> {
     },
     /// A drawing's text mark being typed, which no other view shows.
     Mark,
-    Comment {
+    Draft {
         scroll: &'a mut Scroll,
     },
 }

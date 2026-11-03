@@ -9,15 +9,17 @@ pub const KEPT: usize = 100;
 
 /// Names one state of a drawing; a file is unsaved while its state isn't the one written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Revision(u64); // private: named only by `Edited`
+pub struct Revision(u64); // private: each state gets a new number; a made-up number can match the saved state by mistake
 
 #[derive(Clone, Debug)]
 pub struct Edited<D> {
-    drawing: D,                    // private: the history and revisions move together
-    revision: Revision,            // private: the history and revisions move together
-    next: u64,                     // private: the history and revisions move together
-    past: VecDeque<(D, Revision)>, // private: the history and revisions move together
-    future: Vec<(D, Revision)>,    // private: the history and revisions move together
+    // private: undo and the saved check use these fields together; a change to one field only
+    // restores the wrong state or shows a changed file as saved.
+    drawing: D,
+    revision: Revision,
+    next: u64,
+    past: VecDeque<(D, Revision)>,
+    future: Vec<(D, Revision)>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]

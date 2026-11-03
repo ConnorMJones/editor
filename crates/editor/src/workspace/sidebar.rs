@@ -3,9 +3,9 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Deferred, Div, Hsla, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, SharedString, Stateful, Window, anchored, canvas,
-    deferred, div, prelude::*, uniform_list,
+    AnyElement, App, ClickEvent, Context, Deferred, Div, DragMoveEvent, Hsla, IntoElement,
+    Modifiers, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Stateful, Window,
+    anchored, canvas, deferred, div, prelude::*, uniform_list,
 };
 use model::command::ChangesCommand;
 use model::config::SidebarSide;
@@ -13,7 +13,7 @@ use model::git::{GitStatus, Group, Kind};
 use model::theme::Theme;
 use model::window::Axis;
 use state::git::{Entry, Work};
-use state::project::path::RelPath;
+use state::project::path::{Folder, RelPath};
 use state::sidebar::Pick;
 use state::sidebar::changes::{self, ListRow};
 use state::sidebar::tree::{Fold, RowKind, TreeAction, TreeTarget};
@@ -35,6 +35,13 @@ pub const COLUMN: f32 = 1.3;
 pub struct TreeMenu {
     pub target: TreeTarget,
     pub at: Point<Pixels>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeDrop {
+    Away,
+    Root,
+    Row(usize),
 }
 
 /// A file tree entry being dragged to another folder.
@@ -450,8 +457,23 @@ impl Workspace {
                     cx.notify();
                 }),
             )
-            .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(drop_bg))
+            .when(
+                matches!(tree_target(self, cx), Some(Folder::Root)),
+                |area| area.bg(drop_bg),
+            )
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<DraggedEntry>, _, cx| {
+                    let next = match (event.bounds.contains(&event.event.position), this.tree_drop)
+                    {
+                        (false, _) => TreeDrop::Away,
+                        (true, TreeDrop::Away) => TreeDrop::Root,
+                        (true, kept) => kept,
+                    };
+                    this.hover_tree(next, cx)
+                }),
+            )
             .on_drop(cx.listener(|this, dragged: &DraggedEntry, window, cx| {
+                this.tree_drop = TreeDrop::Away;
                 panes::move_entry(
                     &mut this.state,
                     dragged.path.clone(),
@@ -469,6 +491,7 @@ impl Workspace {
                         let state = &this.state;
                         let (theme, fonts) = (&this.theme, &this.fonts);
                         let (preview_bg, preview_fg) = (hsla(theme.chrome.title), hsla(theme.text));
+                        let target = tree_target(this, cx);
                         range
                             .map(|index| {
                                 let row = &state.tree.rows[index];
@@ -498,8 +521,14 @@ impl Workspace {
                                     }
                                     picked => picked,
                                 };
-                                list_row_base(theme, fonts, index, picked)
-                                    .pl(fonts.ui_size * (0.4 + INDENT * row.depth as f32))
+                                let base = list_row_base(theme, fonts, index, picked);
+                                let base = match &target {
+                                    Some(Folder::Sub(dir)) if row.path.is_within(dir) => {
+                                        base.bg(drop_bg)
+                                    }
+                                    Some(Folder::Sub(_) | Folder::Root) | None => base,
+                                };
+                                base.pl(fonts.ui_size * (0.4 + INDENT * row.depth as f32))
                                     .text_color(color)
                                     .on_mouse_down(
                                         MouseButton::Right,
@@ -525,11 +554,22 @@ impl Workspace {
                                             })
                                         },
                                     )
-                                    .drag_over::<DraggedEntry>(move |style, _, _, _| {
-                                        style.bg(drop_bg)
-                                    })
+                                    .on_drag_move(cx.listener(
+                                        move |this, event: &DragMoveEvent<DraggedEntry>, _, cx| {
+                                            let over = event.bounds.contains(&event.event.position);
+                                            let next = match (over, this.tree_drop) {
+                                                (true, _) => TreeDrop::Row(index),
+                                                (false, TreeDrop::Row(at)) if at == index => {
+                                                    TreeDrop::Root
+                                                }
+                                                (false, kept) => kept,
+                                            };
+                                            this.hover_tree(next, cx)
+                                        },
+                                    ))
                                     .on_drop(cx.listener(
                                         move |this, dragged: &DraggedEntry, window, cx| {
+                                            this.tree_drop = TreeDrop::Away;
                                             panes::move_entry(
                                                 &mut this.state,
                                                 dragged.path.clone(),
@@ -662,6 +702,7 @@ impl Workspace {
                 anchored().position(menu.at).snap_to_window().child(
                     div()
                         .id("tree-menu")
+                        .occlude()
                         .min_w(fonts.ui_size * 10.0)
                         .p_1()
                         .flex()
@@ -715,4 +756,27 @@ pub fn row_button(
             this.changed(cx);
         }))
         .child(glyph)
+}
+
+fn tree_target(this: &Workspace, cx: &App) -> Option<Folder> {
+    match (cx.has_active_drag(), this.tree_drop) {
+        (true, TreeDrop::Root) => Some(Folder::Root),
+        (true, TreeDrop::Row(index)) => this.state.tree.rows.get(index).map(|row| match row.kind {
+            RowKind::Dir(_) => Folder::Sub(row.path.clone()),
+            RowKind::File => row.path.folder(),
+        }),
+        (true, TreeDrop::Away) | (false, _) => None,
+    }
+}
+
+impl Workspace {
+    fn hover_tree(&mut self, next: TreeDrop, cx: &mut Context<Self>) {
+        match next == self.tree_drop {
+            true => {}
+            false => {
+                self.tree_drop = next;
+                cx.notify();
+            }
+        }
+    }
 }

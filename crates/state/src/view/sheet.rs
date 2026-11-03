@@ -1,5 +1,5 @@
 use model::command::{ViewCommand, ZoomBy};
-use model::geom::{Pane, Point, Vector};
+use model::geom::{Pane, Point, Rect, Surface, Vector};
 use model::notice::Notice;
 use model::scroll_bar::Thumb;
 use model::sheet::{Measure, PlaneView, SheetView, Stack, Viewport, Zoom};
@@ -7,6 +7,7 @@ use model::window::Side;
 
 use crate::State;
 use crate::drawing::{InkTabs, PagedFiles, PagedId, PdfFiles, PdfId};
+use crate::json_canvas::{Arrival, JsonCanvasFile, JsonCanvasId};
 use crate::render::pages::Compiles;
 use crate::text::buffer::BufferId;
 use crate::view::layout::PaneId;
@@ -30,7 +31,15 @@ pub enum Viewed<'a> {
     Plane {
         view: &'a mut PlaneView,
         last: &'a mut Option<Measure>,
+        content: Option<Rect<Surface>>,
+        arrival: Arrival,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Planed {
+    Board,
+    JsonCanvas(JsonCanvasId, Arrival),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +59,7 @@ pub enum Sheeted<'a> {
     Plane {
         view: &'a PlaneView,
         last: Option<Measure>,
+        of: Planed,
     },
 }
 
@@ -62,6 +72,7 @@ pub enum SheetedMut<'a> {
     Plane {
         view: &'a mut PlaneView,
         last: &'a mut Option<Measure>,
+        of: Planed,
     },
 }
 
@@ -100,6 +111,12 @@ impl Tab {
             Tab::Ink(InkTabs::Board(tab)) => Some(Sheeted::Plane {
                 view: &tab.view,
                 last: tab.hand.last,
+                of: Planed::Board,
+            }),
+            Tab::JsonCanvas(tab) => Some(Sheeted::Plane {
+                view: &tab.view,
+                last: tab.last,
+                of: Planed::JsonCanvas(tab.file(), tab.arrival),
             }),
             Tab::Image(tab) => Some(Sheeted::Pages {
                 view: &tab.view,
@@ -133,6 +150,12 @@ impl Tab {
             Tab::Ink(InkTabs::Board(tab)) => Some(SheetedMut::Plane {
                 view: &mut tab.view,
                 last: &mut tab.hand.last,
+                of: Planed::Board,
+            }),
+            Tab::JsonCanvas(tab) => Some(SheetedMut::Plane {
+                of: Planed::JsonCanvas(tab.file(), tab.arrival),
+                view: &mut tab.view,
+                last: &mut tab.last,
             }),
             Tab::Image(tab) => Some(SheetedMut::Pages {
                 of: Stacked::Image(tab.file()),
@@ -159,6 +182,7 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
         pdfs,
         compiles,
         images,
+        json_canvases,
         ..
     } = state;
     let stacks = Stacks {
@@ -173,7 +197,18 @@ pub fn viewed(state: &mut State, pane: PaneId) -> Option<Viewed<'_>> {
             view,
             last,
         }),
-        SheetedMut::Plane { view, last } => Some(Viewed::Plane { view, last }),
+        SheetedMut::Plane { view, last, of } => Some(Viewed::Plane {
+            view,
+            last,
+            content: match of {
+                Planed::Board => None,
+                Planed::JsonCanvas(id, _) => json_canvases.get(id).and_then(JsonCanvasFile::bounds),
+            },
+            arrival: match of {
+                Planed::Board => Arrival::AsSaved,
+                Planed::JsonCanvas(_, arrival) => arrival,
+            },
+        }),
     }
 }
 
@@ -206,7 +241,18 @@ pub fn seek(state: &mut State, pane: PaneId, top: f32) {
 
 pub fn measured(state: &mut State, pane: PaneId, measure: Measure) {
     match viewed(state, pane) {
-        Some(Viewed::Pages { last, .. } | Viewed::Plane { last, .. }) => *last = Some(measure),
+        Some(Viewed::Pages { last, .. }) => *last = Some(measure),
+        Some(Viewed::Plane {
+            view,
+            last,
+            content,
+            arrival,
+        }) => match (last.replace(measure), content, arrival) {
+            (None, Some(bounds), Arrival::Fit) => {
+                *view = PlaneView::fitted(bounds, measure.viewport)
+            }
+            (Some(_), _, _) | (None, None, _) | (None, Some(_), Arrival::AsSaved) => {}
+        },
         None => {}
     }
 }
@@ -245,7 +291,7 @@ pub fn command(state: &mut State, command: ViewCommand) {
             }
             Ok(())
         }
-        (Some(Viewed::Plane { view, last }), ViewCommand::Pan(side)) => {
+        (Some(Viewed::Plane { view, last, .. }), ViewCommand::Pan(side)) => {
             match last {
                 Some(Measure { viewport, .. }) => view.pan(pan(side, *viewport)),
                 None => {}
@@ -256,7 +302,27 @@ pub fn command(state: &mut State, command: ViewCommand) {
             view.step_fit(stack, last.map(|measure| measure.viewport));
             Ok(())
         }
-        (Some(Viewed::Plane { .. }), ViewCommand::Fit) => Err(Notice::BoardHasNoPages),
+        (
+            Some(Viewed::Plane {
+                view,
+                last: Some(measure),
+                content: Some(bounds),
+                ..
+            }),
+            ViewCommand::Fit,
+        ) => {
+            *view = PlaneView::fitted(bounds, measure.viewport);
+            Ok(())
+        }
+        (
+            Some(Viewed::Plane {
+                content: Some(_), ..
+            }),
+            ViewCommand::Fit,
+        ) => Ok(()),
+        (Some(Viewed::Plane { content: None, .. }), ViewCommand::Fit) => {
+            Err(Notice::BoardHasNoPages)
+        }
     };
     match result {
         Ok(()) => {}

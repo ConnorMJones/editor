@@ -23,8 +23,6 @@ pub enum ExportFailed {
     Write(io::Error),
 }
 
-/// A paged drawing exports every page as PDF, or the page in focus as SVG or PNG; a board, the
-/// picked marks when some are held, else all of it.
 pub fn export(state: &mut State, to: ExportAs, out: &mut Vec<Effect>) {
     let fonts = state.fonts.clone();
     let job = match (state.layout.focused().active(), to) {
@@ -86,7 +84,9 @@ pub fn export(state: &mut State, to: ExportAs, out: &mut Vec<Effect>) {
         }
         (Some(Tab::Ink(InkTabs::Pdf(_))), ExportAs::Svg | ExportAs::Png)
         | (Some(Tab::Text(_)), ExportAs::Svg | ExportAs::Png)
-        | (Some(Tab::Image(_) | Tab::Book(_)) | None, _) => Err(Notice::NotExportable { to }),
+        | (Some(Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_)) | None, _) => {
+            Err(Notice::NotExportable { to })
+        }
     };
     match job {
         Ok(job) => out.push(Effect::Job(job)),

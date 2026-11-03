@@ -7,7 +7,7 @@ use gpui::{
 
 use model::window::Axis;
 use slotmap::Key as _;
-use state::comment::Spread;
+use state::draft::{self, Spread};
 use state::drawing::frame;
 use state::drawing::pen::{PenPhase, Stylus};
 use state::drawing::{InkTabs, PdfMode};
@@ -105,7 +105,8 @@ impl Workspace {
                             .justify_center()
                             .child(reading::popup(self, offer, cx))
                     }),
-                    Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_)) | None => None,
+                    Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::JsonCanvas(_))
+                    | None => None,
                 };
                 let entity = cx.entity();
                 let element = |part: Part| TextElement {
@@ -224,6 +225,7 @@ impl Workspace {
                         workspace: cx.entity(),
                         pane,
                     }),
+                    Some(Tab::JsonCanvas(_)) => crate::json_canvas::body(self, pane, cx),
                     Some(Tab::Book(_)) => div()
                         .flex_1()
                         .min_h_0()
@@ -289,21 +291,27 @@ impl Workspace {
                     },
                     None => div().flex_1(),
                 };
-                let writing = (target.and_then(Pane::active).and_then(Tab::writing))
-                    .map(|writing| (writing.spread, writing.share));
-                let body = match writing {
-                    Some((Spread::Split, share)) => self.split_body(
+                let beside = (target.and_then(Pane::active).and_then(Tab::drafting))
+                    .and_then(|(_, beside)| beside);
+                let body = match beside {
+                    Some(draft::Beside {
+                        spread: Spread::Split,
+                        share,
+                    }) => self.split_body(
                         pane,
                         share,
                         body.size_full().into_any_element(),
-                        element(Part::Comment).into_any_element(),
+                        element(Part::Draft).into_any_element(),
                         cx,
                     ),
-                    Some((Spread::Full, _)) => div()
+                    Some(draft::Beside {
+                        spread: Spread::Full,
+                        ..
+                    }) => div()
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
-                        .child(element(Part::Comment)),
+                        .child(element(Part::Draft)),
                     None => body,
                 };
                 let body = body

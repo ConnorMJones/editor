@@ -16,7 +16,10 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
                 (PdfMode::Read(_), Some(measure)) => (tab, measure),
                 (PdfMode::Read(_) | PdfMode::Markup, _) => continue,
             },
-            Some(Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_)) | None => continue,
+            Some(
+                Tab::Ink(_) | Tab::Text(_) | Tab::Image(_) | Tab::Book(_) | Tab::JsonCanvas(_),
+            )
+            | None => continue,
         };
         let file = &pdfs[tab.file()];
         let document = file.document();

@@ -23,7 +23,7 @@ use state::view::tab::{Showing, Tab};
 use crate::fonts::PROSE_LINE;
 use crate::workspace::Workspace;
 
-mod document;
+pub mod document;
 
 use document::Tints;
 mod pages;
@@ -148,6 +148,7 @@ struct Lists<'a> {
 impl Shown<'_> {
     fn of(state: &state::State, pane: PaneId) -> Option<Shown<'_>> {
         match state.layout.panes().get(pane)?.active()? {
+            Tab::JsonCanvas(_) => None,
             Tab::Text(text) => match text.showing() {
                 Showing::Document(text, view, _) => Some(Shown::Note {
                     buffer: text.buffer(),
@@ -481,8 +482,10 @@ fn item(
             parsed: Some(parsed),
         }) => {
             let from = document::From {
+                margins: document::Margins::Page,
+                fonts: &this.fonts,
                 flow: &parsed.markdown.flow,
-                key: buffer,
+                key: document::NoteKey::Buffer(buffer),
                 version: parsed.version,
                 toggled: &view.toggled,
                 marked: &|_| Tints::new(),
@@ -503,6 +506,8 @@ fn item(
                     .collect()
             };
             let from = document::From {
+                margins: document::Margins::Page,
+                fonts: &this.fonts,
                 flow: &file.flow.flow,
                 key: book,
                 version: file.version,

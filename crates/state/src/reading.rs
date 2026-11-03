@@ -168,6 +168,7 @@ impl ReaderKind {
             | FileKind::Text(_)
             | FileKind::Paged
             | FileKind::Board
+            | FileKind::JsonCanvas
             | FileKind::Image(_) => ReaderKind::Pdf,
         }
     }
@@ -178,7 +179,10 @@ impl ReaderId {
         match tab {
             Tab::Ink(InkTabs::Pdf(tab)) => Some(ReaderId::Pdf(tab.file())),
             Tab::Book(tab) => Some(ReaderId::Book(tab.file())),
-            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_)) | Tab::Text(_) | Tab::Image(_) => None,
+            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_))
+            | Tab::Text(_)
+            | Tab::Image(_)
+            | Tab::JsonCanvas(_) => None,
         }
     }
 
@@ -300,7 +304,10 @@ impl<'a> Viewing<'a> {
                 };
                 Some((ReaderId::Book(id), viewing))
             }
-            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_)) | Tab::Text(_) | Tab::Image(_) => None,
+            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_))
+            | Tab::Text(_)
+            | Tab::Image(_)
+            | Tab::JsonCanvas(_) => None,
         }
     }
 }
@@ -324,7 +331,10 @@ impl<'a> Seen<'a> {
                     flow: &books[tab.file()].flow,
                 },
             )),
-            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_)) | Tab::Text(_) | Tab::Image(_) => None,
+            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_))
+            | Tab::Text(_)
+            | Tab::Image(_)
+            | Tab::JsonCanvas(_) => None,
         }
     }
 
@@ -434,9 +444,10 @@ impl<'a> Reader<'a> {
                     },
                 })
             }
-            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_)) | Tab::Text(_) | Tab::Image(_) => {
-                Err(Notice::NotReading)
-            }
+            Tab::Ink(InkTabs::Paged(_) | InkTabs::Board(_))
+            | Tab::Text(_)
+            | Tab::Image(_)
+            | Tab::JsonCanvas(_) => Err(Notice::NotReading),
         }
     }
 
