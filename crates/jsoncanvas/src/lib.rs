@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 mod edit;
 
 pub use edit::{
-    Change, ChangeError, Copies, Edited, HistoryError, KEPT, NewEdge, NewNode, Offset, Picked,
-    Revision,
+    Change, ChangeError, Copies, Edited, HistoryError, KEPT, Labelled, NewEdge, NewNode, Offset,
+    Picked, Revision,
 };
 
 pub type Fields = Map<String, Value>;

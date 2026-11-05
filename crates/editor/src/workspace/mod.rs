@@ -9,6 +9,7 @@ use gpui::{
     ScrollStrategy, UniformListScrollHandle, Window, canvas, div, prelude::*, px,
 };
 use model::config::{SidebarSide, TitleBar, WindowConfig};
+use model::geom::Vector;
 use model::picture::{Bitmap, Encoding};
 use model::register::Clipboard;
 use model::theme::Theme;
@@ -24,6 +25,7 @@ use state::sidebar::changes::{self};
 use state::sidebar::tree::{self, NewEntry, TreeEdit};
 use state::view::layout::{PaneId, SplitPath, Tabs};
 use state::view::mode;
+use state::view::sheet::Wheel;
 use state::view::tab::{InvalidShare, Share};
 use state::{
     Confirm, Dragged, Effect, Files, Focus, Overlay, Repo, Sidebar, SidebarWidth, State, input,
@@ -116,6 +118,10 @@ pub enum Drag {
     ScrollThumb {
         pane: PaneId,
         grab: f32,
+    },
+    Pan {
+        pane: PaneId,
+        last: gpui::Point<Pixels>,
     },
 }
 
@@ -213,9 +219,24 @@ impl Workspace {
     fn on_drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         match (&self.drag, event.pressed_button) {
             (Drag::Idle, _) => {}
+            (Drag::Pan { pane, last }, Some(MouseButton::Middle)) => {
+                let (pane, by) = (*pane, event.position - *last);
+                self.drag = Drag::Pan {
+                    pane,
+                    last: event.position,
+                };
+                let Some((_, viewport)) = crate::drawing::on_pane(self, pane, event.position)
+                else {
+                    return;
+                };
+                let pan = Vector::new(-f32::from(by.x), -f32::from(by.y));
+                state::view::sheet::wheeled(&mut self.state, pane, Wheel::Pan(pan), viewport);
+                cx.notify();
+            }
             // The button was released outside the window.
             (_, None | Some(MouseButton::Right | MouseButton::Middle))
             | (_, Some(MouseButton::Navigate(_))) => self.drag = Drag::Idle,
+            (Drag::Pan { .. }, Some(MouseButton::Left)) => self.drag = Drag::Idle,
             (Drag::Title, Some(MouseButton::Left)) => {
                 self.drag = Drag::Idle;
                 window.start_window_move();
@@ -509,6 +530,10 @@ impl Render for Workspace {
             .on_mouse_move(cx.listener(|this, event, window, cx| this.on_drag(event, window, cx)))
             .on_mouse_up(
                 MouseButton::Left,
+                cx.listener(|this, _, _, _| this.drag = Drag::Idle),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
                 cx.listener(|this, _, _, _| this.drag = Drag::Idle),
             )
             .relative()

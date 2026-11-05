@@ -3,11 +3,11 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use helix_core::Rope;
+use helix_core::{Rope, RopeSlice};
 use ink::tool::Corner;
 use jsoncanvas::{
-    Area, Change, EdgeId, Edited, End, HistoryError, JsonCanvas, JsonCanvasColor, NewEdge, NewNode,
-    NodeId, NodeKind, Offset, Picked, Revision, Side,
+    Area, Change, EdgeId, Edited, End, HistoryError, JsonCanvas, JsonCanvasColor, Labelled,
+    NewEdge, NewNode, NodeId, NodeKind, Offset, Picked, Revision, Side,
 };
 use model::command::{DraftCommand, JsonCanvasCommand};
 use model::geom::{Pane, Point, Rect, Surface, Vector, segment_distance};
@@ -80,6 +80,7 @@ pub enum Parsed {
     At {
         generation: u64,
         cards: HashMap<NodeId, Markdown>,
+        drafted: HashMap<NodeId, u64>,
     },
 }
 
@@ -93,7 +94,7 @@ pub struct JsonCanvasTab {
 
 pub enum Doing {
     Arranging(Arranging),
-    Writing(Box<CardWriting>),
+    Writing(Box<Writing>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,15 +103,21 @@ pub struct Arranging {
     pub gesture: Gesture,
 }
 
-pub struct CardWriting {
-    pub node: NodeId,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Written {
+    Card(NodeId),
+    Label(Labelled),
+}
+
+pub struct Writing {
+    pub written: Written,
     pub draft: Draft,
     pub place: Place,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Place {
-    InCard,
+    InPlace,
     Beside(Beside),
 }
 
@@ -122,7 +129,7 @@ pub enum Ended {
 
 enum Next {
     Arrange,
-    Write(NodeId),
+    Write(Written),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +166,7 @@ pub enum Commit {
     Change(Change),
     Edge(NewEdge),
     Card(NewNode),
-    Write(NodeId),
+    Write(Written),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -257,11 +264,11 @@ impl Doing {
         match std::mem::replace(self, Doing::Arranging(Arranging::IDLE)) {
             Doing::Arranging(arranging) => (arranging, Ended::Arranging),
             Doing::Writing(mut writing) => {
-                let ended = match file.keep(&mut writing.draft, &writing.node) {
+                let ended = match file.keep(&mut writing.draft, &writing.written) {
                     Ok(()) => Ended::Finished,
                     Err(refused) => Ended::Refused(refused),
                 };
-                let picked = file.canvas().kept(Picked::node(writing.node));
+                let picked = file.canvas().kept(writing.written.picked());
                 (
                     Arranging {
                         picked,
@@ -274,23 +281,66 @@ impl Doing {
     }
 }
 
-impl CardWriting {
+impl Written {
+    pub fn picked(&self) -> Picked {
+        match self {
+            Written::Card(node) | Written::Label(Labelled::Group(node)) => {
+                Picked::node(node.clone())
+            }
+            Written::Label(Labelled::Edge(edge)) => Picked::edge(edge.clone()),
+        }
+    }
+
+    pub fn text<'a>(&self, canvas: &'a JsonCanvas) -> Result<&'a str, jsoncanvas::ChangeError> {
+        let node = |node: &NodeId| {
+            (canvas.node(node))
+                .map(|found| &found.kind)
+                .ok_or_else(|| jsoncanvas::ChangeError::UnknownNode(node.clone()))
+        };
+        match self {
+            Written::Card(id) => match node(id)? {
+                NodeKind::Text(text) => Ok(text),
+                NodeKind::File { .. } | NodeKind::Link(_) | NodeKind::Group { .. } => {
+                    Err(jsoncanvas::ChangeError::NotText(id.clone()))
+                }
+            },
+            Written::Label(Labelled::Group(id)) => match node(id)? {
+                NodeKind::Group { label, .. } => Ok(label.as_deref().unwrap_or_default()),
+                NodeKind::Text(_) | NodeKind::File { .. } | NodeKind::Link(_) => {
+                    Err(jsoncanvas::ChangeError::NotGroup(id.clone()))
+                }
+            },
+            Written::Label(Labelled::Edge(id)) => (canvas.edges().iter())
+                .find(|edge| edge.id == *id)
+                .map(|edge| edge.label.as_deref().unwrap_or_default())
+                .ok_or_else(|| jsoncanvas::ChangeError::UnknownEdge(id.clone())),
+        }
+    }
+
+    pub fn change(&self, text: &str) -> Change {
+        match self {
+            Written::Card(node) => Change::Text {
+                node: node.clone(),
+                text: text.to_owned(),
+            },
+            Written::Label(labelled) => Change::Label {
+                labelled: labelled.clone(),
+                label: Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|line| !line.is_empty()),
+            },
+        }
+    }
+}
+
+impl Writing {
     pub fn open(
         file: &JsonCanvasFile,
-        node: NodeId,
-    ) -> Result<CardWriting, jsoncanvas::ChangeError> {
-        let found = (file.canvas().node(&node))
-            .ok_or_else(|| jsoncanvas::ChangeError::UnknownNode(node.clone()))?;
-        let text = match &found.kind {
-            NodeKind::Text(text) => text,
-            NodeKind::File { .. } | NodeKind::Link(_) | NodeKind::Group { .. } => {
-                return Err(jsoncanvas::ChangeError::NotText(node));
-            }
-        };
-        Ok(CardWriting {
-            draft: Draft::new(text, Start::AsKept),
-            node,
-            place: Place::InCard,
+        written: Written,
+    ) -> Result<Writing, jsoncanvas::ChangeError> {
+        Ok(Writing {
+            draft: Draft::new(written.text(file.canvas())?, Start::AsKept),
+            written,
+            place: Place::InPlace,
         })
     }
 }
@@ -419,22 +469,14 @@ impl JsonCanvasFile {
     pub fn keep(
         &mut self,
         draft: &mut Draft,
-        node: &NodeId,
+        written: &Written,
     ) -> Result<(), jsoncanvas::ChangeError> {
-        let text = draft.doc.text.to_string();
-        let kept = match &self.canvas().node(node).map(|node| &node.kind) {
-            Some(NodeKind::Text(kept)) => *kept == text,
-            Some(NodeKind::File { .. } | NodeKind::Link(_) | NodeKind::Group { .. }) | None => {
-                false
-            }
-        };
-        match kept {
+        let change = written.change(&draft.doc.text.to_string());
+        let kept = written.change(written.text(self.canvas())?);
+        match kept == change {
             true => {}
             false => {
-                self.edited.change(&Change::Text {
-                    node: node.clone(),
-                    text,
-                })?;
+                self.edited.change(&change)?;
                 self.parsed = Parsed::Stale;
             }
         }
@@ -605,13 +647,15 @@ pub fn pointer(state: &mut State, pane: PaneId, phase: Phase, pointer: Pointer) 
     let at = frame.from_pane.apply(pointer.at);
     let reach = REACH.0 / frame.scale;
     let snap = pointer.snap;
-    match (&tab.doing, file.hit(None, at, reach)) {
-        (Doing::Writing(writing), Hit::Press(Pressing::Node { node, .. }))
-            if writing.place == Place::InCard && node == writing.node =>
+    match (phase, &tab.doing, file.hit(None, at, reach)) {
+        (Phase::Move | Phase::Up, Doing::Writing(_), _) => return,
+        (Phase::Down, Doing::Writing(writing), Hit::Press(Pressing::Node { node, .. }))
+            if writing.place == Place::InPlace
+                && matches!(&writing.written, Written::Card(card) if *card == node) =>
         {
             return;
         }
-        (Doing::Writing(_) | Doing::Arranging(_), _) => {}
+        (Phase::Down, Doing::Writing(_), _) | (_, Doing::Arranging(_), _) => {}
     }
     let (mut tab_arranging, ended) = tab.doing.take(file);
     let arranging = &mut tab_arranging;
@@ -657,11 +701,22 @@ pub fn pointer(state: &mut State, pane: PaneId, phase: Phase, pointer: Pointer) 
             (Hit::Press(Pressing::Node { node, .. }), Taps::Two, Adding::Replace)
                 if matches!(
                     file.canvas().node(&node).map(|found| &found.kind),
-                    Some(NodeKind::Text(_))
+                    Some(NodeKind::Text(_) | NodeKind::Group { .. })
                 ) =>
             {
-                arranging.picked = Some(Picked::node(node.clone()));
-                (Gesture::Idle, Some(Commit::Write(node)))
+                let written = match file.canvas().node(&node).map(|found| &found.kind) {
+                    Some(NodeKind::Group { .. }) => Written::Label(Labelled::Group(node)),
+                    Some(NodeKind::Text(_) | NodeKind::File { .. } | NodeKind::Link(_)) | None => {
+                        Written::Card(node)
+                    }
+                };
+                arranging.picked = Some(written.picked());
+                (Gesture::Idle, Some(Commit::Write(written)))
+            }
+            (Hit::Press(Pressing::Edge(edge)), Taps::Two, Adding::Replace) => {
+                let written = Written::Label(Labelled::Edge(edge));
+                arranging.picked = Some(written.picked());
+                (Gesture::Idle, Some(Commit::Write(written)))
             }
             (Hit::Press(on), _, adding) => {
                 let one = match &on {
@@ -847,8 +902,8 @@ pub fn pointer(state: &mut State, pane: PaneId, phase: Phase, pointer: Pointer) 
             arranging.picked = Some(Picked::edge(id));
             Next::Arrange
         }),
-        Some(Commit::Card(card)) => Ok(Next::Write(file.edited.add_node(card))),
-        Some(Commit::Write(node)) => Ok(Next::Write(node)),
+        Some(Commit::Card(card)) => Ok(Next::Write(Written::Card(file.edited.add_node(card)))),
+        Some(Commit::Write(written)) => Ok(Next::Write(written)),
     };
     tab.doing = doing_after(next, tab_arranging, file, &mut input.mode, notice);
 }
@@ -862,7 +917,7 @@ fn doing_after(
 ) -> Doing {
     match next.and_then(|next| match next {
         Next::Arrange => Ok(None),
-        Next::Write(node) => CardWriting::open(file, node).map(Some),
+        Next::Write(written) => Writing::open(file, written).map(Some),
     }) {
         Ok(None) => Doing::Arranging(arranging),
         Ok(Some(writing)) => {
@@ -927,7 +982,7 @@ pub fn command(state: &mut State, command: JsonCanvasCommand) {
             }
         }
         (JsonCanvasCommand::AddText, picked) => match text_card(tab.view.centre) {
-            Some(card) => Ok(Next::Write(file.edited.add_node(card))),
+            Some(card) => Ok(Next::Write(Written::Card(file.edited.add_node(card)))),
             None => {
                 arranging.picked = picked;
                 Err(Notice::JsonCanvasRefused {
@@ -943,12 +998,20 @@ pub fn command(state: &mut State, command: JsonCanvasCommand) {
             | JsonCanvasCommand::Write,
             None,
         ) => Err(Notice::NothingPicked),
-        (JsonCanvasCommand::Write, Some(picked)) => match picked.nodes() {
-            [node] => Ok(Next::Write(node.clone())),
+        (JsonCanvasCommand::Write, Some(picked)) => match (picked.nodes(), picked.edges()) {
+            ([node], []) => match file.canvas().node(node).map(|found| &found.kind) {
+                Some(NodeKind::Group { .. }) => {
+                    Ok(Next::Write(Written::Label(Labelled::Group(node.clone()))))
+                }
+                Some(NodeKind::Text(_) | NodeKind::File { .. } | NodeKind::Link(_)) | None => {
+                    Ok(Next::Write(Written::Card(node.clone())))
+                }
+            },
+            ([], [edge]) => Ok(Next::Write(Written::Label(Labelled::Edge(edge.clone())))),
             _ => {
                 arranging.picked = Some(picked);
                 Err(Notice::JsonCanvasRefused {
-                    reason: "pick one text card to write in".to_owned(),
+                    reason: "pick one card, group or edge to write in".to_owned(),
                 })
             }
         },
@@ -1209,6 +1272,7 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
         figures,
         documents,
         books,
+        layout,
         ..
     } = state;
     let FileIndex::Ready(indexed) = &mut project.index else {
@@ -1216,38 +1280,81 @@ pub fn sync(state: &mut State, out: &mut Vec<Effect>) {
     };
     let generation = indexed.generation;
     let root = project.root.path();
-    let stale = |file: &&mut JsonCanvasFile| match file.parsed {
-        Parsed::At { generation: at, .. } => at != generation,
-        Parsed::Stale => true,
-    };
+    let drafts: Vec<(JsonCanvasId, NodeId, u64, Rope)> = (layout.panes().values())
+        .flat_map(crate::view::layout::Pane::items)
+        .filter_map(|item| match &item.tab {
+            Tab::JsonCanvas(tab) => match &tab.doing {
+                Doing::Writing(writing) => match (&writing.written, writing.place) {
+                    (Written::Card(node), Place::Beside(_)) => Some((
+                        tab.file,
+                        node.clone(),
+                        writing.draft.doc.version,
+                        writing.draft.doc.text.clone(),
+                    )),
+                    (Written::Label(_), _) | (Written::Card(_), Place::InPlace) => None,
+                },
+                Doing::Arranging(_) => None,
+            },
+            Tab::Text(_) | Tab::Ink(_) | Tab::Image(_) | Tab::Book(_) => None,
+        })
+        .collect();
     let (index, _) = indexed.links();
-    let mut parsed = 0;
-    for file in json_canvases.values_mut().filter(stale) {
-        parsed += 1;
-        let parse = |text: &str, at: &Path| {
-            let dir = at.parent().unwrap_or(root);
-            let folder =
-                RelPath::new(root, dir).map_or(String::new(), |rel| rel.as_str().to_owned());
-            let base = Base {
-                dir,
-                root,
-                folder: &folder,
-                vault: index,
-            };
-            markdown::parse(Rope::from(text).slice(..), base, None)
+    let parse = |text: RopeSlice, at: &Path| {
+        let dir = at.parent().unwrap_or(root);
+        let folder = RelPath::new(root, dir).map_or(String::new(), |rel| rel.as_str().to_owned());
+        let base = Base {
+            dir,
+            root,
+            folder: &folder,
+            vault: index,
         };
-        let cards = (file.canvas().nodes().iter())
-            .filter_map(|node| match (&node.kind, file.files.get(&node.id)) {
-                (NodeKind::Text(text), _) => Some((node.id.clone(), parse(text, &file.path))),
-                (NodeKind::File { .. }, Some(Embedded::Note { path, text })) => {
-                    Some((node.id.clone(), parse(text, path)))
+        markdown::parse(text, base, None)
+    };
+    let mut parsed = 0;
+    for (id, file) in json_canvases.iter_mut() {
+        let mine = || drafts.iter().filter(move |(of, ..)| *of == id);
+        match &mut file.parsed {
+            Parsed::At {
+                generation: at,
+                cards,
+                drafted,
+            } if *at == generation => {
+                let changed: Vec<_> = (mine())
+                    .filter(|(_, node, version, _)| drafted.get(node) != Some(version))
+                    .collect();
+                for (_, node, version, text) in changed {
+                    cards.insert(node.clone(), parse(text.slice(..), &file.path));
+                    drafted.insert(node.clone(), *version);
+                    parsed += 1;
                 }
-                (NodeKind::File { .. }, _) | (NodeKind::Link(_) | NodeKind::Group { .. }, _) => {
-                    None
+            }
+            Parsed::At { .. } | Parsed::Stale => {
+                let mut cards: HashMap<NodeId, Markdown> = (file.canvas().nodes().iter())
+                    .filter_map(|node| match (&node.kind, file.files.get(&node.id)) {
+                        (NodeKind::Text(text), _) => Some((
+                            node.id.clone(),
+                            parse(Rope::from(text.as_str()).slice(..), &file.path),
+                        )),
+                        (NodeKind::File { .. }, Some(Embedded::Note { path, text })) => {
+                            Some((node.id.clone(), parse(Rope::from(&**text).slice(..), path)))
+                        }
+                        (NodeKind::File { .. }, _)
+                        | (NodeKind::Link(_) | NodeKind::Group { .. }, _) => None,
+                    })
+                    .collect();
+                let mut drafted = HashMap::new();
+                for (_, node, version, text) in mine() {
+                    cards.insert(node.clone(), parse(text.slice(..), &file.path));
+                    drafted.insert(node.clone(), *version);
                 }
-            })
-            .collect();
-        file.parsed = Parsed::At { generation, cards };
+                file.parsed = Parsed::At {
+                    generation,
+                    cards,
+                    drafted,
+                };
+                parsed += 1;
+            }
+        }
     }
     match parsed {
         0 => {}
@@ -1291,7 +1398,7 @@ pub fn open_node(
 impl Place {
     pub fn beside(self) -> Option<Beside> {
         match self {
-            Place::InCard => None,
+            Place::InPlace => None,
             Place::Beside(beside) => Some(beside),
         }
     }
@@ -1316,14 +1423,14 @@ pub fn draft(state: &mut State, command: DraftCommand) {
     match (command, writing.draft.edits()) {
         (DraftCommand::Swap, _) => {
             writing.place = Place::Beside(match writing.place {
-                Place::InCard => Beside::SPLIT,
+                Place::InPlace => Beside::SPLIT,
                 Place::Beside(beside) => beside.swapped(),
             })
         }
         (DraftCommand::Expand, _) => {
             writing.place = match writing.place {
-                Place::InCard => Place::Beside(Beside::SPLIT),
-                Place::Beside(_) => Place::InCard,
+                Place::InPlace => Place::Beside(Beside::SPLIT),
+                Place::Beside(_) => Place::InPlace,
             }
         }
         (DraftCommand::Drop, Edits::Unsaved) => *overlay = Overlay::Confirm(Confirm::DropDraft),
@@ -1353,12 +1460,14 @@ pub fn drop_draft(state: &mut State) {
     let Some(Tab::JsonCanvas(tab)) = layout.focused_mut().active_mut() else {
         return;
     };
-    let node = match &tab.doing {
-        Doing::Writing(writing) => writing.node.clone(),
+    let picked = match &tab.doing {
+        Doing::Writing(writing) => writing.written.picked(),
         Doing::Arranging(_) => return,
     };
+    let file = &mut json_canvases[tab.file];
+    file.parsed = Parsed::Stale;
     tab.doing = Doing::Arranging(Arranging {
-        picked: json_canvases[tab.file].canvas().kept(Picked::node(node)),
+        picked: file.canvas().kept(picked),
         gesture: Gesture::Idle,
     });
     input.mode = Mode::Normal;
@@ -1381,7 +1490,7 @@ pub fn keep_drafts(
         .filter(|(file, _)| which(*file));
     for (file, writing) in writing {
         json_canvases[file]
-            .keep(&mut writing.draft, &writing.node)
+            .keep(&mut writing.draft, &writing.written)
             .map_err(|refused| Notice::JsonCanvasRefused {
                 reason: refused.to_string(),
             })?;

@@ -33,6 +33,7 @@ pub struct TextElement {
     pub workspace: Entity<Workspace>,
     pub pane: PaneId,
     pub part: Part,
+    pub size: TextSize,
 }
 
 impl IntoElement for TextElement {
@@ -44,8 +45,15 @@ impl IntoElement for TextElement {
 }
 
 /// Index 0 is this frame and 1 the previous; unchanged rows reuse their shaped lines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TextSize {
+    Editor,
+    Scaled(f32),
+}
+
 #[derive(Default)]
 pub struct Cache {
+    pub size: Pixels,
     pub frames: [Frame; 2],
     pub lines: [Vec<Rc<ShapedLine>>; 2],
     pub numbers: [Vec<Number>; 2],
@@ -211,7 +219,15 @@ impl Element for TextElement {
         let _span = tracing::trace_span!("text prepaint").entered();
         let (pane, part) = (self.pane, self.part);
         let workspace = self.workspace.read(cx);
-        let (theme, fonts, state) = (&workspace.theme, &workspace.fonts, &workspace.state);
+        let scaled;
+        let fonts = match self.size {
+            TextSize::Editor => &workspace.fonts,
+            TextSize::Scaled(factor) => {
+                scaled = workspace.fonts.scaled(factor);
+                &scaled
+            }
+        };
+        let (theme, state) = (&workspace.theme, &workspace.state);
         let cell = fonts.cell;
         let Drawing {
             draws,
@@ -251,7 +267,18 @@ impl Element for TextElement {
         let bar_hitbox = window.insert_hitbox(track, HitboxBehavior::Normal);
         let id = id.expect("text element has an id");
         let prepaint = window.with_element_state(id, |cache: Option<Cache>, window| {
-            let mut cache = cache.unwrap_or_default();
+            let mut cache = match cache {
+                Some(cache) if cache.size == fonts.mono_size => cache,
+                Some(Cache { pointer, .. }) => Cache {
+                    size: fonts.mono_size,
+                    pointer,
+                    ..Cache::default()
+                },
+                None => Cache {
+                    size: fonts.mono_size,
+                    ..Cache::default()
+                },
+            };
             cache.frames.swap(0, 1);
             cache.lines.swap(0, 1);
             cache.numbers.swap(0, 1);

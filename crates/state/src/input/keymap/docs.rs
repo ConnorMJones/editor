@@ -110,7 +110,8 @@ const DRAWINGS: &str = "\
 | `y` | canvas | Duplicate |
 | `zs` | canvas | Zoom to the selection |
 | `at`, double click | canvas | New text card |
-| `i`, `ret`, double click | canvas | Write in the card |
+| `i`, `ret`, double click | canvas | Write in the card or label |
+| middle drag | canvas | Pan |
 | `esc` | card | Keep the text and close |
 | `C-v` | card | In the card / beside |
 | `ag` | canvas | Group the selection |

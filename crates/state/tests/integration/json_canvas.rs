@@ -13,7 +13,7 @@ use model::geom::{Pane, Point};
 use model::mode::Mode;
 use state::draft::{Beside, Spread};
 use state::input::{self, keymap::Context};
-use state::json_canvas::{Adding, Doing, Phase, Place, Pointer, Snap};
+use state::json_canvas::{Adding, Doing, Phase, Place, Pointer, Snap, Written};
 use state::reading::Taps;
 use state::view::panes::{self, Arrive, Dragged, DropOn, PanePoint, Zone};
 
@@ -552,7 +552,12 @@ fn held(h: &Harness) -> &jsoncanvas::Picked {
 
 fn written(h: &Harness) -> Option<String> {
     match &tab(h).doing {
-        Doing::Writing(writing) => Some(writing.node.as_str().to_owned()),
+        Doing::Writing(writing) => Some(match &writing.written {
+            Written::Card(id) | Written::Label(jsoncanvas::Labelled::Group(id)) => {
+                id.as_str().to_owned()
+            }
+            Written::Label(jsoncanvas::Labelled::Edge(id)) => id.as_str().to_owned(),
+        }),
         Doing::Arranging(_) => None,
     }
 }
@@ -649,4 +654,42 @@ fn dropping_an_unsaved_card_draft_asks_first_and_keeps_the_card_as_it_was() {
     assert_eq!(written(&h), None);
     assert!(card_text(&h, "t").ends_with("$x^2$."));
     assert!(!modified(&h));
+}
+
+#[test]
+fn group_and_edge_labels_are_written_in_place_on_one_line() {
+    let (_dir, mut h) = board();
+    measured(&mut h);
+    double_tap(&mut h, (350.0, 250.0));
+    assert_eq!(
+        written(&h).as_deref(),
+        Some("g"),
+        "{:?} {:?}",
+        h.state.notice,
+        tab(&h).arranging()
+    );
+    h.keys(" Plans<ret>soon<esc><esc>");
+    let file = &h.state.json_canvases[tab(&h).file()];
+    assert!(matches!(
+        &file.canvas().node(&held(&h).nodes()[0]).unwrap().kind,
+        jsoncanvas::NodeKind::Group { label: Some(label), .. } if label == "Ideas Plans soon"
+    ));
+    double_tap(&mut h, (350.0, 101.0));
+    assert_eq!(written(&h).as_deref(), Some("e"));
+    h.keys("<C-u><esc><esc>");
+    let file = &h.state.json_canvases[tab(&h).file()];
+    assert_eq!(
+        file.canvas().edges()[0].label,
+        None,
+        "an empty label is removed"
+    );
+    h.keys("i");
+    assert_eq!(
+        written(&h).as_deref(),
+        Some("e"),
+        "i writes the picked edge's label"
+    );
+    h.keys("led<esc><esc>");
+    let file = &h.state.json_canvases[tab(&h).file()];
+    assert_eq!(file.canvas().edges()[0].label.as_deref(), Some("led"));
 }

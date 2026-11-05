@@ -3,14 +3,14 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, ScrollWheelEvent, SharedString,
     Stateful, canvas, div, point, prelude::*, px,
 };
-use jsoncanvas::{Area, Cap, JsonCanvasColor, Node, NodeKind, Preset};
+use jsoncanvas::{Area, Cap, JsonCanvasColor, Labelled, Node, NodeKind, Preset};
 use model::color::Base16;
 use model::command::JsonCanvasCommand;
 use model::geom::{Point, Surface};
 use slotmap::Key as _;
 use state::json_canvas::{
     Adding, Doing, Embedded, GRID, Gesture, JsonCanvasFile, JsonCanvasId, Phase, Place, Pointer,
-    SIDES, Snap, along, anchor, curve, surface,
+    SIDES, Snap, Written, along, anchor, curve, surface,
 };
 use state::reading::Taps;
 use state::view::draws::Part;
@@ -20,8 +20,8 @@ use state::view::tab::Tab;
 use crate::fonts::{Fonts, hsla};
 use crate::pictures::picture_canvas;
 use crate::rendered::document::{self, NoteKey, Tints};
-use crate::text::TextElement;
-use crate::workspace::Workspace;
+use crate::text::{TextElement, TextSize};
+use crate::workspace::{Drag, Workspace};
 use crate::{drawing, pane_space};
 
 const LEAST_DETAIL: f32 = 0.3;
@@ -30,6 +30,7 @@ const ARROW: f32 = 12.0;
 const CORNER: f32 = 8.0;
 const PADDING: f32 = 12.0;
 const HANDLE: f32 = 8.0;
+const LABEL_EDITOR: f32 = 240.0;
 const DOT: f32 = 2.0;
 const DOT_SPACING: f32 = 16.0;
 const TOOL: f32 = 28.0;
@@ -53,7 +54,7 @@ struct Cards<'a> {
     pane: PaneId,
     id: JsonCanvasId,
     file: &'a JsonCanvasFile,
-    in_card: Option<&'a jsoncanvas::NodeId>,
+    in_place: Option<&'a Written>,
     fonts: Fonts,
     scale: f32,
     detail: Detail,
@@ -219,6 +220,15 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
             drawing::wheel(this, pane, event, cx)
         }))
         .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                this.drag = Drag::Pan {
+                    pane,
+                    last: event.position,
+                }
+            }),
+        )
+        .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 window.focus(&this.focus, cx);
@@ -238,6 +248,13 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
     let Some(viewport) = last.map(|measure| measure.viewport) else {
         return div().size_full().child(base);
     };
+    let in_place = match &tab.doing {
+        Doing::Writing(writing) => match writing.place {
+            Place::InPlace => Some(&writing.written),
+            Place::Beside(_) => None,
+        },
+        Doing::Arranging(_) => None,
+    };
     let frame = view.frame(viewport);
     let scale = frame.scale;
     let cards = Cards {
@@ -245,13 +262,7 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
         pane,
         id,
         file,
-        in_card: match &tab.doing {
-            Doing::Writing(writing) => match writing.place {
-                Place::InCard => Some(&writing.node),
-                Place::Beside(_) => None,
-            },
-            Doing::Arranging(_) => None,
-        },
+        in_place,
         fonts: this.fonts.scaled(scale),
         scale,
         detail: match scale.total_cmp(&LEAST_DETAIL) {
@@ -261,29 +272,65 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
     };
     let fonts = &cards.fonts;
     let place = |at: Point<Surface>| frame.to_pane.apply(at);
-    let labels = (board.nodes().iter()).filter_map(|node| match &node.kind {
-        NodeKind::Group {
-            label: Some(label), ..
-        } => {
-            let at = place(corners(tab.shown(node))[0]);
-            Some(
-                div()
-                    .absolute()
-                    .left(px(at.x))
-                    .top(px(at.y) - fonts.ui_line)
-                    .text_size(fonts.ui_size)
-                    .text_color(hsla(theme.muted))
-                    .child(SharedString::from(label.clone()))
-                    .into_any_element(),
-            )
-        }
-        NodeKind::Group { label: None, .. }
-        | NodeKind::Text(_)
-        | NodeKind::File { .. }
-        | NodeKind::Link(_) => None,
+    let entity = cx.entity();
+    let label_editor = || {
+        div()
+            .w(px(LABEL_EDITOR * scale))
+            .h(this.fonts.cell.height * scale + px(6.0))
+            .p(px(2.0))
+            .bg(hsla(theme.background))
+            .border_1()
+            .border_color(accent)
+            .rounded_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(TextElement {
+                workspace: entity.clone(),
+                pane,
+                part: Part::Draft,
+                size: TextSize::Scaled(scale),
+            })
+            .into_any_element()
+    };
+    let labels = (board.nodes().iter()).filter_map(|node| {
+        let at = place(corners(tab.shown(node))[0]);
+        let shown = match (&node.kind, in_place) {
+            (NodeKind::Group { .. }, Some(Written::Label(Labelled::Group(id))))
+                if *id == node.id =>
+            {
+                label_editor()
+            }
+            (
+                NodeKind::Group {
+                    label: Some(label), ..
+                },
+                _,
+            ) => div()
+                .text_size(fonts.ui_size)
+                .text_color(hsla(theme.muted))
+                .child(SharedString::from(label.clone()))
+                .into_any_element(),
+            (
+                NodeKind::Group { label: None, .. }
+                | NodeKind::Text(_)
+                | NodeKind::File { .. }
+                | NodeKind::Link(_),
+                _,
+            ) => return None,
+        };
+        Some(
+            div()
+                .absolute()
+                .left(px(at.x))
+                .top(px(at.y))
+                .size_0()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .child(div().flex_none().child(shown))
+                .into_any_element(),
+        )
     });
     let edge_labels = (board.edges().iter()).filter_map(|edge| {
-        let label = edge.label.as_ref()?;
         let middle = along(
             curve(
                 area_of(&edge.from.node)?,
@@ -294,6 +341,19 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
             0.5,
         );
         let at = place(middle);
+        let shown = match (&edge.label, in_place) {
+            (_, Some(Written::Label(Labelled::Edge(id)))) if *id == edge.id => label_editor(),
+            (Some(label), _) => div()
+                .whitespace_nowrap()
+                .px(fonts.ui_size * 0.4)
+                .rounded_sm()
+                .bg(hsla(theme.background))
+                .text_size(fonts.ui_size)
+                .text_color(hsla(theme.text))
+                .child(SharedString::from(label.clone()))
+                .into_any_element(),
+            (None, _) => return None,
+        };
         Some(
             div()
                 .absolute()
@@ -303,17 +363,7 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .px(fonts.ui_size * 0.4)
-                        .rounded_sm()
-                        .bg(hsla(theme.background))
-                        .text_size(fonts.ui_size)
-                        .text_color(hsla(theme.text))
-                        .child(SharedString::from(label.clone())),
-                )
+                .child(div().flex_none().child(shown))
                 .into_any_element(),
         )
     });
@@ -549,7 +599,7 @@ impl Cards<'_> {
             pane,
             id,
             file,
-            in_card,
+            in_place,
             ref fonts,
             scale,
             detail,
@@ -652,7 +702,8 @@ impl Cards<'_> {
                     .into_any_element(),
             )
         };
-        let written = in_card.filter(|written| **written == node.id);
+        let written =
+            in_place.filter(|written| matches!(written, Written::Card(id) if *id == node.id));
         let content = match (written, &node.kind, file.files.get(&node.id), detail) {
             (Some(_), _, _, _) => div()
                 .size_full()
@@ -661,6 +712,7 @@ impl Cards<'_> {
                     workspace: cx.entity(),
                     pane,
                     part: Part::Draft,
+                    size: TextSize::Scaled(scale),
                 })
                 .into_any_element(),
             (None, NodeKind::Text(text), _, Detail::Outline) => plain(SharedString::from(

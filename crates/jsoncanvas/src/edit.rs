@@ -38,6 +38,16 @@ pub enum Change {
         node: NodeId,
         text: String,
     },
+    Label {
+        labelled: Labelled,
+        label: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Labelled {
+    Group(NodeId),
+    Edge(EdgeId),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -48,6 +58,8 @@ pub enum ChangeError {
     UnknownEdge(EdgeId),
     #[error("node \"{}\" is not a text card", .0.as_str())]
     NotText(NodeId),
+    #[error("node \"{}\" is not a group", .0.as_str())]
+    NotGroup(NodeId),
     #[error("an edge can't join node \"{}\" to itself", .0.as_str())]
     SameNode(NodeId),
 }
@@ -275,6 +287,31 @@ impl JsonCanvas {
                         return Err(ChangeError::NotText(node.clone()));
                     }
                 }
+            }
+            Change::Label {
+                labelled: Labelled::Group(node),
+                label,
+            } => {
+                let found = (self.nodes.iter_mut())
+                    .find(|kept| kept.id == *node)
+                    .ok_or_else(|| ChangeError::UnknownNode(node.clone()))?;
+                match &mut found.kind {
+                    crate::NodeKind::Group { label: kept, .. } => kept.clone_from(label),
+                    crate::NodeKind::Text(_)
+                    | crate::NodeKind::File { .. }
+                    | crate::NodeKind::Link(_) => {
+                        return Err(ChangeError::NotGroup(node.clone()));
+                    }
+                }
+            }
+            Change::Label {
+                labelled: Labelled::Edge(edge),
+                label,
+            } => {
+                let found = (self.edges.iter_mut())
+                    .find(|kept| kept.id == *edge)
+                    .ok_or_else(|| ChangeError::UnknownEdge(edge.clone()))?;
+                found.label.clone_from(label);
             }
             Change::Recolor { picked, color } => {
                 self.check(picked)?;

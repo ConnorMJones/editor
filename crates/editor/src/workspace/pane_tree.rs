@@ -24,7 +24,7 @@ use crate::drawing::{self, DrawingElement};
 use crate::fonts::hsla;
 use crate::reading::{self, Offer};
 use crate::sheet::SheetElement;
-use crate::text::TextElement;
+use crate::text::{TextElement, TextSize};
 use state::view::draws::Part;
 
 pub const DIVIDER: Pixels = px(5.0);
@@ -113,6 +113,7 @@ impl Workspace {
                     workspace: entity.clone(),
                     pane,
                     part,
+                    size: TextSize::Editor,
                 };
                 let body = match target.and_then(Pane::active) {
                     Some(Tab::Ink(_)) => div().flex_1().min_h_0().overflow_hidden().child(

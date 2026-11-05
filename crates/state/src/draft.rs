@@ -132,7 +132,7 @@ impl Tab {
             Tab::JsonCanvas(canvas) => match &mut canvas.doing {
                 Doing::Writing(writing) => {
                     let beside = match &mut writing.place {
-                        Place::InCard => None,
+                        Place::InPlace => None,
                         Place::Beside(beside) => Some(beside),
                     };
                     Some((&mut writing.draft, beside))

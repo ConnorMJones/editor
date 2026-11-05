@@ -77,7 +77,8 @@ pub fn pane_bar(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>
         | Drag::Title
         | Drag::Sidebar
         | Drag::Divider { .. }
-        | Drag::Split { .. } => Held::Free,
+        | Drag::Split { .. }
+        | Drag::Pan { .. } => Held::Free,
     };
     let colors = workspace.theme.editor;
     let areas = workspace.areas.clone();
