@@ -78,6 +78,10 @@ pub struct Workspace {
     /// The file tree context menu, opened by a right click at `at`.
     pub tree_menu: Option<TreeMenu>,
     pub tree_drop: TreeDrop,
+    pub card_scroll: std::cell::RefCell<
+        std::collections::HashMap<(PaneId, jsoncanvas::NodeId), gpui::ScrollHandle>,
+    >,
+    pub colour_menu: Option<PaneId>,
     pub rendered: SecondaryMap<PaneId, RenderedPane>,
     pub typeset: mpsc::Sender<Request>,
     /// Pictures decoded for the last frame.

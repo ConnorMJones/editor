@@ -1,15 +1,16 @@
 use gpui::{
     AnyElement, ClickEvent, Context, DispatchPhase, Div, Hsla, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, ScrollWheelEvent, SharedString,
-    canvas, div, point, prelude::*, px,
+    Stateful, canvas, div, point, prelude::*, px,
 };
 use jsoncanvas::{Area, Cap, JsonCanvasColor, Node, NodeKind, Preset};
 use model::color::Base16;
+use model::command::JsonCanvasCommand;
 use model::geom::{Point, Surface};
 use slotmap::Key as _;
 use state::json_canvas::{
-    Adding, Doing, Embedded, Gesture, JsonCanvasFile, JsonCanvasId, Phase, Place, Pointer, SIDES,
-    Snap, along, anchor, curve, surface,
+    Adding, Doing, Embedded, GRID, Gesture, JsonCanvasFile, JsonCanvasId, Phase, Place, Pointer,
+    SIDES, Snap, along, anchor, curve, surface,
 };
 use state::reading::Taps;
 use state::view::draws::Part;
@@ -29,7 +30,11 @@ const ARROW: f32 = 12.0;
 const CORNER: f32 = 8.0;
 const PADDING: f32 = 12.0;
 const HANDLE: f32 = 8.0;
-const CARD_TINT: f32 = 0.12;
+const DOT: f32 = 2.0;
+const DOT_SPACING: f32 = 16.0;
+const TOOL: f32 = 28.0;
+const ICON: f32 = 14.0;
+const CARD_TINT: f32 = 0.16;
 
 #[derive(Clone, Copy)]
 enum Held {
@@ -74,6 +79,8 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
     let (id, view, last) = (tab.file(), tab.view, tab.last);
     let file = &state.json_canvases[id];
     let board = file.canvas();
+    (this.card_scroll.borrow_mut())
+        .retain(|(at, node), _| *at != pane || board.node(node).is_some());
     let area_of = |node: &jsoncanvas::NodeId| board.node(node).map(|node| tab.shown(node));
     let theme = &this.theme;
     let colour = |color: Option<JsonCanvasColor>, fallback: Hsla| colour(theme, color, fallback);
@@ -103,6 +110,7 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
             })
         })
         .collect();
+    let dots = hsla(theme.surface);
     let workspace = cx.entity();
     let backdrop = canvas(
         {
@@ -126,6 +134,32 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
                 let at = frame.to_pane.apply(at);
                 point(bounds.origin.x + px(at.x), bounds.origin.y + px(at.y))
             };
+            let mut step = GRID as f32;
+            while step * frame.scale < DOT_SPACING {
+                step *= 2.0;
+            }
+            let first = frame.from_pane.apply(Point::new(0.0, 0.0));
+            let last = frame.from_pane.apply(Point::new(
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ));
+            let columns = ((first.x / step).floor() as i64)..=((last.x / step).ceil() as i64);
+            let rows = ((first.y / step).floor() as i64)..=((last.y / step).ceil() as i64);
+            for row in rows {
+                for column in columns.clone() {
+                    let at = on_screen(Point::new(column as f32 * step, row as f32 * step));
+                    window.paint_quad(
+                        gpui::fill(
+                            gpui::Bounds::new(
+                                point(at.x - px(DOT * 0.5), at.y - px(DOT * 0.5)),
+                                gpui::size(px(DOT), px(DOT)),
+                            ),
+                            dots,
+                        )
+                        .corner_radii(px(DOT * 0.5)),
+                    );
+                }
+            }
             for (area, color) in &groups {
                 let [min, max] = corners(*area);
                 let (min, max) = (on_screen(min), on_screen(max));
@@ -293,10 +327,15 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
         })
         .collect();
     let dot_fill = hsla(theme.background);
+    let picked_ids: Vec<jsoncanvas::NodeId> = (picked.iter())
+        .flat_map(|picked| picked.nodes())
+        .cloned()
+        .collect();
     let picked: Vec<Area> = (picked.iter())
         .flat_map(|picked| picked.nodes())
         .filter_map(area_of)
         .collect();
+    let around = (picked.iter().copied().map(surface)).reduce(|a, b| a.union(&b));
     let boxing = match gesture {
         Some(Gesture::Boxing { from, to, .. }) => Some([*from, *to]),
         Some(
@@ -440,11 +479,42 @@ pub fn body(this: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) -> Div 
     )
     .absolute()
     .size_full();
+    let tools = match (gesture, around) {
+        (Some(Gesture::Idle), Some(around)) => {
+            let icons: &[Icon] = match picked_ids.as_slice() {
+                [only]
+                    if matches!(
+                        board.node(only).map(|node| &node.kind),
+                        Some(NodeKind::Text(_))
+                    ) =>
+                {
+                    &[Icon::Delete, Icon::Colour, Icon::Focus, Icon::Edit]
+                }
+                _ => &[Icon::Delete, Icon::Colour, Icon::Focus],
+            };
+            let top = place(around.min());
+            let middle = place(Point::new((around.min().x + around.max().x) / 2.0, 0.0));
+            Some(toolbar(this, pane, (middle.x, top.y), icons, cx))
+        }
+        (
+            Some(
+                Gesture::Idle
+                | Gesture::Pressed { .. }
+                | Gesture::Moving(_)
+                | Gesture::Resizing(_)
+                | Gesture::Boxing { .. }
+                | Gesture::Connecting { .. },
+            )
+            | None,
+            _,
+        ) => None,
+    };
     div().size_full().child(
         base.children(labels)
             .children(edge_labels)
             .children(shown)
-            .child(overlay),
+            .child(overlay)
+            .children(tools),
     )
 }
 
@@ -501,7 +571,7 @@ impl Cards<'_> {
             .border_2()
             .border_color(border)
             .bg(match node.color {
-                Some(_) => hsla(theme.surface).blend(border.opacity(CARD_TINT)),
+                Some(_) => hsla(theme.background).blend(border.opacity(CARD_TINT)),
                 None => hsla(theme.surface),
             })
             .overflow_hidden()
@@ -553,16 +623,32 @@ impl Cards<'_> {
                     document::item(this, pane, from, root, cx)
                 })
                 .collect();
+            let scroll = (this.card_scroll.borrow_mut())
+                .entry((pane, node.id.clone()))
+                .or_default()
+                .clone();
+            let held = scroll.clone();
             Some(
                 div()
-                    .id(("card-text", index))
                     .size_full()
-                    .overflow_y_scroll()
-                    .p(px(PADDING * scale))
-                    .flex()
-                    .flex_col()
-                    .gap(fonts.prose_size * 0.5)
-                    .children(items)
+                    .on_scroll_wheel(move |_, _, cx| {
+                        match held.max_offset().y.partial_cmp(&px(0.0)) {
+                            Some(std::cmp::Ordering::Greater) => cx.stop_propagation(),
+                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) | None => {}
+                        }
+                    })
+                    .child(
+                        div()
+                            .id(("card-text", index))
+                            .track_scroll(&scroll)
+                            .size_full()
+                            .overflow_y_scroll()
+                            .p(px(PADDING * scale))
+                            .flex()
+                            .flex_col()
+                            .gap(fonts.prose_size * 0.5)
+                            .children(items),
+                    )
                     .into_any_element(),
             )
         };
@@ -601,8 +687,20 @@ impl Cards<'_> {
                 plain(SharedString::from(format!("{file} (missing)")))
             }
             (None, NodeKind::File { file, .. }, None, _) => plain(SharedString::from(file.clone())),
-            (None, NodeKind::Link(url), _, _) => plain(SharedString::from(url.clone())),
+            (None, NodeKind::Link(url), _, _) => div()
+                .p(px(PADDING * scale))
+                .text_color(hsla(theme.prose.link))
+                .underline()
+                .child(SharedString::from(url.clone()))
+                .into_any_element(),
             (None, NodeKind::Group { .. }, _, _) => div().into_any_element(),
+        };
+        let shell = match &node.kind {
+            NodeKind::Link(_) | NodeKind::File { .. } => {
+                let hover = hsla(theme.chrome.hover);
+                shell.cursor_pointer().hover(move |style| style.bg(hover))
+            }
+            NodeKind::Text(_) | NodeKind::Group { .. } => shell,
         };
         shell.on_click(opens).child(content).into_any_element()
     }
@@ -641,4 +739,193 @@ fn pointing(
     state::json_canvas::pointer(&mut this.state, pane, phase, pointer);
     this.flush(cx);
     cx.notify();
+}
+
+#[derive(Clone, Copy)]
+enum Icon {
+    Delete,
+    Colour,
+    Focus,
+    Edit,
+}
+
+fn toolbar(
+    this: &Workspace,
+    pane: PaneId,
+    (middle, top): (f32, f32),
+    icons: &[Icon],
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let theme = &this.theme;
+    let (text, hover, surface) = (
+        hsla(theme.text),
+        hsla(theme.chrome.hover),
+        hsla(theme.surface),
+    );
+    let button = |icon: Icon, cx: &mut Context<Workspace>| {
+        div()
+            .id(("canvas-tool", icon as usize))
+            .size(px(TOOL))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .hover(move |style| style.bg(hover))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                let command = match icon {
+                    Icon::Delete => Some(JsonCanvasCommand::Delete),
+                    Icon::Focus => Some(JsonCanvasCommand::Focus),
+                    Icon::Edit => Some(JsonCanvasCommand::Write),
+                    Icon::Colour => None,
+                };
+                this.colour_menu = match (command, this.colour_menu) {
+                    (Some(_), _) => None,
+                    (None, Some(open)) if open == pane => None,
+                    (None, Some(_) | None) => Some(pane),
+                };
+                match command {
+                    Some(command) => state::json_canvas::command(&mut this.state, command),
+                    None => {}
+                }
+                window.focus(&this.focus, cx);
+                this.changed(cx);
+            }))
+            .child(icon_shape(icon, text))
+    };
+    let buttons: Vec<Stateful<Div>> = icons.iter().map(|icon| button(*icon, cx)).collect();
+    let swatches = match this.colour_menu {
+        Some(open) if open == pane => Some(()),
+        Some(_) | None => None,
+    }
+    .map(|()| {
+        let presets = [
+            None,
+            Some(Preset::Red),
+            Some(Preset::Orange),
+            Some(Preset::Yellow),
+            Some(Preset::Green),
+            Some(Preset::Cyan),
+            Some(Preset::Purple),
+        ];
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(4.0))
+            .p(px(4.0))
+            .rounded_md()
+            .bg(surface)
+            .children(presets.into_iter().enumerate().map(|(at, preset)| {
+                let fill = colour(theme, preset.map(JsonCanvasColor::Preset), surface);
+                div()
+                    .id(("canvas-swatch", at))
+                    .size(px(ICON + 4.0))
+                    .rounded_full()
+                    .bg(fill)
+                    .border_1()
+                    .border_color(text)
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.colour_menu = None;
+                        state::json_canvas::command(
+                            &mut this.state,
+                            JsonCanvasCommand::Recolor(preset),
+                        );
+                        window.focus(&this.focus, cx);
+                        this.changed(cx);
+                    }))
+            }))
+    });
+    div()
+        .absolute()
+        .left(px(middle))
+        .top(px(top - TOOL - 12.0))
+        .size_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .p(px(2.0))
+                        .rounded_md()
+                        .bg(surface)
+                        .border_1()
+                        .border_color(hsla(theme.chrome.border))
+                        .children(buttons),
+                )
+                .children(swatches),
+        )
+        .into_any_element()
+}
+
+fn icon_shape(icon: Icon, color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let (origin, side) = (bounds.origin, f32::from(bounds.size.width));
+            let at = |x: f32, y: f32| point(origin.x + px(x * side), origin.y + px(y * side));
+            let mut path = PathBuilder::stroke(px(1.5));
+            let strokes: &[&[(f32, f32)]] = match icon {
+                Icon::Delete => &[
+                    &[(0.1, 0.25), (0.9, 0.25)],
+                    &[(0.38, 0.25), (0.38, 0.1), (0.62, 0.1), (0.62, 0.25)],
+                    &[(0.22, 0.25), (0.28, 0.92), (0.72, 0.92), (0.78, 0.25)],
+                ],
+                Icon::Colour => &[&[
+                    (0.5, 0.08),
+                    (0.8, 0.2),
+                    (0.92, 0.5),
+                    (0.8, 0.8),
+                    (0.5, 0.92),
+                    (0.2, 0.8),
+                    (0.08, 0.5),
+                    (0.2, 0.2),
+                    (0.5, 0.08),
+                ]],
+                Icon::Focus => &[
+                    &[(0.08, 0.35), (0.08, 0.08), (0.35, 0.08)],
+                    &[(0.65, 0.08), (0.92, 0.08), (0.92, 0.35)],
+                    &[(0.92, 0.65), (0.92, 0.92), (0.65, 0.92)],
+                    &[(0.35, 0.92), (0.08, 0.92), (0.08, 0.65)],
+                ],
+                Icon::Edit => &[
+                    &[
+                        (0.15, 0.85),
+                        (0.2, 0.65),
+                        (0.7, 0.15),
+                        (0.85, 0.3),
+                        (0.35, 0.8),
+                        (0.15, 0.85),
+                    ],
+                    &[(0.6, 0.25), (0.75, 0.4)],
+                ],
+            };
+            for stroke in strokes {
+                let mut points = stroke.iter().map(|(x, y)| at(*x, *y));
+                match points.next() {
+                    Some(first) => path.move_to(first),
+                    None => continue,
+                }
+                for point in points {
+                    path.line_to(point);
+                }
+            }
+            match path.build() {
+                Ok(path) => window.paint_path(path, color),
+                Err(error) => tracing::warn!(%error, "canvas icon"),
+            }
+        },
+    )
+    .size(px(ICON))
 }

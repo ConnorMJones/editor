@@ -1126,6 +1126,10 @@ const CANVAS: Bindings = &[
         canvas(JsonCanvasCommand::Delete),
     ),
     (&[Key::char('y')], canvas(JsonCanvasCommand::Duplicate)),
+    (
+        &[Key::char('z'), Key::char('s')],
+        canvas(JsonCanvasCommand::Focus),
+    ),
     (&[Key::char('i')], canvas(JsonCanvasCommand::Write)),
     (
         &[Key::code(KeyCode::Enter)],

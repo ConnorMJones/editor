@@ -103,6 +103,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `]]` / `[[` | book | Next / previous heading |
 | `d`, `del` | canvas | Delete |
 | `y` | canvas | Duplicate |
+| `zs` | canvas | Zoom to the selection |
 | `at`, double click | canvas | New text card |
 | `i`, `ret`, double click | canvas | Write in the card |
 | `esc` | card | Keep the text and close |
@@ -1122,6 +1123,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `d` | `JsonCanvas(Delete)` |
 | `del` | `JsonCanvas(Delete)` |
 | `y` | `JsonCanvas(Duplicate)` |
+| `z s` | `JsonCanvas(Focus)` |
 | `i` | `JsonCanvas(Write)` |
 | `ret` | `JsonCanvas(Write)` |
 | `a t` | `JsonCanvas(AddText)` |

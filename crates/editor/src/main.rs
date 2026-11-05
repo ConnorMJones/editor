@@ -234,6 +234,8 @@ fn main() -> anyhow::Result<()> {
                         session: session_file,
                         drag: Drag::Idle,
                         drop_zone: None,
+                        card_scroll: Default::default(),
+                        colour_menu: None,
                         tree_drop: TreeDrop::Away,
                         resize_edge: None,
                         areas: Default::default(),

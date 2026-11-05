@@ -909,6 +909,23 @@ pub fn command(state: &mut State, command: JsonCanvasCommand) {
     };
     let next = match (command, picked) {
         (JsonCanvasCommand::Unpick, _) => Ok(Next::Arrange),
+        (JsonCanvasCommand::Focus, picked) => {
+            let canvas = file.canvas();
+            let around = (picked.iter())
+                .flat_map(Picked::nodes)
+                .filter_map(|id| canvas.node(id))
+                .map(|node| surface(node.area))
+                .reduce(|a, b| a.union(&b));
+            arranging.picked = picked;
+            match (around, tab.last) {
+                (Some(around), Some(measure)) => {
+                    tab.view = PlaneView::fitted(around, measure.viewport);
+                    Ok(Next::Arrange)
+                }
+                (None, _) => Err(Notice::NothingPicked),
+                (Some(_), None) => Ok(Next::Arrange),
+            }
+        }
         (JsonCanvasCommand::AddText, picked) => match text_card(tab.view.centre) {
             Some(card) => Ok(Next::Write(file.edited.add_node(card))),
             None => {

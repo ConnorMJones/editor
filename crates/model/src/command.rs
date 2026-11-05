@@ -579,6 +579,7 @@ pub enum Resize {
 pub enum JsonCanvasCommand {
     Delete,
     Duplicate,
+    Focus,
     AddText,
     Group,
     Write,

@@ -108,6 +108,7 @@ const DRAWINGS: &str = "\
 | `]]` / `[[` | book | Next / previous heading |
 | `d`, `del` | canvas | Delete |
 | `y` | canvas | Duplicate |
+| `zs` | canvas | Zoom to the selection |
 | `at`, double click | canvas | New text card |
 | `i`, `ret`, double click | canvas | Write in the card |
 | `esc` | card | Keep the text and close |

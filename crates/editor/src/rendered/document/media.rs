@@ -25,8 +25,9 @@ pub fn code_box(
         None => StyledText::new(text),
     };
     div()
-        .relative()
         .w_full()
+        .flex()
+        .flex_col()
         .px_3()
         .py_2()
         .rounded_md()
@@ -36,16 +37,15 @@ pub fn code_box(
         .line_height(fonts.mono_size * 1.3)
         .whitespace_normal()
         .overflow_hidden()
-        .child(styled)
         .children(label.map(|label| {
             div()
-                .absolute()
-                .top_1()
-                .right_2()
+                .flex()
+                .justify_end()
                 .text_size(fonts.ui_size * 0.85)
                 .text_color(hsla(theme.muted))
                 .child(label)
         }))
+        .child(styled)
 }
 
 /// A muted box standing in for content that cannot be shown yet.
