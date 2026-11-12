@@ -8,8 +8,10 @@ use model::mode::Mode;
 use state::git::conflict::{self, Conflicts};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, Indent, text_format};
-use state::view::layout::{Scroll, Viewport};
 use state::view::scroll;
+use state::view::text_view::{Scroll, Sideways, Viewport};
+
+const LONG_LINE: usize = 20_000;
 
 fn display(c: &mut Criterion) {
     let loader = helix_core::config::default_lang_loader();
@@ -37,6 +39,7 @@ fn display(c: &mut Criterion) {
         anchor: middle,
         rows: 0,
         viewport,
+        sideways: Sideways::Wrapped,
     };
     let mut frame = Frame::default();
     c.bench_function("layout+highlight 60x120 of 20k-line rust", |b| {
@@ -55,7 +58,7 @@ fn display(c: &mut Criterion) {
         })
     });
 
-    let format = text_format(viewport, Indent::of(&doc, &loader));
+    let format = text_format(scroll, Indent::of(&doc, &loader));
     let far = doc.text.line_to_char(doc.text.len_lines() / 2 + 500);
     c.bench_function("follow cursor 500 lines away", |b| {
         b.iter(|| {
@@ -76,6 +79,46 @@ fn display(c: &mut Criterion) {
         b.iter(|| {
             conflict::parse(black_box(doc.text.slice(..)), 1, &mut conflicts);
             conflicts.list.len()
+        })
+    });
+
+    // Prose written one paragraph per line, scrolled halfway down one paragraph.
+    let paragraph = "Some prose with *emphasis* and a [link](https://example.com) that runs on. "
+        .repeat(LONG_LINE / 76);
+    let prose = Rope::from(format!("{paragraph}\n\n").repeat(40));
+    let notes = TextDoc::new(prose, Path::new("notes.md"), &loader);
+    let line = notes.text.line_to_char(20);
+    let inside = Scroll {
+        anchor: line + LONG_LINE / 2,
+        ..scroll
+    };
+    let cursor = Selection::point(line + LONG_LINE / 2 + 400);
+    c.bench_function("layout of a markdown line, 20k chars", |b| {
+        b.iter(|| {
+            display::layout(
+                &mut frame,
+                black_box(&notes),
+                black_box(&cursor),
+                inside,
+                &loader,
+                Focus::Focused(Mode::Normal),
+                &TextAnnotations::default(),
+                &[],
+            );
+            frame.rows.len()
+        })
+    });
+    let format = text_format(inside, Indent::of(&notes, &loader));
+    c.bench_function("follow cursor in a markdown line, 20k chars", |b| {
+        b.iter(|| {
+            scroll::follow(
+                notes.text.slice(..),
+                black_box(line + LONG_LINE / 2 + 400),
+                inside,
+                0,
+                &format,
+                &TextAnnotations::default(),
+            )
         })
     });
 }

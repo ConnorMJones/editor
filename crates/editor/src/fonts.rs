@@ -25,6 +25,7 @@ pub struct Fonts {
     pub prose_size: Pixels,
     /// Distance from a prose line's baseline to its bottom, at `prose_size` and `PROSE_LINE`.
     pub prose_depth: Pixels,
+    pub zoom: f32,
 }
 
 impl Fonts {
@@ -40,6 +41,7 @@ impl Fonts {
             prose: self.prose.clone(),
             prose_size: self.prose_size * factor,
             prose_depth: self.prose_depth * factor,
+            zoom: self.zoom * factor,
         }
     }
 
@@ -68,6 +70,7 @@ impl Fonts {
             prose_size: px(prose_size),
             // GPUI centres the glyph box in the line.
             prose_depth: px((prose_size * PROSE_LINE - ascent - descent) / 2.0 + descent),
+            zoom: 1.0,
         }
     }
 

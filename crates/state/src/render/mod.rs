@@ -9,6 +9,7 @@ pub mod typeset;
 
 use model::command::{Direction, ReadCommand, ScrollBy, Shown};
 
+use crate::view::layout::TabPane;
 use crate::view::mode;
 use crate::view::tab::{ShowingMut, Tab, TextTabs};
 use crate::{Effect, State};

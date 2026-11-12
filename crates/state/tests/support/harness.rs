@@ -11,11 +11,13 @@ use model::config::TabsConfig;
 use model::key::{Key, KeyCode, Mods};
 use model::register::Clipboard;
 use state::text::buffer::{BufferId, TextDoc};
+use state::view::layout::TabPane;
 
 use state::project::watch::{self, Watcher};
 use state::render::typeset::{Look, Request};
-use state::view::layout::{PaneId, TextView};
+use state::view::layout::PaneId;
 use state::view::tab::Tab;
+use state::view::text_view::TextView;
 use state::{Confirm, Effect, Overlay, Root, State, input, job, text::registers};
 
 pub struct Harness {

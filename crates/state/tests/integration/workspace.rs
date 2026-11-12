@@ -12,6 +12,7 @@ use state::sidebar::tree::{RowKind, TreeAction, TreeEdit, TreeTarget};
 use state::text::buffer::{Disk, Highlight, ParseJob};
 use state::text::highlight;
 use state::view::layout::Node;
+use state::view::layout::TabPane;
 use state::view::panes::{self, Click};
 use state::{Files, Overlay, Repo, Sidebar, State};
 

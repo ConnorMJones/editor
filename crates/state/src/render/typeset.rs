@@ -29,6 +29,7 @@ use crate::render::markdown::{
 use crate::render::pages::{self, Compiles, Locating};
 use crate::text::buffer::{Buffer, BufferId};
 use crate::view::layout::PaneId;
+use crate::view::layout::{TabLayout, TabPane};
 use crate::view::tab::{BesideMut, ShowingMut, TextTabs};
 use crate::viewer::{ProbeError, Probed};
 use crate::{Effect, State};

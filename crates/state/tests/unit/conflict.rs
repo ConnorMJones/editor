@@ -5,7 +5,7 @@ use model::theme::Background;
 use state::git::conflict::{self, Conflict, Conflicts, Label, Sections, Side};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, RowKind, Shade};
-use state::view::layout::{Scroll, Sideways, Viewport};
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 fn parse(text: &str) -> Conflicts {
     let mut conflicts = Conflicts::EMPTY;

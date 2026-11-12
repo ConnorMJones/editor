@@ -49,6 +49,7 @@ fn keystroke(c: &mut Criterion) {
             | Effect::Typeset(_)
             | Effect::WriteClipboard { .. }
             | Effect::ReadClipboard { .. }
+            | Effect::ReadClipboardImage { .. }
             | Effect::OpenUrl(_) => {}
         }
     }

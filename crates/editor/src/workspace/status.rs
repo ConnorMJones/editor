@@ -375,6 +375,15 @@ impl Workspace {
                     .child(status.flags),
             )
             .child(div().flex_1())
+            .children(match self.state.layout.maximised() {
+                panes::Maximised::Pane(_) => Some(
+                    div()
+                        .px_2()
+                        .text_color(hsla(theme.muted))
+                        .child("maximised"),
+                ),
+                panes::Maximised::No => None,
+            })
             .child(div().px_2().text_color(hsla(theme.muted)).child(pending))
             .children(parts)
     }

@@ -63,7 +63,7 @@ pub enum Completes {
     Paths,
 }
 
-pub const COMMANDS: [(&[&str], Completes); 32] = [
+pub const COMMANDS: [(&[&str], Completes); 36] = [
     (&["write", "w"], Completes::Paths),
     (&["write!", "w!"], Completes::Paths),
     (&["write-all", "wa"], Completes::Nothing),
@@ -75,6 +75,22 @@ pub const COMMANDS: [(&[&str], Completes); 32] = [
     (&["quit-all!", "qa!"], Completes::Nothing),
     (&["buffer-close", "bc", "bclose"], Completes::Nothing),
     (&["buffer-close!", "bc!", "bclose!"], Completes::Nothing),
+    (
+        &["buffer-close-others", "bco", "bcloseother"],
+        Completes::Nothing,
+    ),
+    (
+        &["buffer-close-others!", "bco!", "bcloseother!"],
+        Completes::Nothing,
+    ),
+    (
+        &["buffer-close-all", "bca", "bcloseall"],
+        Completes::Nothing,
+    ),
+    (
+        &["buffer-close-all!", "bca!", "bcloseall!"],
+        Completes::Nothing,
+    ),
     (&["reload", "rl"], Completes::Nothing),
     (&["reload-all", "rla"], Completes::Nothing),
     (&["buffer-next", "bn", "bnext"], Completes::Nothing),
@@ -384,6 +400,18 @@ pub fn parse(line: &str) -> Result<Command, Notice> {
         ("bc" | "bclose" | "buffer-close", _) => bare(Command::CloseBuffer, "buffer-close"),
         ("bc!" | "bclose!" | "buffer-close!", _) => {
             bare(Command::ForceCloseBuffer, "buffer-close!")
+        }
+        ("bco" | "bcloseother" | "buffer-close-others", _) => {
+            bare(Command::CloseOthers, "buffer-close-others")
+        }
+        ("bco!" | "bcloseother!" | "buffer-close-others!", _) => {
+            bare(Command::ForceCloseOthers, "buffer-close-others!")
+        }
+        ("bca" | "bcloseall" | "buffer-close-all", _) => {
+            bare(Command::CloseAll, "buffer-close-all")
+        }
+        ("bca!" | "bcloseall!" | "buffer-close-all!", _) => {
+            bare(Command::ForceCloseAll, "buffer-close-all!")
         }
         ("rl" | "reload", _) => bare(Command::Reload, "reload"),
         ("rla" | "reload-all", _) => bare(Command::ReloadAll, "reload-all"),

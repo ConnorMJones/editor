@@ -53,34 +53,49 @@ edt notes.md      # a file, in its git repository (or its folder when it is not 
 
 ## Keybindings
 
-[docs/keymap.md](docs/keymap.md) for keybinding list.
-Keys are mostly helix with some custom ones.
-Arrow keys are also aliased with hjkl.
+[examples/keymap.md](examples/keymap.md) for the full list.
+Keys are mostly the ones from helix with unique ones for cutsom aspects of this editor.
+
+Workspace
 - `space e` file tree
-- `space g` diff tree
+- `space g` changes (git source view)
 - `space ?` command pallet
-Each file type has it's own collection of views.
-So view switching here depends on the file type.
-- `space d` switch to diff view
-- `space v` split rendered view
-- `spave V` toggle full rendered view
-- `space tab` cycle views
-tiling mostly comes down to `w` (window).
-- `space w v` split
-- `space w q` closes focused tile
-- `space w h/l` switch between focused tile
-- `space w </>` resize split tiles. (you can also use mouse)
 
-os key + mouse you can move things around. 
+Panes [`C-w` or `space w`]
+- `v`/`s` split
+- `hjkl` focus
+- `HJKL` swap
+- `q` close
+- `z` maximise
+- `< > + - =` resize
+- `m` + `hjkl` move the tab over
 
-For drawing:
-- `u/U` for undo and redo respectively
-- `e/b` erase and draw
-- `A` adds a page for `*.pdt`
-- `+/-/=` zoom and fit to page
-- `hjkl` pan
-- `]l/[l` next and previous layer
-- `zh/zn` toggle active layer and add a new layer
+Tabs
+- `gn`/`gp` next/previous
+- `ga` last used
+- `g<`/`g>` move
+- `:bc`/`:bco` close
+
+Views [`z`] depends on file type
+- `zr` rendered
+- `zv` side by side
+- `zd` diff
+- `zs` source
+- `z tab` cycle
+- `+ - =` zoom on rendered notes, books, pages and drawings
+
+Drawing
+- `b`/`e` brush/eraser
+- `u`/`U` undo/redo
+- `po`/`pd` add/remove page
+- `]l`/`[l` layers
+- `space i` image picker
+
+Canvas
+- `at` new card
+- `i` write
+- `ag` group
+- `c1`-`c6` colour
 
 ## Configure
 

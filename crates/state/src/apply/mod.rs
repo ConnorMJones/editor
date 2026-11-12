@@ -301,6 +301,10 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
         Command::ForceQuit => out.push(Effect::Quit),
         Command::CloseBuffer => close_active(state, Force::No),
         Command::ForceCloseBuffer => close_active(state, Force::Yes),
+        Command::CloseOthers => files::close_tabs(state, files::Which::Others, Force::No),
+        Command::ForceCloseOthers => files::close_tabs(state, files::Which::Others, Force::Yes),
+        Command::CloseAll => files::close_tabs(state, files::Which::All, Force::No),
+        Command::ForceCloseAll => files::close_tabs(state, files::Which::All, Force::Yes),
         Command::Reload => match focused_file(&state.layout) {
             Ok(opened) => {
                 let job = reload_job(state, opened);
@@ -327,6 +331,7 @@ pub fn apply(state: &mut State, command: Command, out: &mut Vec<Effect>) {
 
         Command::Window(command) => panes::window(state, command, out),
         Command::CycleBuffer(cycle) => panes::cycle_tab(state, cycle),
+        Command::Tab(command) => panes::tab(state, command),
         Command::Tree(command) => panes::tree(state, command, out),
         Command::Picker(command) => panes::picker(state, command, out),
 

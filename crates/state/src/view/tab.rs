@@ -12,7 +12,7 @@ use crate::render::document::{DocumentSeen, DocumentState};
 use crate::render::pages::{PagesSeen, PagesState};
 use crate::render::{Opening, Rendering};
 use crate::text::buffer::BufferId;
-use crate::view::layout::{Sideways, TextView};
+use crate::view::text_view::{Sideways, TextView};
 use crate::viewer::{ImageId, ImageTab};
 
 pub trait Modes: Sized + Clone {
@@ -450,5 +450,17 @@ impl Tab {
                 Arrival::AsSaved,
             )),
         }
+    }
+}
+
+impl panes::Tabbed for Tab {
+    type Key = Opened;
+
+    fn key(&self) -> Opened {
+        self.opened()
+    }
+
+    fn split_copy(&self) -> Tab {
+        Tab::split_copy(self)
     }
 }

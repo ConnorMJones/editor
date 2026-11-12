@@ -1,5 +1,5 @@
 ### Coding Guidelines
-Before writing or changing code, read docs/design.md; it describes the approach, and this
+Before writing or changing code, read design.md; it describes the approach, and this
 file describes the result.
 
 Code style:

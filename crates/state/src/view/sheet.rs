@@ -10,7 +10,7 @@ use crate::drawing::{InkTabs, PagedFiles, PagedId, PdfFiles, PdfId};
 use crate::json_canvas::{Arrival, JsonCanvasFile, JsonCanvasId};
 use crate::render::pages::Compiles;
 use crate::text::buffer::BufferId;
-use crate::view::layout::PaneId;
+use crate::view::layout::{Layout, PaneId};
 use crate::view::tab::{Showing, ShowingMut, Tab};
 use crate::viewer::{ImageFiles, ImageId};
 
@@ -258,6 +258,10 @@ pub fn measured(state: &mut State, pane: PaneId, measure: Measure) {
 }
 
 pub fn wheeled(state: &mut State, pane: PaneId, wheel: Wheel, viewport: Viewport) {
+    match (&wheel, prose_zoom(&mut state.layout, pane)) {
+        (Wheel::Zoom { factor, .. }, Some(prose)) => return *prose = prose.by(*factor),
+        (Wheel::Zoom { .. } | Wheel::Pan(_), _) => {}
+    }
     match (viewed(state, pane), wheel) {
         (Some(Viewed::Pages { view, stack, .. }), Wheel::Pan(by)) => view.pan(stack, viewport, by),
         (Some(Viewed::Pages { view, stack, .. }), Wheel::Zoom { at, factor }) => {
@@ -273,6 +277,10 @@ pub fn wheeled(state: &mut State, pane: PaneId, wheel: Wheel, viewport: Viewport
 
 pub fn command(state: &mut State, command: ViewCommand) {
     let pane = state.layout.focus();
+    match (command, prose_zoom(&mut state.layout, pane)) {
+        (ViewCommand::Zoom(by), Some(prose)) => return *prose = zoom(*prose, by),
+        (ViewCommand::Zoom(_) | ViewCommand::Pan(_) | ViewCommand::Fit, _) => {}
+    }
     let result = match (viewed(state, pane), command) {
         (None, _) => Ok(()),
         (Some(Viewed::Pages { view, .. }), ViewCommand::Zoom(by)) => {
@@ -348,5 +356,16 @@ pub fn pan(side: Side, viewport: Viewport) -> Vector<Pane> {
         Side::Right => Vector::new(x, 0.0),
         Side::Up => Vector::new(0.0, -y),
         Side::Down => Vector::new(0.0, y),
+    }
+}
+
+fn prose_zoom(layout: &mut Layout, pane: PaneId) -> Option<&mut Zoom> {
+    match layout.find_pane(pane)?.active_mut()? {
+        Tab::Book(book) => Some(&mut book.zoom),
+        Tab::Text(text) => match text.showing_mut() {
+            ShowingMut::Document(_, view, _) => Some(&mut view.zoom),
+            ShowingMut::Source(_) | ShowingMut::Diff(..) | ShowingMut::Pages(..) => None,
+        },
+        Tab::Ink(_) | Tab::Image(_) | Tab::JsonCanvas(_) => None,
     }
 }

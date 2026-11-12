@@ -10,7 +10,8 @@ use state::text::buffer::TextDoc;
 use state::view::display::{
     self, CursorShape, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
-use state::view::layout::{Scroll, Sideways, Viewport};
+use state::view::scroll;
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 fn loader() -> Loader {
     let loader = helix_core::config::default_lang_loader();
@@ -220,4 +221,130 @@ fn rust_captures_fall_back_to_theme_prefixes() {
     assert_eq!(at("if").fg, Some(Base16::Base0E));
     assert_eq!(at("42").fg, Some(Base16::Base09));
     assert_eq!(at("true").fg, Some(Base16::Base09));
+}
+
+#[test]
+fn highlights_start_inside_a_node() {
+    let loader = loader();
+    let doc = TextDoc::new(
+        Rope::from("/*\n one\n two\n three\n four\n*/\nfn main() { let x = 42; }\n"),
+        Path::new("main.rs"),
+        &loader,
+    );
+    let layout = |frame: &mut Frame, anchor: usize, rows: u16| {
+        display::layout(
+            frame,
+            &doc,
+            &Selection::point(0),
+            Scroll {
+                anchor,
+                ..scroll(rows, 80)
+            },
+            &loader,
+            Focus::Unfocused,
+            &TextAnnotations::default(),
+            &[],
+        )
+    };
+    let (mut whole, mut inside) = (Frame::default(), Frame::default());
+    layout(&mut whole, 0, 8);
+    layout(&mut inside, doc.text.line_to_char(3), 5);
+    assert_eq!(rows(&inside), rows(&whole)[3..]);
+    for row in 0..inside.rows.len() {
+        assert_eq!(
+            inside.runs[inside.rows[row].runs.clone()],
+            whole.runs[whole.rows[row + 3].runs.clone()],
+            "row {row}"
+        );
+    }
+}
+
+#[test]
+fn highlights_continue_past_a_window() {
+    let loader = loader();
+    let doc = TextDoc::new(
+        Rope::from(
+            "let s = \"a string that runs a long way past the window\";\n\
+             let t = \"another string, also long enough to pass one\";\n\
+             let x = 42;\n",
+        ),
+        Path::new("main.rs"),
+        &loader,
+    );
+    let layout = |frame: &mut Frame, cols: u16| {
+        display::layout(
+            frame,
+            &doc,
+            &Selection::point(0),
+            Scroll {
+                sideways: Sideways::Unwrapped { left: 0 },
+                ..scroll(3, cols)
+            },
+            &loader,
+            Focus::Unfocused,
+            &TextAnnotations::default(),
+            &[],
+        )
+    };
+    let (mut narrow, mut wide) = (Frame::default(), Frame::default());
+    layout(&mut narrow, 10);
+    layout(&mut wide, 200);
+    for (row, text) in rows(&narrow).into_iter().enumerate() {
+        for at in 0..text.len() {
+            assert_eq!(
+                style_at(&narrow, row, at),
+                style_at(&wide, row, at),
+                "row {row} byte {at}"
+            );
+        }
+    }
+}
+
+#[test]
+fn markdown_highlights_start_inside_a_wrapped_line() {
+    let loader = loader();
+    let doc = TextDoc::new(
+        Rope::from("Some prose with **strong words** and `code` that wraps. ".repeat(6)),
+        Path::new("notes.md"),
+        &loader,
+    );
+    let at = |anchor: usize, rows: u16| Scroll {
+        anchor,
+        ..scroll(rows, 30)
+    };
+    let row = scroll::char_at(
+        doc.text.slice(..),
+        at(0, 12),
+        4,
+        0,
+        &display::text_format(at(0, 12), display::Indent::of(&doc, &loader)),
+        &TextAnnotations::default(),
+    );
+    let layout = |frame: &mut Frame, scroll: Scroll| {
+        display::layout(
+            frame,
+            &doc,
+            &Selection::point(0),
+            scroll,
+            &loader,
+            Focus::Unfocused,
+            &TextAnnotations::default(),
+            &[],
+        )
+    };
+    let (mut whole, mut inside) = (Frame::default(), Frame::default());
+    layout(&mut whole, at(0, 12));
+    layout(&mut inside, at(row, 8));
+    assert!(
+        (inside.runs.iter()).any(|run| run.style.modifiers.contains(Modifiers::BOLD)),
+        "strong words are highlighted"
+    );
+    assert_eq!(rows(&inside), rows(&whole)[4..]);
+    for row in 0..inside.rows.len() {
+        assert_eq!(
+            inside.runs[inside.rows[row].runs.clone()],
+            whole.runs[whole.rows[row + 4].runs.clone()],
+            "row {row}"
+        );
+    }
 }

@@ -8,6 +8,7 @@ use model::notice::Notice;
 use crate::apply::map_views;
 use crate::job::Job;
 use crate::reading::ReaderId;
+use crate::view::layout::TabLayout;
 use crate::view::tab::Opened;
 use crate::{Effect, State};
 

@@ -8,3 +8,4 @@ pub mod panes;
 pub mod scroll;
 pub mod sheet;
 pub mod tab;
+pub mod text_view;

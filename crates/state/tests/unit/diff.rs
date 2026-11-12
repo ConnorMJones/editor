@@ -12,7 +12,7 @@ use state::git::diff::{
 };
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Fillers, Focus, Frame, RowKind, Shade};
-use state::view::layout::{Scroll, Sideways, Viewport};
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 fn blob(byte: u8, text: &str) -> Base {
     Base::Blob {

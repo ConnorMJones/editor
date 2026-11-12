@@ -15,10 +15,12 @@ use crate::git::diff::{Base, Bases, Diff, Hunk, Side, Stamp, Tracked};
 use crate::job::Job;
 use crate::text::buffer::{Buffer, BufferId, Disk, TextDoc};
 use crate::view::display::{Indent, Shade, text_format};
-use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, TextView};
+use crate::view::layout::TabPane;
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId};
 use crate::view::scroll::{self, Padding};
 use crate::view::tab::Share;
 use crate::view::tab::{Showing, ShowingMut, TextTabs};
+use crate::view::text_view::{Scroll, TextView};
 use crate::{Effect, State};
 
 /// Index of the HEAD side in per-side arrays.

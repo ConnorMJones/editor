@@ -7,7 +7,8 @@ use helix_core::visual_offset_from_anchor;
 use state::git::conflict;
 use state::git::diffview::{Left, RIGHT};
 use state::input;
-use state::view::layout::Sideways;
+use state::view::layout::TabPane;
+use state::view::text_view::Sideways;
 
 use state::view::display::{self, Gutter, Indent};
 use state::view::scroll;

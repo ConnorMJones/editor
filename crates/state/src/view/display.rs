@@ -5,13 +5,13 @@ use helix_core::graphemes::Grapheme;
 use helix_core::indent::IndentStyle;
 use helix_core::syntax::{HighlightEvent, Highlighter, Loader};
 use helix_core::text_annotations::{LineAnnotation, TextAnnotations};
-use helix_core::{Position, RopeSlice, Selection, visual_offset_from_block};
+use helix_core::{Position, RopeSlice, Selection};
 use helix_stdx::rope::RopeSliceExt;
 use model::mode::Mode;
 use model::theme::{self, Background, Style};
 
 use crate::text::buffer::TextDoc;
-use crate::view::layout::{Scroll, Sideways, Viewport};
+use crate::view::text_view::{Scroll, Sideways, Viewport};
 
 /// Tab stops and indent-guide spacing of a document, in columns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,22 +249,13 @@ pub fn layout(
     let format = text_format(scroll, indent);
     let anchor = scroll.anchor.min(text.len_chars());
     // Negative with filler rows above the first line on screen.
-    let row_off = visual_offset_from_block(text, anchor, anchor, &format, annotations)
-        .0
-        .row as isize
-        + scroll.rows;
-    let first_line = text.char_to_line(anchor);
-    // Rows skipped past the anchor are its own wrapped rows or annotations, so one more line
-    // covers them.
-    let end_line = (first_line + viewport.rows as usize + 2).min(text.len_lines());
-    let mut highlighter = doc.highlight.syntax().map(|syntax| {
-        syntax.highlighter(
-            text,
-            loader,
-            text.line_to_byte(first_line) as u32..text.line_to_byte(end_line) as u32,
-        )
-    });
-    let mut next_event = event_char(&highlighter, text);
+    let mut top = None;
+    let tree = doc.highlight.syntax();
+    // Each grapheme fills at least one cell, so one window usually covers the viewport.
+    let cells = viewport.rows as usize * viewport.cols as usize;
+    let mut window = anchor;
+    let mut highlighter: Option<Highlighter> = None;
+    let mut next_event = usize::MAX;
     let mut syntax = theme::TEXT;
 
     let mut sel_i = 0;
@@ -279,6 +270,25 @@ pub fn layout(
 
     let formatter = DocumentFormatter::new_at_prev_checkpoint(text, &format, annotations, anchor);
     for g in formatter {
+        // Graphemes before the anchor are above the viewport.
+        let row_off = match (top, g.char_idx >= anchor) {
+            (Some(row_off), _) => row_off,
+            (None, true) => *top.insert(g.visual_pos.row as isize + scroll.rows),
+            (None, false) => continue,
+        };
+        match (tree, g.char_idx >= window) {
+            (Some(tree), true) => {
+                window = (g.char_idx + cells).min(text.len_chars());
+                highlighter = Some(tree.highlighter(
+                    text,
+                    loader,
+                    text.char_to_byte(g.char_idx) as u32..text.char_to_byte(window) as u32,
+                ));
+                next_event = event_char(&highlighter, text);
+                syntax = theme::TEXT;
+            }
+            (Some(_), false) | (None, _) => {}
+        }
         while g.char_idx >= next_event {
             match highlighter.as_mut() {
                 Some(h) => {

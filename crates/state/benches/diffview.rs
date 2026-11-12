@@ -9,8 +9,8 @@ use state::git::diff::{Base, Lines, Side, Stamp};
 use state::git::diffview::{self, Align, LEFT, RIGHT};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, Indent, text_format};
-use state::view::layout::{Scroll, Viewport};
 use state::view::scroll;
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 // Estimate: a frame lays out both sides, each like one text view (~250 us for 60x120 with
 // highlighting), plus filler lookups that are a partition point per frame and a compare per
@@ -66,7 +66,15 @@ fn diffview(c: &mut Criterion) {
         rows: 60,
         cols: 120,
     };
-    let format = text_format(viewport, Indent::of(&right, &loader));
+    let middle = right.text.line_to_char(right.text.len_lines() / 2);
+    let selection = Selection::point(middle);
+    let top = Scroll {
+        anchor: middle,
+        rows: 0,
+        viewport,
+        sideways: Sideways::Wrapped,
+    };
+    let format = text_format(top, Indent::of(&right, &loader));
     let mut align = Align::default();
     c.bench_function("diff realign 20k-line rust, ~320 hunks", |b| {
         b.iter(|| {
@@ -81,13 +89,6 @@ fn diffview(c: &mut Criterion) {
         })
     });
 
-    let middle = right.text.line_to_char(right.text.len_lines() / 2);
-    let selection = Selection::point(middle);
-    let top = Scroll {
-        anchor: middle,
-        rows: 0,
-        viewport,
-    };
     let mut frames = [Frame::default(), Frame::default()];
     c.bench_function("diff view layout 60x120, both sides", |b| {
         b.iter(|| {
@@ -117,6 +118,7 @@ fn diffview(c: &mut Criterion) {
                     anchor,
                     rows,
                     viewport,
+                    sideways: Sideways::Wrapped,
                 },
                 &loader,
                 Focus::ReadOnly,

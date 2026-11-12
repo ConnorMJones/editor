@@ -4,9 +4,11 @@ use crate::git::diff::{Bases, Tracked};
 use crate::git::diffview::{self, DiffSides, LEFT, Left, RIGHT, Right, SideRows};
 use crate::text::buffer::TextDoc;
 use crate::view::display::{Gutter, Shade};
-use crate::view::layout::{Pane, PaneId, Scroll};
+use crate::view::layout::TabPane;
+use crate::view::layout::{Pane, PaneId};
 use crate::view::scroll::Padding;
 use crate::view::tab::{Showing, Tab};
+use crate::view::text_view::Scroll;
 use helix_core::Selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

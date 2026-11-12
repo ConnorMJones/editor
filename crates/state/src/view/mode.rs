@@ -6,6 +6,7 @@ use model::notice::Notice;
 
 use crate::State;
 use crate::render::{Opening, document};
+use crate::view::layout::TabPane;
 use crate::view::layout::{Pane, PaneId};
 use crate::view::scroll;
 use crate::view::tab::{Beside, BesideMut, NoMode, Share, Showing, ShowingMut, Tab, TextTabs};

@@ -144,7 +144,7 @@ fn a_note_reads_its_image_sizes_and_reads_them_again_on_change() {
     write_png(&path, 40, 20);
     fs::write(dir.path().join("note.md"), "# Photo\n\n![](photo.png)\n").unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o note.md<ret><space>V");
+    h.keys(":o note.md<ret>zr");
     assert_eq!(shown_size(&h, &path), Some((40.0, 20.0)));
     std::thread::sleep(Duration::from_millis(20));
     write_png(&path, 10, 30);

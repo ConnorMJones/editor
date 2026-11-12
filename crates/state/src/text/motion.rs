@@ -18,8 +18,8 @@ use crate::apply::{
 };
 use crate::git::diffview::Right;
 use crate::view::display::{Indent, text_format};
-use crate::view::layout::{Edited, Scroll};
 use crate::view::scroll::{self, Pointed, SCROLLOFF};
+use crate::view::text_view::{Edited, Scroll};
 
 pub fn direction(direction: Direction) -> movement::Direction {
     match direction {

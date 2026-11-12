@@ -6,6 +6,7 @@ use state::input::picker::Items;
 use state::project::session::{self, Session, SessionError};
 use state::sidebar::Pick;
 use state::view::layout::InvalidTabs;
+use state::view::layout::TabPane;
 use state::view::panes::{self, Click};
 use state::{Overlay, State};
 

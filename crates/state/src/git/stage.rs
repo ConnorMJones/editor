@@ -15,6 +15,7 @@ use crate::project::path::RelPath;
 use crate::project::watch;
 use crate::sidebar::tree::EntryKind;
 use crate::view::layout::Pane;
+use crate::view::layout::TabPane;
 use crate::view::tab::TextTabs;
 use crate::{Confirm, Effect, Overlay, Repo, State, request_git};
 

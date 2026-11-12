@@ -13,6 +13,7 @@ use state::render::document::{self, DocumentScroll};
 use state::render::markdown::{
     BlockKind, EmbedKind, ImageFile, ImagePlace, Lines, LocalImage, NoteBlock,
 };
+use state::view::layout::TabPane;
 
 use state::view::tab::{Showing, TextTabs};
 use state::{Confirm, Overlay, input};
@@ -173,7 +174,7 @@ fn unresolved_links_create_notes_on_yes() {
 fn rendered_views_follow_into_rendered_notes_at_headings() {
     let (_dir, mut h) = vault();
     open_at(&mut h, "notes/a.md", "[[b]]");
-    h.keys("<space>V");
+    h.keys("zr");
     let buffer = h.view().buffer();
     let pane = h.state.layout.focus();
     let target = state::render::markdown::LinkTarget::Path {
@@ -217,7 +218,7 @@ fn embedded_images_resolve_from_other_folders() {
     )
     .unwrap();
     h.changed(vec![dir.path().join("notes/gallery.md")]);
-    h.keys(":o notes/gallery.md<ret><space>V");
+    h.keys(":o notes/gallery.md<ret>zr");
     let doc = &h.state.buffers[h.view().buffer()].doc;
     let parsed = document::markdown(&h.state.documents, h.view().buffer(), doc).expect("parsed");
     let kinds: Vec<&BlockKind<Lines>> = parsed.blocks.iter().map(|block| &block.kind).collect();
@@ -285,7 +286,7 @@ fn backlinks_list_linking_notes_and_follow_edits() {
     assert_eq!(backlinks(&h).len(), 2);
     h.keys("<esc>");
     // In a rendered view too.
-    h.keys("<space>V<space>l");
+    h.keys("zr<space>l");
     assert_eq!(backlinks(&h).len(), 4);
 }
 

@@ -9,8 +9,8 @@ use model::notice::Notice;
 use state::Repo;
 use state::apply::apply;
 use state::git::conflict::{self, Conflict, Sections};
-use state::view::layout::Viewport;
 use state::view::scroll::{self, Press, Unit};
+use state::view::text_view::Viewport;
 
 use crate::harness::Harness;
 

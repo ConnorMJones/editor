@@ -6,8 +6,8 @@ use crate::drawing::{InkTabs, PdfMode, PdfTab};
 use crate::json_canvas::{Doing, Place};
 use crate::reading::Reading;
 use crate::text::buffer::TextDoc;
-use crate::view::layout::Scroll;
 use crate::view::tab::{Share, Tab};
+use crate::view::text_view::Scroll;
 use crate::{Effect, State};
 
 pub struct Draft {

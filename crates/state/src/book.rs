@@ -6,6 +6,7 @@ use std::sync::Arc;
 use library::{FastHash, Library};
 use model::command::ReadMove;
 use model::notice::Notice;
+use model::sheet::Zoom;
 use reader::epub::{Book, Contents, EpubError};
 use slotmap::{SlotMap, new_key_type};
 
@@ -62,6 +63,7 @@ pub struct BookTab {
     pub scroll: Placed,
     pub reading: Reading,
     pub found: Found,
+    pub zoom: Zoom,
 }
 
 impl BookTab {
@@ -71,6 +73,7 @@ impl BookTab {
             scroll,
             reading: Reading::Idle,
             found: Found::Nothing,
+            zoom: Zoom::ONE,
         }
     }
 

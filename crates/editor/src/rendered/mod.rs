@@ -5,9 +5,10 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
     WeakEntity, Window, div, list, prelude::*, px,
 };
-use gpui::{MouseButton, MouseUpEvent};
+use gpui::{DispatchPhase, MouseButton, MouseUpEvent, ScrollWheelEvent, canvas};
 use helix_core::SmallVec;
 use model::scroll_bar::Thumb;
+use model::sheet::Zoom;
 use model::units::Px;
 use slotmap::SecondaryMap;
 use state::book::{BookFile, BookId, BookTab};
@@ -18,9 +19,11 @@ use state::render::markdown::LocalImage;
 use state::render::typeset::{Figures, each_figure, each_image};
 use state::text::buffer::BufferId;
 use state::view::layout::PaneId;
+use state::view::layout::TabLayout;
 use state::view::tab::{Showing, Tab};
 
 use crate::fonts::PROSE_LINE;
+use crate::pane_space;
 use crate::workspace::Workspace;
 
 pub mod document;
@@ -51,6 +54,7 @@ pub struct Measured {
     pub toggled: Vec<u32>,
     /// The file index's generation, which resolved the embeds.
     pub generation: u64,
+    pub zoom: Zoom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,6 +139,7 @@ struct Laid<'a, O: Origin> {
     version: u64,
     toggled: &'a [u32],
     generation: u64,
+    zoom: Zoom,
     want: Want,
 }
 
@@ -219,6 +224,7 @@ impl Lists<'_> {
             version,
             toggled,
             generation,
+            zoom,
             want,
         } = laid;
         let hashes = &flow.hashes;
@@ -257,6 +263,7 @@ impl Lists<'_> {
                             figures: figures.generation,
                             toggled: toggled.to_vec(),
                             generation,
+                            zoom,
                         },
                         applied: Applied::Stale,
                     },
@@ -285,11 +292,14 @@ impl Lists<'_> {
         let measured = &mut cache.measured;
         let since = std::mem::replace(&mut measured.figures, figures.generation);
         let arrived = (since != figures.generation).then_some(since);
-        let shaped = measured.toggled == toggled && measured.generation == generation;
+        let shaped = measured.toggled == toggled
+            && measured.generation == generation
+            && measured.zoom == zoom;
         match (shaped, arrived) {
             (false, _) => {
                 measured.toggled = toggled.to_vec();
                 measured.generation = generation;
+                measured.zoom = zoom;
                 cache.list.remeasure();
             }
             // Only the items holding a figure or image filled since the last measure change height.
@@ -326,7 +336,7 @@ impl Lists<'_> {
                 _,
             ) => (
                 from,
-                line * lines as f32 + viewport.height * (half_pages as f32 / 2.),
+                line * zoom.get() * lines as f32 + viewport.height * (half_pages as f32 / 2.),
                 Asked::Move,
             ),
         };
@@ -381,6 +391,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                     version: parsed.version,
                     toggled: &view.toggled,
                     generation: parsed.generation,
+                    zoom: view.zoom,
                     want,
                 };
                 let lists = Lists {
@@ -398,6 +409,7 @@ pub fn sync(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
                     version: file.version,
                     toggled: &[],
                     generation: 0,
+                    zoom: tab.zoom,
                     want: want(tab.scroll),
                 };
                 let lists = Lists {
@@ -438,14 +450,56 @@ pub fn body(workspace: &Workspace, pane: PaneId, cx: &mut Context<Workspace>) ->
         }
         None => match workspace.rendered.get(pane) {
             Some(cache) => {
-                let shown = list(
-                    cache.list.clone(),
-                    cx.processor(move |this, index: usize, _window, cx| {
-                        item(this, pane, index, cx)
-                    }),
+                let workspace = cx.entity();
+                let zoom_wheel = canvas(
+                    |bounds, _, _| bounds,
+                    move |_, bounds, window, _| {
+                        let workspace = workspace.clone();
+                        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                            let over = bounds.contains(&event.position);
+                            match (phase, event.modifiers.control, over) {
+                                (DispatchPhase::Capture, true, true) => {
+                                    cx.stop_propagation();
+                                    workspace.update(cx, |this, cx| {
+                                        let Some(viewport) = pane_space::viewport(bounds) else {
+                                            return;
+                                        };
+                                        let at = pane_space::pane_point(bounds, event.position);
+                                        let cell = this.fonts.cell.height;
+                                        let wheel = crate::sheet::wheel_of(event, at, cell);
+                                        state::view::sheet::wheeled(
+                                            &mut this.state,
+                                            pane,
+                                            wheel,
+                                            viewport,
+                                        );
+                                        cx.notify();
+                                    })
+                                }
+                                _ => {}
+                            }
+                        });
+                    },
                 )
-                .flex_1()
-                .min_h_0();
+                .absolute()
+                .size_full();
+                let shown = div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        list(
+                            cache.list.clone(),
+                            cx.processor(move |this, index: usize, _window, cx| {
+                                item(this, pane, index, cx)
+                            }),
+                        )
+                        .flex_1()
+                        .min_h_0(),
+                    )
+                    .child(zoom_wheel);
                 match cache.shows {
                     Flowing::Book(book) => div()
                         .flex_1()
@@ -481,9 +535,10 @@ fn item(
             view,
             parsed: Some(parsed),
         }) => {
+            let fonts = this.fonts.scaled(view.zoom.get());
             let from = document::From {
                 margins: document::Margins::Page,
-                fonts: &this.fonts,
+                fonts: &fonts,
                 flow: &parsed.markdown.flow,
                 key: document::NoteKey::Buffer(buffer),
                 version: parsed.version,
@@ -505,9 +560,10 @@ fn item(
                     .filter_map(|(span, color)| Some((file.flow.within(block, span)?, *color)))
                     .collect()
             };
+            let fonts = this.fonts.scaled(tab.zoom.get());
             let from = document::From {
                 margins: document::Margins::Page,
-                fonts: &this.fonts,
+                fonts: &fonts,
                 flow: &file.flow.flow,
                 key: book,
                 version: file.version,

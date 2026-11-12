@@ -141,7 +141,7 @@ pub fn inline<O: Drawable>(
             }
         }
         true => {
-            let depth = |svg: &Svg| Px::from(svg.height - svg.baseline).0;
+            let depth = |svg: &Svg| Px::from(svg.height - svg.baseline).0 * fonts.zoom;
             let text_depth = fonts.prose_depth / px(1.);
             let inline_ready = |figure: Figure| match (figure.kind, draw.figures.get(figure)) {
                 (FigureKind::Math(Display::Inline), Some(Render::Ready(svg))) => Some(svg),
@@ -195,8 +195,8 @@ pub fn inline<O: Drawable>(
                                 .pb(px(deepest - depth(svg)))
                                 .child(
                                     picture_canvas(draw.pictures, &draw.workspace, svg.picture())
-                                        .w(px(Px::from(svg.width).0))
-                                        .h(px(Px::from(svg.height).0)),
+                                        .w(px(Px::from(svg.width).0 * fonts.zoom))
+                                        .h(px(Px::from(svg.height).0 * fonts.zoom)),
                                 )
                                 .into_any_element(),
                         ),

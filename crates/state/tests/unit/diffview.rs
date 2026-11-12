@@ -9,8 +9,8 @@ use state::git::diff::{Hunk, Side};
 use state::git::diffview::{self, Align, LEFT, RIGHT};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, Focus, Frame, Indent, RowKind, Shade, text_format};
-use state::view::layout::{Scroll, Sideways, Viewport};
 use state::view::scroll::{self, Padding};
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 const INDENT: Indent = Indent {
     tab_width: 4,

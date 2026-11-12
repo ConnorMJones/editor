@@ -1,6 +1,6 @@
 # Keymap
 
-Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference`.
+Generated from `crates/state/src/input/keymap/tables.rs`; regenerate with `UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference`.
 
 ## Custom bindings
 
@@ -9,13 +9,41 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `C-k C-s` | normal, insert, select, tree | Save all |
 | `g left` / `g right` | normal, select | Line start / end |
 | `g up` / `g down` | normal, select | File start / last line |
-| `g n` / `g p` | normal, select | Next / previous tab |
 | `space e` | normal, select, tree | Toggle the file tree |
 | `j` / `k` | tree | Move |
 | `S-up` / `S-down` | tree | Extend the selection |
 | `l` / `h` | tree | Open or expand / collapse |
 | `a` / `r` / `d` | tree | Add / rename / delete |
 | `esc` | tree | Back to the editor |
+
+## Panes, tabs and views
+
+| Keys | Action |
+| --- | --- |
+| `C-w v` / `C-w s` | Split right / below |
+| `C-w w` | Next pane |
+| `C-w h j k l`, arrows | Focus |
+| `C-w H J K L` | Swap with the pane on that side |
+| `C-w t` | Transpose the split |
+| `C-w f` / `C-w F` | Open the file under the cursor below / right |
+| `C-w q` / `C-w o` | Close / keep only this pane |
+| `C-w <` / `C-w >` | Narrower / wider |
+| `C-w -` / `C-w +` | Shorter / taller |
+| `C-w =` | Even all panes |
+| `C-w _` / `C-w \|` | Tallest / widest |
+| `C-w z` | Maximise / restore |
+| `C-w m` `h j k l` | Move the tab to that side |
+| `space w` … | Same as `C-w` … |
+| `gn` / `gp` | Next / previous tab |
+| `ga` | Last used tab |
+| `g<` / `g>` | Move the tab left / right |
+| `:bc` / `:bco` / `:bca` | Close this / other / all tabs |
+| `zr` | Rendered |
+| `zv` | Source and rendered side by side |
+| `zd` | Diff |
+| `zs` | Source |
+| `z tab` / `z S-tab` | Next / previous view |
+| `z<` / `z>` / `z=` | Move the divider |
 
 ## Source view (git)
 
@@ -30,8 +58,6 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `d` | changes | Discard |
 | `esc` | changes | Back to the editor |
 | `y` / `n` / `esc` | confirm | Yes / no |
-| `space d` | normal, select, document, pages | Toggle the diff |
-| `space tab` / `space S-tab` | normal, select, document, pages | Next / previous mode |
 | `]g` / `[g` | normal, select | Next / previous change, across files |
 | `]G` / `[G` | normal, select | Last / first change |
 | `space h s` / `space h u` / `space h r` | normal, select | Stage / unstage / revert the change |
@@ -43,9 +69,6 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space v` | normal, select, document, pages | Toggle the split |
-| `space V` | normal, select, document, pages | Toggle the rendering |
-| `C-w <` / `C-w >` / `C-w =` | normal, select | Narrow / widen / even the split |
 | `j` / `k`, down / up | document, pages | Scroll |
 | `C-d` / `C-u` | document, pages | Half page |
 | `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Page |
@@ -76,7 +99,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space l h` / `space l n` | drawing | Hide / add a layer |
 | `space i`, `:image <path>` | drawing, note | Insert an image |
 | `space p`, `:paste-image` | drawing, note | Paste an image |
-| `+` / `-` / `=` | pages, drawing, image, PDF, canvas | Zoom in / out / fit |
+| `+` / `-` / `=` | rendered note, book, pages, drawing, image, PDF, canvas | Zoom in / out / reset |
 | `zf` | pages, drawing, image, PDF, canvas | Fit width / height |
 | `h j k l`, arrows | pages, drawing, image, PDF, canvas | Pan |
 | `:export-pdf` / `:export-svg` / `:export-png` | drawing | Export |
@@ -87,7 +110,8 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `esc` | comment | Save and close |
 | `C-s`, `:w` | comment, card | Save |
 | `space q` | comment, card | Close without saving |
-| `space v` | comment, card | Full / split |
+| `zv` | comment, card | Full / split |
+| `z<` / `z>` / `z=` | comment, card | Narrower / wider / even |
 | `d` | PDF, book | Delete the highlight |
 | `y` | PDF, book | Copy |
 | `esc` | PDF, book | Clear the selection |
@@ -96,14 +120,14 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `n` / `N` | PDF, book | Next / previous hit |
 | `space a` | PDF, book | Notebook |
 | `space A` | PDF, book | Search annotations |
-| `space t` | PDF, book | Contents |
-| `space tab`, `space d` | PDF | Read / markup |
+| `space o` | PDF, book | Contents |
+| `z tab` | PDF | Read / markup |
 | `:flatten` | PDF | Flatten the markup |
 | `:export-notes` | PDF, book | Write annotations to a note beside it |
 | `]]` / `[[` | book | Next / previous heading |
 | `d`, `del` | canvas | Delete |
 | `y` | canvas | Duplicate |
-| `zs` | canvas | Zoom to the selection |
+| `zp` | canvas | Zoom to the selection |
 | `at`, double click | canvas | New text card |
 | `i`, `ret`, double click | canvas | Write in the card or label |
 | middle drag | canvas | Pan |
@@ -132,6 +156,10 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `:quit-all!`, `:qa!` |
 | `:buffer-close`, `:bc`, `:bclose` |
 | `:buffer-close!`, `:bc!`, `:bclose!` |
+| `:buffer-close-others`, `:bco`, `:bcloseother` |
+| `:buffer-close-others!`, `:bco!`, `:bcloseother!` |
+| `:buffer-close-all`, `:bca`, `:bcloseall` |
+| `:buffer-close-all!`, `:bca!`, `:bcloseall!` |
 | `:reload`, `:rl` |
 | `:reload-all`, `:rla` |
 | `:buffer-next`, `:bn`, `:bnext` |
@@ -346,41 +374,103 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
-| `space d` | `ToggleMode(Diff)` |
-| `space v` | `ToggleMode(Split)` |
-| `space V` | `ToggleMode(Render)` |
-| `space tab` | `CycleMode(Forward)` |
-| `space S-tab` | `CycleMode(Backward)` |
-| `C-w <` | `ResizeSplit(Narrow)` |
-| `C-w >` | `ResizeSplit(Widen)` |
-| `C-w =` | `ResizeSplit(Even)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
+| `z r` | `ToggleMode(Render)` |
+| `z v` | `ToggleMode(Split)` |
+| `z d` | `ToggleMode(Diff)` |
+| `z s` | `ToggleMode(Source)` |
+| `z tab` | `CycleMode(Forward)` |
+| `z S-tab` | `CycleMode(Backward)` |
+| `z <` | `ResizeSplit(Narrow)` |
+| `z >` | `ResizeSplit(Widen)` |
+| `z =` | `ResizeSplit(Even)` |
 | `] m` | `GotoConflict(Forward)` |
 | `[ m` | `GotoConflict(Backward)` |
 | `space m o` | `Resolve(Ours)` |
@@ -612,41 +702,103 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
-| `space d` | `ToggleMode(Diff)` |
-| `space v` | `ToggleMode(Split)` |
-| `space V` | `ToggleMode(Render)` |
-| `space tab` | `CycleMode(Forward)` |
-| `space S-tab` | `CycleMode(Backward)` |
-| `C-w <` | `ResizeSplit(Narrow)` |
-| `C-w >` | `ResizeSplit(Widen)` |
-| `C-w =` | `ResizeSplit(Even)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
+| `z r` | `ToggleMode(Render)` |
+| `z v` | `ToggleMode(Split)` |
+| `z d` | `ToggleMode(Diff)` |
+| `z s` | `ToggleMode(Source)` |
+| `z tab` | `CycleMode(Forward)` |
+| `z S-tab` | `CycleMode(Backward)` |
+| `z <` | `ResizeSplit(Narrow)` |
+| `z >` | `ResizeSplit(Widen)` |
+| `z =` | `ResizeSplit(Even)` |
 | `] m` | `GotoConflict(Forward)` |
 | `[ m` | `GotoConflict(Backward)` |
 | `space m o` | `Resolve(Ours)` |
@@ -724,31 +876,89 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 
 ## TreeInput
 
@@ -803,31 +1013,89 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 
 ## Confirm
 
@@ -863,14 +1131,18 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `esc` | `Read(Leave)` |
 | `] ]` | `Document(Heading(Forward))` |
 | `[ [` | `Document(Heading(Backward))` |
-| `space d` | `ToggleMode(Diff)` |
-| `space v` | `ToggleMode(Split)` |
-| `space V` | `ToggleMode(Render)` |
-| `space tab` | `CycleMode(Forward)` |
-| `space S-tab` | `CycleMode(Backward)` |
-| `C-w <` | `ResizeSplit(Narrow)` |
-| `C-w >` | `ResizeSplit(Widen)` |
-| `C-w =` | `ResizeSplit(Even)` |
+| `+` | `View(Zoom(In))` |
+| `-` | `View(Zoom(Out))` |
+| `=` | `View(Zoom(Reset))` |
+| `z r` | `ToggleMode(Render)` |
+| `z v` | `ToggleMode(Split)` |
+| `z d` | `ToggleMode(Diff)` |
+| `z s` | `ToggleMode(Source)` |
+| `z tab` | `CycleMode(Forward)` |
+| `z S-tab` | `CycleMode(Backward)` |
+| `z <` | `ResizeSplit(Narrow)` |
+| `z >` | `ResizeSplit(Widen)` |
+| `z =` | `ResizeSplit(Even)` |
 | `space l` | `Picker(Open(Backlinks))` |
 | `space e` | `Tree(Toggle)` |
 | `space f` | `Picker(Open(Files))` |
@@ -880,33 +1152,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## Pages
 
@@ -939,14 +1272,15 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `left` | `View(Pan(Left))` |
 | `l` | `View(Pan(Right))` |
 | `right` | `View(Pan(Right))` |
-| `space d` | `ToggleMode(Diff)` |
-| `space v` | `ToggleMode(Split)` |
-| `space V` | `ToggleMode(Render)` |
-| `space tab` | `CycleMode(Forward)` |
-| `space S-tab` | `CycleMode(Backward)` |
-| `C-w <` | `ResizeSplit(Narrow)` |
-| `C-w >` | `ResizeSplit(Widen)` |
-| `C-w =` | `ResizeSplit(Even)` |
+| `z r` | `ToggleMode(Render)` |
+| `z v` | `ToggleMode(Split)` |
+| `z d` | `ToggleMode(Diff)` |
+| `z s` | `ToggleMode(Source)` |
+| `z tab` | `CycleMode(Forward)` |
+| `z S-tab` | `CycleMode(Backward)` |
+| `z <` | `ResizeSplit(Narrow)` |
+| `z >` | `ResizeSplit(Widen)` |
+| `z =` | `ResizeSplit(Even)` |
 | `space l` | `Picker(Open(Backlinks))` |
 | `space e` | `Tree(Toggle)` |
 | `space f` | `Picker(Open(Files))` |
@@ -956,33 +1290,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## Drawing
 
@@ -1035,33 +1430,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## ImageViewer
 
@@ -1089,33 +1545,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## JsonCanvas
 
@@ -1124,7 +1641,7 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `d` | `JsonCanvas(Delete)` |
 | `del` | `JsonCanvas(Delete)` |
 | `y` | `JsonCanvas(Duplicate)` |
-| `z s` | `JsonCanvas(Focus)` |
+| `z p` | `JsonCanvas(Focus)` |
 | `i` | `JsonCanvas(Write)` |
 | `ret` | `JsonCanvas(Write)` |
 | `a t` | `JsonCanvas(AddText)` |
@@ -1161,33 +1678,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## DrawingText
 
@@ -1381,45 +1959,105 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## PdfRead
 
 | Keys | Command |
 | --- | --- |
 | `:` | `CommandMode` |
-| `space tab` | `Drawing(Pdf(Markup))` |
-| `space d` | `Drawing(Pdf(Markup))` |
+| `z tab` | `Drawing(Pdf(Markup))` |
 | `C-k C-s` | `WriteAll` |
 | `y` | `Reading(Copy)` |
 | `/` | `Reading(Find)` |
-| `space t` | `Picker(Open(Outline))` |
+| `space o` | `Picker(Open(Outline))` |
 | `space a` | `Picker(Open(Notebook))` |
 | `space A` | `Picker(Open(Annotations))` |
 | `v` | `Reading(Annotate(Highlight))` |
@@ -1454,41 +2092,101 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## PdfMarkup
 
 | Keys | Command |
 | --- | --- |
 | `esc` | `Drawing(Pdf(Read))` |
-| `space tab` | `Drawing(Pdf(Read))` |
-| `space d` | `Drawing(Pdf(Read))` |
+| `z tab` | `Drawing(Pdf(Read))` |
 | `b` | `Drawing(Ink(Tool(Brush)))` |
 | `e` | `Drawing(Ink(Tool(Eraser)))` |
 | `s` | `Drawing(Ink(Tool(BoxSelect)))` |
@@ -1533,33 +2231,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## Book
 
@@ -1585,9 +2344,12 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `C-k C-s` | `WriteAll` |
 | `] ]` | `Document(Heading(Forward))` |
 | `[ [` | `Document(Heading(Backward))` |
+| `+` | `View(Zoom(In))` |
+| `-` | `View(Zoom(Out))` |
+| `=` | `View(Zoom(Reset))` |
 | `y` | `Reading(Copy)` |
 | `/` | `Reading(Find)` |
-| `space t` | `Picker(Open(Outline))` |
+| `space o` | `Picker(Open(Outline))` |
 | `space a` | `Picker(Open(Notebook))` |
 | `space A` | `Picker(Open(Annotations))` |
 | `v` | `Reading(Annotate(Highlight))` |
@@ -1606,33 +2368,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## Draft
 
@@ -1642,10 +2465,10 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `esc` | `Draft(Finish)` |
 | `C-s` | `Write` |
 | `space q` | `Draft(Drop)` |
-| `space v` | `Draft(Swap)` |
-| `C-w <` | `ResizeSplit(Narrow)` |
-| `C-w >` | `ResizeSplit(Widen)` |
-| `C-w =` | `ResizeSplit(Even)` |
+| `z v` | `Draft(Swap)` |
+| `z <` | `ResizeSplit(Narrow)` |
+| `z >` | `ResizeSplit(Widen)` |
+| `z =` | `ResizeSplit(Even)` |
 | `h` | `Move(CharLeft)` |
 | `left` | `Move(CharLeft)` |
 | `j` | `Move(VisualLineDown)` |
@@ -1833,33 +2656,94 @@ Generated from `crates/state/src/keymap.rs`; regenerate with `UPDATE_DOCS=1 carg
 | `space ?` | `Picker(Open(Commands))` |
 | `space g` | `Changes(Toggle)` |
 | `C-w v` | `Window(Split(Row))` |
+| `C-w C-v` | `Window(Split(Row))` |
 | `C-w s` | `Window(Split(Column))` |
+| `C-w C-s` | `Window(Split(Column))` |
 | `C-w w` | `Window(FocusNext)` |
-| `C-w h` | `Window(Focus(Left))` |
-| `C-w j` | `Window(Focus(Down))` |
-| `C-w k` | `Window(Focus(Up))` |
-| `C-w l` | `Window(Focus(Right))` |
-| `C-w left` | `Window(Focus(Left))` |
-| `C-w down` | `Window(Focus(Down))` |
-| `C-w up` | `Window(Focus(Up))` |
-| `C-w right` | `Window(Focus(Right))` |
+| `C-w C-w` | `Window(FocusNext)` |
+| `C-w t` | `Window(Transpose)` |
+| `C-w C-t` | `Window(Transpose)` |
+| `C-w f` | `Window(GotoFile(Column))` |
+| `C-w F` | `Window(GotoFile(Row))` |
 | `C-w q` | `Window(Close)` |
+| `C-w C-q` | `Window(Close)` |
 | `C-w o` | `Window(Only)` |
+| `C-w C-o` | `Window(Only)` |
+| `C-w h` | `Window(Focus(Left))` |
+| `C-w C-h` | `Window(Focus(Left))` |
+| `C-w left` | `Window(Focus(Left))` |
+| `C-w j` | `Window(Focus(Down))` |
+| `C-w C-j` | `Window(Focus(Down))` |
+| `C-w down` | `Window(Focus(Down))` |
+| `C-w k` | `Window(Focus(Up))` |
+| `C-w C-k` | `Window(Focus(Up))` |
+| `C-w up` | `Window(Focus(Up))` |
+| `C-w l` | `Window(Focus(Right))` |
+| `C-w C-l` | `Window(Focus(Right))` |
+| `C-w right` | `Window(Focus(Right))` |
+| `C-w H` | `Window(Swap(Left))` |
+| `C-w J` | `Window(Swap(Down))` |
+| `C-w K` | `Window(Swap(Up))` |
+| `C-w L` | `Window(Swap(Right))` |
+| `C-w <` | `Window(Resize(Narrower))` |
+| `C-w >` | `Window(Resize(Wider))` |
+| `C-w -` | `Window(Resize(Shorter))` |
+| `C-w +` | `Window(Resize(Taller))` |
+| `C-w =` | `Window(Resize(Even))` |
+| `C-w _` | `Window(Resize(TallestHere))` |
+| `C-w |` | `Window(Resize(WidestHere))` |
+| `C-w z` | `Window(Maximise)` |
+| `C-w m h` | `Window(MoveTab(Left))` |
+| `C-w m j` | `Window(MoveTab(Down))` |
+| `C-w m k` | `Window(MoveTab(Up))` |
+| `C-w m l` | `Window(MoveTab(Right))` |
 | `space w v` | `Window(Split(Row))` |
+| `space w C-v` | `Window(Split(Row))` |
 | `space w s` | `Window(Split(Column))` |
+| `space w C-s` | `Window(Split(Column))` |
 | `space w w` | `Window(FocusNext)` |
-| `space w h` | `Window(Focus(Left))` |
-| `space w j` | `Window(Focus(Down))` |
-| `space w k` | `Window(Focus(Up))` |
-| `space w l` | `Window(Focus(Right))` |
-| `space w left` | `Window(Focus(Left))` |
-| `space w down` | `Window(Focus(Down))` |
-| `space w up` | `Window(Focus(Up))` |
-| `space w right` | `Window(Focus(Right))` |
+| `space w C-w` | `Window(FocusNext)` |
+| `space w t` | `Window(Transpose)` |
+| `space w C-t` | `Window(Transpose)` |
+| `space w f` | `Window(GotoFile(Column))` |
+| `space w F` | `Window(GotoFile(Row))` |
 | `space w q` | `Window(Close)` |
+| `space w C-q` | `Window(Close)` |
 | `space w o` | `Window(Only)` |
+| `space w C-o` | `Window(Only)` |
+| `space w h` | `Window(Focus(Left))` |
+| `space w C-h` | `Window(Focus(Left))` |
+| `space w left` | `Window(Focus(Left))` |
+| `space w j` | `Window(Focus(Down))` |
+| `space w C-j` | `Window(Focus(Down))` |
+| `space w down` | `Window(Focus(Down))` |
+| `space w k` | `Window(Focus(Up))` |
+| `space w C-k` | `Window(Focus(Up))` |
+| `space w up` | `Window(Focus(Up))` |
+| `space w l` | `Window(Focus(Right))` |
+| `space w C-l` | `Window(Focus(Right))` |
+| `space w right` | `Window(Focus(Right))` |
+| `space w H` | `Window(Swap(Left))` |
+| `space w J` | `Window(Swap(Down))` |
+| `space w K` | `Window(Swap(Up))` |
+| `space w L` | `Window(Swap(Right))` |
+| `space w <` | `Window(Resize(Narrower))` |
+| `space w >` | `Window(Resize(Wider))` |
+| `space w -` | `Window(Resize(Shorter))` |
+| `space w +` | `Window(Resize(Taller))` |
+| `space w =` | `Window(Resize(Even))` |
+| `space w _` | `Window(Resize(TallestHere))` |
+| `space w |` | `Window(Resize(WidestHere))` |
+| `space w z` | `Window(Maximise)` |
+| `space w m h` | `Window(MoveTab(Left))` |
+| `space w m j` | `Window(MoveTab(Down))` |
+| `space w m k` | `Window(MoveTab(Up))` |
+| `space w m l` | `Window(MoveTab(Right))` |
 | `g n` | `CycleBuffer(Next)` |
 | `g p` | `CycleBuffer(Previous)` |
+| `g a` | `Tab(LastUsed)` |
+| `g <` | `Tab(Shift(Backward))` |
+| `g >` | `Tab(Shift(Forward))` |
 
 ## DraftInsert
 

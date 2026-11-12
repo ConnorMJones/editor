@@ -15,7 +15,8 @@ use state::draft::{Beside, Spread};
 use state::input::{self, keymap::Context};
 use state::json_canvas::{Adding, Doing, Phase, Place, Pointer, Snap, Written};
 use state::reading::Taps;
-use state::view::panes::{self, Arrive, Dragged, DropOn, PanePoint, Zone};
+use state::view::layout::{DropOn, PanePoint, Zone};
+use state::view::panes::{self, Arrive, Dragged};
 
 use crate::drawing::measure;
 use crate::harness::Harness;
@@ -618,7 +619,7 @@ fn a_card_draft_moves_beside_and_writing_saves_the_canvas_with_the_draft() {
         Doing::Arranging(_) => panic!("writing"),
     };
     assert!(matches!(beside(&h), Place::Beside(_)));
-    h.keys("<space>v");
+    h.keys("zv");
     assert!(matches!(
         beside(&h),
         Place::Beside(Beside {

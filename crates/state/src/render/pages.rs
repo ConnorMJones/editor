@@ -18,6 +18,7 @@ use crate::render::typeset::{self, Compiled, Outcome, PageSvg, Typst};
 use crate::render::{Opening, Rendering, step};
 use crate::text::buffer::{BufferId, Position, Target};
 use crate::view::layout::{Pane, PaneId};
+use crate::view::layout::{TabLayout, TabPane};
 use crate::view::panes::{self, Arrive};
 use crate::view::tab::{BesideMut, Showing, TextTabs};
 use crate::{Effect, State};

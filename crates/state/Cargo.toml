@@ -23,6 +23,7 @@ imara-diff.workspace = true
 export.workspace = true
 ink.workspace = true
 jsoncanvas.workspace = true
+panes.workspace = true
 library.workspace = true
 reader.workspace = true
 roxmltree.workspace = true

@@ -1,4 +1,5 @@
-use state::view::layout::Viewport;
+use state::view::layout::TabPane;
+use state::view::text_view::Viewport;
 use state::{Sticky, view::scroll};
 
 use crate::harness::Harness;

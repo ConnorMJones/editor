@@ -3,8 +3,8 @@ use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Range, Rope, RopeSlice, Selection};
 use model::mode::Mode;
 use state::view::display::{Indent, text_format};
-use state::view::layout::{Scroll, Sideways, Viewport};
 use state::view::scroll::{self, SCROLLOFF};
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 fn top(anchor: usize, viewport: Viewport) -> Scroll {
     Scroll {
@@ -201,8 +201,8 @@ fn click_maps_cells_to_chars() {
 
 mod mouse {
     use helix_core::{Range, Rope};
-    use state::view::layout::Viewport;
     use state::view::scroll::{self, Gesture, Press, Unit};
+    use state::view::text_view::Viewport;
 
     use crate::harness::Harness;
 

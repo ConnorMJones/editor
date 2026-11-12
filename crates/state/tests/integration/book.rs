@@ -205,9 +205,9 @@ fn links_in_a_book_scroll_to_their_place_or_open_the_web() {
 #[test]
 fn the_contents_take_the_reader_to_a_chapter_or_an_anchor() {
     let (_dir, _, mut h) = opened();
-    h.keys("<space>tlater<ret>");
+    h.keys("<space>olater<ret>");
     assert_eq!(tab(&h).scroll, at(8));
-    h.keys("<space>ttwo<ret>");
+    h.keys("<space>otwo<ret>");
     assert_eq!(tab(&h).scroll, at(5));
 }
 
@@ -255,9 +255,9 @@ fn a_books_images_are_sized_when_it_opens() {
 }
 
 #[test]
-fn a_session_keeps_the_place_in_a_book() {
+fn a_session_keeps_the_place_and_zoom_in_a_book() {
     let (dir, _, mut before) = opened();
-    before.keys("<space>tlater<ret>");
+    before.keys("<space>olater<ret>+");
     let text = toml::to_string(&session::snapshot(&before.state)).unwrap();
     let mut after = Harness::new(dir.path());
     let saved: session::Session = toml::from_str(&text).unwrap();
@@ -266,6 +266,10 @@ fn a_session_keeps_the_place_in_a_book() {
         .unwrap();
     assert_eq!(after.focused_tabs(), ["❧novel.epub"]);
     assert_eq!(tab(&after).scroll, at(8));
+    assert_eq!(
+        tab(&after).zoom,
+        model::sheet::Zoom::ONE.by(model::sheet::Zoom::STEP)
+    );
 }
 
 #[test]
@@ -369,7 +373,7 @@ fn find_in_a_book_steps_through_every_chapter() {
 #[test]
 fn a_bookmark_marks_the_place_in_view_and_the_notebook_goes_back_to_it() {
     let (_dir, _, mut h) = opened();
-    h.keys("<space>tlater<ret>m");
+    h.keys("<space>olater<ret>m");
     let [bookmark] = &notebook(&h).bookmarks[..] else {
         panic!("{:?}", notebook(&h));
     };

@@ -24,7 +24,7 @@ use crate::view::layout::{
     Child, CloseError, Flex, InvalidTabs, Item, Layout, LayoutError, Node, Pane, PaneId, Split,
     SplitError, Tabs,
 };
-use crate::view::tab::{Beside, NoMode, Opened, Showing, Tab, TextTabs};
+use crate::view::tab::{Beside, NoMode, Opened, Showing, ShowingMut, Tab, TextTabs};
 use crate::viewer::ImageTab;
 use crate::{Effect, Files, Focus, Sidebar, SidebarWidth, State};
 use ink::doc::LayerIndex;
@@ -65,7 +65,7 @@ enum Restoring {
 enum Reopen {
     Drawing(drawing::Saved),
     Image(SheetView),
-    Book(usize),
+    Book(usize, f32),
     JsonCanvas(PlaneView),
 }
 
@@ -115,6 +115,7 @@ pub enum SessionView {
     },
     Book {
         item: usize,
+        zoom: f32,
     },
     JsonCanvas {
         plane: SessionPlane,
@@ -184,13 +185,13 @@ impl From<SessionPlane> for PlaneView {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SessionMode {
     Source,
     Diff,
-    Render { top: Opening },
-    Split { top: Opening },
+    Render { top: Opening, zoom: f32 },
+    Split { top: Opening, zoom: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +288,7 @@ pub fn snapshot(state: &State) -> Session {
                             },
                             Tab::Book(tab) => SessionView::Book {
                                 item: tab.scroll.at().item,
+                                zoom: tab.zoom.get(),
                             },
                             Tab::JsonCanvas(tab) => SessionView::JsonCanvas {
                                 plane: tab.view.into(),
@@ -425,7 +427,7 @@ pub fn restore(
                     }))
                 }
                 SessionView::Image { sheet } => Restoring::Reopen(Reopen::Image(sheet.into())),
-                SessionView::Book { item } => Restoring::Reopen(Reopen::Book(item)),
+                SessionView::Book { item, zoom } => Restoring::Reopen(Reopen::Book(item, zoom)),
                 SessionView::JsonCanvas { plane } => {
                     Restoring::Reopen(Reopen::JsonCanvas(plane.into()))
                 }
@@ -448,9 +450,11 @@ pub fn restore(
                             (Reopen::JsonCanvas(view), Opened::JsonCanvas(id)) => Some(
                                 Tab::JsonCanvas(JsonCanvasTab::new(id, view, Arrival::AsSaved)),
                             ),
-                            (Reopen::Book(item), Opened::Book(id)) => {
+                            (Reopen::Book(item, zoom), Opened::Book(id)) => {
                                 let last = state.books[id].flow.flow.roots.len() - 1;
-                                Some(Tab::Book(BookTab::new(id, Placed::item(item.min(last)))))
+                                let mut tab = BookTab::new(id, Placed::item(item.min(last)));
+                                tab.zoom = Zoom::clamped(zoom);
+                                Some(Tab::Book(tab))
                             }
                             (
                                 Reopen::Image(_),
@@ -462,7 +466,7 @@ pub fn restore(
                                 | Opened::JsonCanvas(_),
                             )
                             | (
-                                Reopen::Book(_),
+                                Reopen::Book(..),
                                 Opened::Text(_)
                                 | Opened::Paged(_)
                                 | Opened::Board(_)
@@ -531,8 +535,14 @@ pub fn restore(
             let (shown, at) = match mode {
                 SessionMode::Source => (Shown::Source, Opening::Line(0)),
                 SessionMode::Diff => (Shown::Diff, Opening::Line(0)),
-                SessionMode::Render { top } => (Shown::Render, top),
-                SessionMode::Split { top } => (Shown::Split, top),
+                SessionMode::Render { top, .. } => (Shown::Render, top),
+                SessionMode::Split { top, .. } => (Shown::Split, top),
+            };
+            let zoom = match mode {
+                SessionMode::Render { zoom, .. } | SessionMode::Split { zoom, .. } => {
+                    Zoom::clamped(zoom)
+                }
+                SessionMode::Source | SessionMode::Diff => Zoom::ONE,
             };
             match tab.enter(shown, at) {
                 Ok(()) => {}
@@ -542,6 +552,11 @@ pub fn restore(
                         tab: saved_index,
                     });
                 }
+            }
+            match tab.showing_mut() {
+                ShowingMut::Document(_, view, _) => view.zoom = zoom,
+                ShowingMut::Pages(_, view, _) => view.view.zoom = zoom,
+                ShowingMut::Source(_) | ShowingMut::Diff(..) => {}
             }
             items.push(Item {
                 tab: Tab::Text(tab),
@@ -633,10 +648,11 @@ fn parse_node(node: SessionNode, slots: &mut [Option<PaneId>]) -> Result<Child, 
     }
 }
 
-fn saved<S>(top: Opening, beside: Beside<S>) -> SessionMode {
+fn saved<S>(top: Opening, zoom: Zoom, beside: Beside<S>) -> SessionMode {
+    let zoom = zoom.get();
     match beside {
-        Beside::Alone => SessionMode::Render { top },
-        Beside::Source(..) => SessionMode::Split { top },
+        Beside::Alone => SessionMode::Render { top, zoom },
+        Beside::Source(..) => SessionMode::Split { top, zoom },
     }
 }
 
@@ -650,6 +666,7 @@ fn text_view(text: &TextTabs) -> SessionView {
                 DocumentScroll::Line(line) => Opening::Line(line),
                 DocumentScroll::Placed(placed) => Opening::Item(placed.at().item),
             },
+            view.zoom,
             beside,
         ),
         Showing::Pages(_, view, beside) => saved(
@@ -657,6 +674,7 @@ fn text_view(text: &TextTabs) -> SessionView {
                 Locating::Line(line) => Opening::Line(line),
                 Locating::Settled => Opening::Item(view.view.centre.page.0),
             },
+            view.view.zoom,
             beside,
         ),
     };

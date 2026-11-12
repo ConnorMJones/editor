@@ -19,7 +19,7 @@ use crate::drawing::frame;
 use crate::job::{FsOp, Job};
 use crate::project::files::FileIndex;
 use crate::project::path::{RelPath, TextKind};
-use crate::view::panes::PanePoint;
+use crate::view::layout::PanePoint;
 use crate::view::tab::Tab;
 
 /// Where an image goes, decided from the focused tab when it was asked for.

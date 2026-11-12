@@ -17,8 +17,9 @@ use crate::git::navigate::step;
 use crate::input::keymap::{self, Context};
 use crate::text::buffer::TextDoc;
 use crate::view::display::{Frame, LineMark, Row, RowKind, Run, Shade};
-use crate::view::layout::TextView;
+use crate::view::layout::TabPane;
 use crate::view::scroll::Padding;
+use crate::view::text_view::TextView;
 
 /// Length of every marker: `<<<<<<<`, `|||||||`, `=======`, `>>>>>>>`.
 const MARKER: usize = 7;

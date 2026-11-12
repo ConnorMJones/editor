@@ -92,6 +92,7 @@ pub fn figure_element<O: Drawable>(draw: &Draw<O>, figure: Figure, source: &str)
     match draw.figures.get(figure) {
         Some(Render::Ready(svg)) => {
             let (Px(width), Px(height)) = (Px::from(svg.width), Px::from(svg.height));
+            let width = width * fonts.zoom;
             div()
                 .w_full()
                 .flex()
@@ -125,6 +126,7 @@ pub fn picture<O: Drawable>(draw: &Draw<O>, file: &ImageFile, src: &str) -> AnyE
         ImageFile::Local(local) => match draw.figures.image(local) {
             Some(Probe::Read(Probed { size, modified })) => {
                 let (width, height) = (size.width.get(), size.height.get());
+                let width = width * fonts.zoom;
                 let source = match &local.place {
                     ImagePlace::File(path) => Source::File {
                         path: path.clone(),

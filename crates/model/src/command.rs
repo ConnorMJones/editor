@@ -119,6 +119,10 @@ pub enum Command {
     ForceQuit,
     CloseBuffer,
     ForceCloseBuffer,
+    CloseOthers,
+    ForceCloseOthers,
+    CloseAll,
+    ForceCloseAll,
     Reload,
     ReloadAll,
     GotoLine(NonZeroUsize),
@@ -128,6 +132,7 @@ pub enum Command {
 
     Window(WindowCommand),
     CycleBuffer(Cycle),
+    Tab(TabCommand),
     Tree(TreeCommand),
     Picker(PickerCommand),
 
@@ -469,6 +474,29 @@ pub enum WindowCommand {
     FocusNext,
     Close,
     Only,
+    Swap(Side),
+    Transpose,
+    Resize(PaneResize),
+    Maximise,
+    MoveTab(Side),
+    GotoFile(Axis),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneResize {
+    Narrower,
+    Wider,
+    Shorter,
+    Taller,
+    Even,
+    TallestHere,
+    WidestHere,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabCommand {
+    Shift(Direction),
+    LastUsed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

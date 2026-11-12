@@ -16,8 +16,10 @@ use crate::git::diffview::{self, RIGHT, Right};
 use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::text::registers::ClipboardUse;
 use crate::view::display::{Fillers, Indent, text_format};
-use crate::view::layout::{Layout, NotInLayout, Pane, PaneId, Scroll, Sideways, Viewport};
+use crate::view::layout::TabPane;
+use crate::view::layout::{Layout, NotInLayout, Pane, PaneId};
 use crate::view::tab::{BesideMut, ShowingMut, Tab};
+use crate::view::text_view::{Scroll, Sideways, Viewport};
 use crate::{Effect, State};
 
 /// Rows kept between the primary cursor and the viewport edges.

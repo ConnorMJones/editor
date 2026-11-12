@@ -14,10 +14,11 @@ use state::sidebar::Pick;
 use state::sidebar::changes::{self, ListCursor, ListRow};
 use state::sidebar::tree::Fold;
 use state::view::draws::{self, Draws, Part, Rows};
-use state::view::layout::Viewport;
+use state::view::layout::TabPane;
 use state::view::panes::{self, Click};
 use state::view::scroll;
 use state::view::tab::{Showing, TextTabs};
+use state::view::text_view::Viewport;
 use state::{Focus, Repo, Sidebar};
 
 use crate::git::{init, stage_path, staged_text};
@@ -77,7 +78,7 @@ fn a_tab_toggles_between_its_file_and_its_diff() {
     init(dir.path(), &[("a.txt", FIVE)]);
     fs::write(dir.path().join("a.txt"), "a\nb\nX\nd\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o a.txt<ret>3gg<space>d");
+    h.keys(":o a.txt<ret>3ggzd");
     assert_eq!(h.focused_tabs(), ["±a.txt"]);
     assert_eq!(h.cursor_line(), 2, "the selection carries over");
     show(&mut h, 20);
@@ -87,14 +88,14 @@ fn a_tab_toggles_between_its_file_and_its_diff() {
     assert_eq!(shown.align.sides[RIGHT].shades[0].lines, 2..3);
 
     // Toggling back shows the file in the same tab, where the diff left it.
-    h.keys("j<space>d");
+    h.keys("jzd");
     assert_eq!(h.focused_tabs(), ["a.txt"]);
     assert_eq!(h.cursor_line(), 3);
 
     // The diff's buffer side edits the same buffer.
-    h.keys("<space>dggiZ<esc>");
+    h.keys("zdggiZ<esc>");
     assert_eq!(h.doc().text, "Za\nb\nX\nd\ne\n");
-    h.keys("<space>d");
+    h.keys("zd");
     assert_eq!(h.doc().text, "Za\nb\nX\nd\ne\n");
 }
 
@@ -107,9 +108,9 @@ fn toggling_a_preview_swaps_it_in_place() {
     h.keys(":o b.txt<ret>");
     h.run(|state, out| changes::list(state, model::command::ChangesCommand::Open, out));
     assert_eq!(h.focused_tabs(), ["b.txt", "±a.txt*"]);
-    h.keys("<space>d");
+    h.keys("zd");
     assert_eq!(h.focused_tabs(), ["b.txt", "a.txt*"]);
-    h.keys("<space>d");
+    h.keys("zd");
     assert_eq!(h.focused_tabs(), ["b.txt", "±a.txt*"]);
 }
 
@@ -119,7 +120,7 @@ fn hunk_keys_act_from_the_diff() {
     let repo = init(dir.path(), &[("a.txt", FIVE)]);
     fs::write(dir.path().join("a.txt"), "a\nB\nc\nd\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o a.txt<ret><space>d2gg<space>hs");
+    h.keys(":o a.txt<ret>zd2gg<space>hs");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), "a\nB\nc\nd\ne\n");
     h.keys("<space>hu");
     assert_eq!(staged_text(&repo, "a.txt").unwrap(), FIVE);
@@ -134,13 +135,13 @@ fn next_hunk_past_the_end_opens_the_next_diff() {
     fs::write(dir.path().join("a.txt"), "a\nB\nc\nd\ne\n").unwrap();
     fs::write(dir.path().join("b.txt"), "a\nb\nc\nD\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o a.txt<ret><space>d]g");
+    h.keys(":o a.txt<ret>zd]g");
     assert_eq!(h.cursor_line(), 1);
     h.keys("]g");
     assert_eq!(h.focused_tabs(), ["±a.txt", "±b.txt*"]);
     assert_eq!(h.cursor_line(), 3, "lands on the first change of b.txt");
     // From a file it moves on to the next file, which shows as a file too.
-    h.keys("<space>d]g");
+    h.keys("zd]g");
     assert_eq!(h.focused_tabs(), ["a.txt", "b.txt*"]);
     assert_eq!(shown(&h), Shown::Source);
 }
@@ -188,7 +189,7 @@ fn deleted_files_show_head_beside_an_inert_side() {
     init(dir.path(), &[("a.txt", FIVE), ("gone.txt", "x\ny\nz\n")]);
     fs::remove_file(dir.path().join("gone.txt")).unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o gone.txt<ret><space>d");
+    h.keys(":o gone.txt<ret>zd");
     show(&mut h, 10);
     let buffer = h.view().buffer();
     assert_eq!(diffview::right(&h.state.buffers[buffer]), Right::Deleted);
@@ -224,7 +225,7 @@ fn untracked_files_show_a_blank_head_side() {
     init(dir.path(), &[("a.txt", FIVE)]);
     fs::write(dir.path().join("new.txt"), "fresh\n").unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o new.txt<ret><space>d");
+    h.keys(":o new.txt<ret>zd");
     show(&mut h, 10);
     let shown = diff(&h);
     assert!(matches!(shown.left, Left::Absent));
@@ -361,7 +362,7 @@ fn session_restores_diff_tabs_and_the_changes_sidebar() {
     init(dir.path(), &[("a.txt", FIVE)]);
     fs::write(dir.path().join("a.txt"), "a\nB\nc\nd\ne\n").unwrap();
     let mut before = Harness::new(dir.path());
-    before.keys(":o a.txt<ret><space>d3gg<space>g<esc>");
+    before.keys(":o a.txt<ret>zd3gg<space>g<esc>");
     let saved = session::snapshot(&before.state);
     assert_eq!(saved.sidebar, SessionSidebar::Changes);
     match &saved.panes[0] {
@@ -398,7 +399,7 @@ fn clicking_the_head_side_moves_the_cursor_to_the_facing_line() {
     // Two lines inserted at the top push every HEAD line down by two.
     fs::write(dir.path().join("a.txt"), "x\ny\na\nb\nc\nd\ne\n").unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o a.txt<ret><space>dge");
+    h.keys(":o a.txt<ret>zdge");
     show(&mut h, 20);
     assert_eq!(diff(&h).align.sides[LEFT].lead, 2);
     let focus = h.state.layout.focus();
@@ -525,8 +526,8 @@ fn a_clean_repository_still_lists_staged_and_unstaged_groups() {
 
 #[test]
 fn a_diff_does_not_wrap_and_scrolls_sideways_with_its_divider_where_it_was_left() {
-    use state::view::layout::Sideways;
     use state::view::tab::Share;
+    use state::view::text_view::Sideways;
     let long = format!("{}end\n", "x".repeat(200));
     let dir = tempfile::tempdir().unwrap();
     init(dir.path(), &[("a.txt", long.as_str())]);
@@ -534,7 +535,7 @@ fn a_diff_does_not_wrap_and_scrolls_sideways_with_its_divider_where_it_was_left(
     let mut h = Harness::new(dir.path());
     h.keys(":o a.txt<ret>");
     assert_eq!(h.view().scroll.sideways, Sideways::Wrapped);
-    h.keys("<space>d");
+    h.keys("zd");
     show(&mut h, 10);
     assert_eq!(h.view().scroll.sideways, Sideways::Unwrapped { left: 0 });
     h.keys("gggl");
@@ -549,7 +550,7 @@ fn a_diff_does_not_wrap_and_scrolls_sideways_with_its_divider_where_it_was_left(
     let share = Share::new(0.3).unwrap();
     h.run(|state, _| state::view::mode::drag(state, focus, share));
     assert_eq!(diff(&h).share, share);
-    h.keys("<space>d");
+    h.keys("zd");
     assert_eq!(
         h.view().scroll.sideways,
         Sideways::Wrapped,

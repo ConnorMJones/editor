@@ -6,6 +6,7 @@ use model::notice::Notice;
 use model::register::{Clipboard, Register};
 
 use crate::apply::{FocusedText, exit_select_mode, focused_text};
+use crate::view::layout::TabPane;
 use crate::view::layout::{NotInLayout, PaneId};
 use crate::{Effect, State, text::edit};
 

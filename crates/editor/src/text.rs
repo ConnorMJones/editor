@@ -21,8 +21,9 @@ use state::view::display::{
     self, CursorShape, DiffSign, Focus, Frame, Gutter, LineMark, Numbering, Rank, RowKind,
 };
 use state::view::draws::{self, Drawing, Draws, Part, Rows};
-use state::view::layout::{PaneId, Scroll, Viewport};
+use state::view::layout::PaneId;
 use state::view::scroll::{self, Gesture, Press, Unit};
+use state::view::text_view::{Scroll, Viewport};
 
 use crate::fonts::{Fonts, hsla};
 use crate::scroll_bar::{self, Held};

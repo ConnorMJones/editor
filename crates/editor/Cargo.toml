@@ -36,6 +36,7 @@ reader.workspace = true
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 ink.workspace = true
 jsoncanvas.workspace = true
+panes.workspace = true
 library.workspace = true
 model.workspace = true
 slotmap.workspace = true

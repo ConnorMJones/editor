@@ -121,7 +121,7 @@ fn tool_keys_wait_for_markup_and_esc_reads_again() {
         PdfMode::Read(Reading::Idle),
         "tool keys pick tools only in markup"
     );
-    h.keys("<space>db");
+    h.keys("z<tab>b");
     assert_eq!(tab(&h).mode, PdfMode::Markup);
     assert_eq!(input::context(&h.state), Context::PdfMarkup);
     draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
@@ -151,7 +151,7 @@ fn a_session_keeps_the_page_and_whether_the_pdf_was_marked_up() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut before = Harness::new(dir.path());
-    before.keys(":o paper.pdf<ret>pn<space>d");
+    before.keys(":o paper.pdf<ret>pnz<tab>");
     let text = toml::to_string(&session::snapshot(&before.state)).unwrap();
     let mut after = Harness::new(dir.path());
     let saved: session::Session = toml::from_str(&text).unwrap();
@@ -226,7 +226,7 @@ fn a_pdf_without_a_table_of_contents_says_so() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut h = Harness::new(dir.path());
-    h.keys(":o paper.pdf<ret><space>t");
+    h.keys(":o paper.pdf<ret><space>o");
     assert!(matches!(h.state.notice, Some(Notice::NoOutline)));
 }
 
@@ -381,19 +381,19 @@ fn a_pdf_outside_the_library_is_read_without_annotations() {
 }
 
 #[test]
-fn space_tab_and_space_d_switch_between_reading_and_markup() {
+fn z_tab_switches_between_reading_and_markup() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut h = Harness::new(dir.path());
-    h.keys(":o paper.pdf<ret><space><tab>");
+    h.keys(":o paper.pdf<ret>z<tab>");
     assert_eq!(tab(&h).mode, PdfMode::Markup);
     h.keys("e");
     assert_eq!(input::context(&h.state), Context::PdfMarkup);
-    h.keys("<space><tab>");
+    h.keys("z<tab>");
     assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
-    h.keys("<space>d");
+    h.keys("z<tab>");
     assert_eq!(tab(&h).mode, PdfMode::Markup);
-    h.keys("<space>d");
+    h.keys("z<tab>");
     assert_eq!(tab(&h).mode, PdfMode::Read(Reading::Idle));
 }
 
@@ -406,7 +406,7 @@ fn markup_written_into_the_pdf_comes_back_when_it_opens_again() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut h = Harness::new(dir.path());
-    h.keys(":o paper.pdf<ret><space>d");
+    h.keys(":o paper.pdf<ret>z<tab>");
     draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
     assert_eq!(marks(&h), 1);
     h.keys(":w<ret>");
@@ -452,7 +452,7 @@ fn flatten_draws_the_markup_into_the_pages_and_leaves_nothing_to_edit() {
     let dir = tempfile::tempdir().unwrap();
     write_pdf(&dir.path().join("paper.pdf"));
     let mut h = Harness::new(dir.path());
-    h.keys(":o paper.pdf<ret><space>d");
+    h.keys(":o paper.pdf<ret>z<tab>");
     draw(&mut h, Stylus::Tip, &line((100.0, 100.0), (300.0, 120.0)));
     h.keys(":w<ret>:flatten<ret>");
     assert!(
@@ -647,9 +647,9 @@ fn shift_i_writes_a_comment_beside_the_pdf_and_esc_saves_it() {
     );
     h.keys("<esc>");
     assert_eq!(input::context(&h.state), Context::Draft);
-    h.keys("<space>v");
+    h.keys("zv");
     assert_eq!(writing(&h).beside.spread, state::draft::Spread::Full);
-    h.keys("<space>v<C-w><");
+    h.keys("zvz<");
     assert_eq!(writing(&h).beside.spread, state::draft::Spread::Split);
     assert!(writing(&h).beside.share.get() < 0.5);
     h.keys("ggA, edited<esc>:w<ret>");

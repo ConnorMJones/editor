@@ -3,14 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use model::command::{
-    ChangesCommand, Command, Cycle, Direction, PickerCommand, PickerKind, Shown, TreeCommand,
-    WindowCommand,
+    ChangesCommand, Command, Cycle, Direction, PickerCommand, PickerKind, Shown, TabCommand,
+    TreeCommand, WindowCommand,
 };
 use model::config::OpenAs;
-use model::geom::{self, Point};
+
 use model::notice::Notice;
 
-use model::sheet::Viewport;
 use model::window::{Axis, Side};
 use nucleo::Matcher;
 
@@ -38,11 +37,12 @@ use crate::sidebar::tree::{
     TreeTarget,
 };
 use crate::text::buffer::{BufferId, Position, Target};
-use crate::view::layout::{CloseError, Layout, NotInLayout, Pane, PaneId, Place, Tabs, Tick};
+use crate::view::layout::TabPane;
+use crate::view::layout::{
+    CloseError, DropOn, Layout, NotInLayout, Pane, PaneId, Place, Tabs, Tick, Zone,
+};
 use crate::view::tab::{NoMode, Opened, Tab, TextTabs};
 use crate::{Effect, Files, Focus, Overlay, Sidebar, State};
-
-const EDGE: f32 = 0.25;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrive {
@@ -165,6 +165,26 @@ pub fn window(state: &mut State, command: WindowCommand, out: &mut Vec<Effect>) 
             Err(CloseError::NotInLayout) => unreachable!("the focus is a leaf of the layout"),
         },
         WindowCommand::Only => layout.only(),
+        WindowCommand::Swap(side) => {
+            layout.swap(side);
+        }
+        WindowCommand::Transpose => layout.transpose(),
+        WindowCommand::Resize(resize) => layout.resize(resize),
+        WindowCommand::Maximise => layout.toggle_maximise(),
+        WindowCommand::MoveTab(side) => match layout.move_tab_to(side) {
+            Some(_) => {}
+            None => state.notice = Some(Notice::NoBuffer),
+        },
+        WindowCommand::GotoFile(axis) => {
+            let side = match axis {
+                Axis::Row => Side::Right,
+                Axis::Column => Side::Down,
+            };
+            match layout.split_copy(layout.focus(), side) {
+                Some(_) => crate::project::links::goto_file(state, out),
+                None => state.notice = Some(Notice::NothingToSplit),
+            }
+        }
     }
     touch(&mut state.layout);
     focus_editor(state);
@@ -181,6 +201,20 @@ pub fn cycle_tab(state: &mut State, cycle: Cycle) {
         Cycle::Previous => (active + count - 1) % count,
     };
     tabs.activate(next, now);
+}
+
+pub fn tab(state: &mut State, command: TabCommand) {
+    let now = state.layout.tick();
+    let Some(tabs) = state.layout.focused_mut().tabs.as_mut() else {
+        return;
+    };
+    match command {
+        TabCommand::Shift(direction) => tabs.shift(direction, now),
+        TabCommand::LastUsed => match tabs.last_used() {
+            Some(index) => tabs.activate(index, now),
+            None => {}
+        },
+    }
 }
 
 pub fn focus_editor(state: &mut State) {
@@ -1083,41 +1117,6 @@ pub enum Dragged {
     File { file: RelPath, arrive: Arrive },
     Outside(PathBuf),
     Tab { pane: PaneId, index: usize },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DropOn {
-    Pane { pane: PaneId, zone: Zone },
-    Tabs { pane: PaneId, at: usize },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PanePoint {
-    pub at: Point<geom::Pane>,
-    pub viewport: Viewport,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Zone {
-    Centre(PanePoint),
-    Edge(Side),
-}
-
-impl Zone {
-    pub fn at(point: PanePoint) -> Zone {
-        let PanePoint { at, viewport } = point;
-        let (x, y) = (at.x / viewport.width.get(), at.y / viewport.height.get());
-        [
-            (Side::Left, x),
-            (Side::Right, 1.0 - x),
-            (Side::Up, y),
-            (Side::Down, 1.0 - y),
-        ]
-        .into_iter()
-        .filter(|(_, distance)| *distance < EDGE)
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map_or(Zone::Centre(point), |(side, _)| Zone::Edge(side))
-    }
 }
 
 pub fn dropped(state: &mut State, dragged: Dragged, on: DropOn, out: &mut Vec<Effect>) {

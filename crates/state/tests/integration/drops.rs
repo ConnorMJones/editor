@@ -6,8 +6,10 @@ use model::sheet::Viewport;
 use model::units::Px;
 use model::window::{Axis, Side};
 use state::project::path::RelPath;
+use state::view::layout::TabPane;
+use state::view::layout::{DropOn, PanePoint, Zone};
 use state::view::layout::{Node, PaneId};
-use state::view::panes::{self, Arrive, Dragged, DropOn, PanePoint, Zone};
+use state::view::panes::{self, Arrive, Dragged};
 use state::view::tab::TextTabs;
 
 use crate::harness::Harness;

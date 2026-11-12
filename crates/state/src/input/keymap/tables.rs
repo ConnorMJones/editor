@@ -4,10 +4,10 @@ use model::color::Preset;
 use model::command::{
     Align, Annotate, Answer, Case, ChangesCommand, Command, Cycle, Direction, DocumentCommand,
     DraftCommand, DrawingCommand, Find, HunkOp, HunkTarget, Inclusion, InkCommand, InkTool, Join,
-    JsonCanvasCommand, Motion, ObjectScope, PageCommand, PageSide, PageStep, Paste, PdfCommand,
-    Pending, PickerCommand, PickerKind, PromptCommand, PromptMotion, ReadCommand, ReadMove,
-    ReadingCommand, RegexOp, Resize, ScrollBy, Shown, SyntaxObject, Take, TreeCommand, ViewCommand,
-    WindowCommand, WordBounds, Yanking, ZoomBy,
+    JsonCanvasCommand, Motion, ObjectScope, PageCommand, PageSide, PageStep, PaneResize, Paste,
+    PdfCommand, Pending, PickerCommand, PickerKind, PromptCommand, PromptMotion, ReadCommand,
+    ReadMove, ReadingCommand, RegexOp, Resize, ScrollBy, Shown, SyntaxObject, TabCommand, Take,
+    TreeCommand, ViewCommand, WindowCommand, WordBounds, Yanking, ZoomBy,
 };
 use model::key::{Key, KeyCode, Mods};
 use model::register::{Clipboard, Register};
@@ -414,17 +414,20 @@ const DRAFT: Bindings = &[
     ),
     (&[Key::ctrl('s')], Command::Write),
     (&[SPACE, Key::char('q')], Command::Draft(DraftCommand::Drop)),
-    (&[SPACE, Key::char('v')], Command::Draft(DraftCommand::Swap)),
     (
-        &[CTRL_W, Key::char('<')],
+        &[Key::char('z'), Key::char('v')],
+        Command::Draft(DraftCommand::Swap),
+    ),
+    (
+        &[Key::char('z'), Key::char('<')],
         Command::ResizeSplit(Resize::Narrow),
     ),
     (
-        &[CTRL_W, Key::char('>')],
+        &[Key::char('z'), Key::char('>')],
         Command::ResizeSplit(Resize::Widen),
     ),
     (
-        &[CTRL_W, Key::char('=')],
+        &[Key::char('z'), Key::char('=')],
         Command::ResizeSplit(Resize::Even),
     ),
 ];
@@ -720,18 +723,47 @@ macro_rules! window_bindings {
     ($($prefix:expr),+) => {
         [
             (&[$($prefix,)+ Key::char('v')], Command::Window(WindowCommand::Split(Axis::Row))),
+            (&[$($prefix,)+ Key::ctrl('v')], Command::Window(WindowCommand::Split(Axis::Row))),
             (&[$($prefix,)+ Key::char('s')], Command::Window(WindowCommand::Split(Axis::Column))),
+            (&[$($prefix,)+ Key::ctrl('s')], Command::Window(WindowCommand::Split(Axis::Column))),
             (&[$($prefix,)+ Key::char('w')], Command::Window(WindowCommand::FocusNext)),
-            (&[$($prefix,)+ Key::char('h')], Command::Window(WindowCommand::Focus(Side::Left))),
-            (&[$($prefix,)+ Key::char('j')], Command::Window(WindowCommand::Focus(Side::Down))),
-            (&[$($prefix,)+ Key::char('k')], Command::Window(WindowCommand::Focus(Side::Up))),
-            (&[$($prefix,)+ Key::char('l')], Command::Window(WindowCommand::Focus(Side::Right))),
-            (&[$($prefix,)+ Key::code(KeyCode::Left)], Command::Window(WindowCommand::Focus(Side::Left))),
-            (&[$($prefix,)+ Key::code(KeyCode::Down)], Command::Window(WindowCommand::Focus(Side::Down))),
-            (&[$($prefix,)+ Key::code(KeyCode::Up)], Command::Window(WindowCommand::Focus(Side::Up))),
-            (&[$($prefix,)+ Key::code(KeyCode::Right)], Command::Window(WindowCommand::Focus(Side::Right))),
+            (&[$($prefix,)+ Key::ctrl('w')], Command::Window(WindowCommand::FocusNext)),
+            (&[$($prefix,)+ Key::char('t')], Command::Window(WindowCommand::Transpose)),
+            (&[$($prefix,)+ Key::ctrl('t')], Command::Window(WindowCommand::Transpose)),
+            (&[$($prefix,)+ Key::char('f')], Command::Window(WindowCommand::GotoFile(Axis::Column))),
+            (&[$($prefix,)+ Key::char('F')], Command::Window(WindowCommand::GotoFile(Axis::Row))),
             (&[$($prefix,)+ Key::char('q')], Command::Window(WindowCommand::Close)),
+            (&[$($prefix,)+ Key::ctrl('q')], Command::Window(WindowCommand::Close)),
             (&[$($prefix,)+ Key::char('o')], Command::Window(WindowCommand::Only)),
+            (&[$($prefix,)+ Key::ctrl('o')], Command::Window(WindowCommand::Only)),
+            (&[$($prefix,)+ Key::char('h')], Command::Window(WindowCommand::Focus(Side::Left))),
+            (&[$($prefix,)+ Key::ctrl('h')], Command::Window(WindowCommand::Focus(Side::Left))),
+            (&[$($prefix,)+ Key::code(KeyCode::Left)], Command::Window(WindowCommand::Focus(Side::Left))),
+            (&[$($prefix,)+ Key::char('j')], Command::Window(WindowCommand::Focus(Side::Down))),
+            (&[$($prefix,)+ Key::ctrl('j')], Command::Window(WindowCommand::Focus(Side::Down))),
+            (&[$($prefix,)+ Key::code(KeyCode::Down)], Command::Window(WindowCommand::Focus(Side::Down))),
+            (&[$($prefix,)+ Key::char('k')], Command::Window(WindowCommand::Focus(Side::Up))),
+            (&[$($prefix,)+ Key::ctrl('k')], Command::Window(WindowCommand::Focus(Side::Up))),
+            (&[$($prefix,)+ Key::code(KeyCode::Up)], Command::Window(WindowCommand::Focus(Side::Up))),
+            (&[$($prefix,)+ Key::char('l')], Command::Window(WindowCommand::Focus(Side::Right))),
+            (&[$($prefix,)+ Key::ctrl('l')], Command::Window(WindowCommand::Focus(Side::Right))),
+            (&[$($prefix,)+ Key::code(KeyCode::Right)], Command::Window(WindowCommand::Focus(Side::Right))),
+            (&[$($prefix,)+ Key::char('H')], Command::Window(WindowCommand::Swap(Side::Left))),
+            (&[$($prefix,)+ Key::char('J')], Command::Window(WindowCommand::Swap(Side::Down))),
+            (&[$($prefix,)+ Key::char('K')], Command::Window(WindowCommand::Swap(Side::Up))),
+            (&[$($prefix,)+ Key::char('L')], Command::Window(WindowCommand::Swap(Side::Right))),
+            (&[$($prefix,)+ Key::char('<')], Command::Window(WindowCommand::Resize(PaneResize::Narrower))),
+            (&[$($prefix,)+ Key::char('>')], Command::Window(WindowCommand::Resize(PaneResize::Wider))),
+            (&[$($prefix,)+ Key::char('-')], Command::Window(WindowCommand::Resize(PaneResize::Shorter))),
+            (&[$($prefix,)+ Key::char('+')], Command::Window(WindowCommand::Resize(PaneResize::Taller))),
+            (&[$($prefix,)+ Key::char('=')], Command::Window(WindowCommand::Resize(PaneResize::Even))),
+            (&[$($prefix,)+ Key::char('_')], Command::Window(WindowCommand::Resize(PaneResize::TallestHere))),
+            (&[$($prefix,)+ Key::char('|')], Command::Window(WindowCommand::Resize(PaneResize::WidestHere))),
+            (&[$($prefix,)+ Key::char('z')], Command::Window(WindowCommand::Maximise)),
+            (&[$($prefix,)+ Key::char('m'), Key::char('h')], Command::Window(WindowCommand::MoveTab(Side::Left))),
+            (&[$($prefix,)+ Key::char('m'), Key::char('j')], Command::Window(WindowCommand::MoveTab(Side::Down))),
+            (&[$($prefix,)+ Key::char('m'), Key::char('k')], Command::Window(WindowCommand::MoveTab(Side::Up))),
+            (&[$($prefix,)+ Key::char('m'), Key::char('l')], Command::Window(WindowCommand::MoveTab(Side::Right))),
         ]
     };
 }
@@ -766,34 +798,53 @@ const WORKSPACE: Bindings = &[
 ];
 
 /// Modes of the focused tab; shared by every context that shows one.
-const MODES: Bindings = &[
-    (&[SPACE, Key::char('d')], Command::ToggleMode(Shown::Diff)),
-    (&[SPACE, Key::char('v')], Command::ToggleMode(Shown::Split)),
-    (&[SPACE, Key::char('V')], Command::ToggleMode(Shown::Render)),
+const PROSE_ZOOM: Bindings = &[
+    (&[Key::char('+')], view(ViewCommand::Zoom(ZoomBy::In))),
+    (&[Key::char('-')], view(ViewCommand::Zoom(ZoomBy::Out))),
+    (&[Key::char('=')], view(ViewCommand::Zoom(ZoomBy::Reset))),
+];
+
+const VIEW_MODES: Bindings = &[
     (
-        &[SPACE, Key::code(KeyCode::Tab)],
+        &[Key::char('z'), Key::char('r')],
+        Command::ToggleMode(Shown::Render),
+    ),
+    (
+        &[Key::char('z'), Key::char('v')],
+        Command::ToggleMode(Shown::Split),
+    ),
+    (
+        &[Key::char('z'), Key::char('d')],
+        Command::ToggleMode(Shown::Diff),
+    ),
+    (
+        &[Key::char('z'), Key::char('s')],
+        Command::ToggleMode(Shown::Source),
+    ),
+    (
+        &[Key::char('z'), Key::code(KeyCode::Tab)],
         Command::CycleMode(Direction::Forward),
     ),
     (
-        &[SPACE, with(KeyCode::Tab, Mods::SHIFT)],
+        &[Key::char('z'), with(KeyCode::Tab, Mods::SHIFT)],
         Command::CycleMode(Direction::Backward),
     ),
     (
-        &[CTRL_W, Key::char('<')],
+        &[Key::char('z'), Key::char('<')],
         Command::ResizeSplit(Resize::Narrow),
     ),
     (
-        &[CTRL_W, Key::char('>')],
+        &[Key::char('z'), Key::char('>')],
         Command::ResizeSplit(Resize::Widen),
     ),
     (
-        &[CTRL_W, Key::char('=')],
+        &[Key::char('z'), Key::char('=')],
         Command::ResizeSplit(Resize::Even),
     ),
 ];
 
-const WINDOW: &[(&[Key], Command); 13] = &window_bindings!(CTRL_W);
-const SPACE_WINDOW: &[(&[Key], Command); 13] = &window_bindings!(SPACE, Key::char('w'));
+const WINDOW: Bindings = &window_bindings!(CTRL_W);
+const SPACE_WINDOW: Bindings = &window_bindings!(SPACE, Key::char('w'));
 
 const GOTO_BUFFER: Bindings = &[
     (
@@ -803,6 +854,18 @@ const GOTO_BUFFER: Bindings = &[
     (
         &[Key::char('g'), Key::char('p')],
         Command::CycleBuffer(Cycle::Previous),
+    ),
+    (
+        &[Key::char('g'), Key::char('a')],
+        Command::Tab(TabCommand::LastUsed),
+    ),
+    (
+        &[Key::char('g'), Key::char('<')],
+        Command::Tab(TabCommand::Shift(Direction::Backward)),
+    ),
+    (
+        &[Key::char('g'), Key::char('>')],
+        Command::Tab(TabCommand::Shift(Direction::Forward)),
     ),
 ];
 
@@ -1127,7 +1190,7 @@ const CANVAS: Bindings = &[
     ),
     (&[Key::char('y')], canvas(JsonCanvasCommand::Duplicate)),
     (
-        &[Key::char('z'), Key::char('s')],
+        &[Key::char('z'), Key::char('p')],
         canvas(JsonCanvasCommand::Focus),
     ),
     (&[Key::char('i')], canvas(JsonCanvasCommand::Write)),
@@ -1267,11 +1330,7 @@ const PAGE_EDIT: Bindings = &[
 const PDF_READ: Bindings = &[
     (&[Key::char(':')], Command::CommandMode),
     (
-        &[SPACE, Key::code(KeyCode::Tab)],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Markup)),
-    ),
-    (
-        &[SPACE, Key::char('d')],
+        &[Key::char('z'), Key::code(KeyCode::Tab)],
         Command::Drawing(DrawingCommand::Pdf(PdfCommand::Markup)),
     ),
     (&SAVE_ALL, Command::WriteAll),
@@ -1281,7 +1340,7 @@ const READER: Bindings = &[
     (&[Key::char('y')], Command::Reading(ReadingCommand::Copy)),
     (&[Key::char('/')], Command::Reading(ReadingCommand::Find)),
     (
-        &[SPACE, Key::char('t')],
+        &[SPACE, Key::char('o')],
         Command::Picker(PickerCommand::Open(PickerKind::Outline)),
     ),
     (
@@ -1332,11 +1391,7 @@ const PDF_MARKUP: Bindings = &[
         Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
     ),
     (
-        &[SPACE, Key::code(KeyCode::Tab)],
-        Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
-    ),
-    (
-        &[SPACE, Key::char('d')],
+        &[Key::char('z'), Key::code(KeyCode::Tab)],
         Command::Drawing(DrawingCommand::Pdf(PdfCommand::Read)),
     ),
 ];
@@ -1351,7 +1406,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         WINDOW,
         SPACE_WINDOW,
         GOTO_BUFFER,
-        MODES,
+        VIEW_MODES,
         CONFLICTS,
         MARKDOWN,
     ],
@@ -1365,7 +1420,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         WINDOW,
         SPACE_WINDOW,
         GOTO_BUFFER,
-        MODES,
+        VIEW_MODES,
         CONFLICTS,
         MARKDOWN,
     ],
@@ -1379,7 +1434,8 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         READ,
         LEAVE,
         DOCUMENT,
-        MODES,
+        PROSE_ZOOM,
+        VIEW_MODES,
         MARKDOWN,
         WORKSPACE,
         WINDOW,
@@ -1390,7 +1446,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
         READ,
         LEAVE,
         SHEET,
-        MODES,
+        VIEW_MODES,
         MARKDOWN,
         WORKSPACE,
         WINDOW,
@@ -1463,6 +1519,7 @@ pub const TABLES: [&[Bindings]; Context::COUNT] = [
     &[
         READ,
         DOCUMENT,
+        PROSE_ZOOM,
         READER,
         WORKSPACE,
         WINDOW,

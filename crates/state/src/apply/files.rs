@@ -26,6 +26,7 @@ use crate::project::path::FileKind;
 use crate::reading::{self, ReaderId, Reading};
 use crate::render::typeset;
 use crate::text::buffer::{Buffer, BufferId, Disk, Position, Read, ReadId, Target, Waiter};
+use crate::view::layout::TabLayout;
 use crate::view::layout::{Layout, PaneId, Tabs};
 use crate::view::panes::Arrive;
 use crate::view::tab::{BesideMut, Opened, ShowingMut, Tab, TextTabs, Writable};
@@ -55,6 +56,36 @@ pub fn close_active(state: &mut State, force: Force) {
     {
         Some(index) => panes::close_tab(state, focus, index, force),
         None => state.notice = Some(Notice::NoBuffer),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Which {
+    Others,
+    All,
+}
+
+pub fn close_tabs(state: &mut State, which: Which, force: Force) {
+    let focus = state.layout.focus();
+    let Some(tabs) = (state.layout.panes().get(focus)).and_then(|pane| pane.tabs.as_ref()) else {
+        return state.notice = Some(Notice::NoBuffer);
+    };
+    let active = tabs.items()[tabs.active()].tab.opened();
+    let closing: Vec<Opened> = (tabs.items().iter())
+        .map(|item| item.tab.opened())
+        .filter(|opened| match which {
+            Which::All => true,
+            Which::Others => *opened != active,
+        })
+        .collect();
+    for opened in closing {
+        let index = (state.layout.panes().get(focus))
+            .and_then(|pane| pane.tabs.as_ref())
+            .and_then(|tabs| tabs.find(opened));
+        match index {
+            Some(index) => panes::close_tab(state, focus, index, force),
+            None => {}
+        }
     }
 }
 

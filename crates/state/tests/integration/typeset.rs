@@ -8,6 +8,7 @@ use state::render::document;
 use state::render::markdown::Figure;
 use state::render::pages::{self, Locating};
 use state::render::typeset::{self, Outcome, PageSvg, Render, SPARE, Typst};
+use state::view::layout::{TabLayout, TabPane};
 
 use state::view::layout::PaneId;
 use state::view::tab::{Showing, TextTabs};
@@ -93,7 +94,7 @@ fn preview(h: &Harness) -> PaneId {
 fn figures_go_from_pending_to_ready_and_bad_tex_fails() {
     let (_dir, mut h) = open("note.md", NOTE);
     h.typesetting = Typesetting::Hold;
-    h.keys("<space>V");
+    h.keys("zr");
     assert_eq!(h.held.len(), 4, "one request per figure");
     for (source, _) in figures(&h) {
         assert!(
@@ -128,7 +129,7 @@ fn figures_go_from_pending_to_ready_and_bad_tex_fails() {
 #[test]
 fn figures_are_reused_across_parses_and_bounded() {
     let (_dir, mut h) = open("note.md", NOTE);
-    h.keys("<C-w>v<space>V<C-w>h");
+    h.keys("<C-w>vzr<C-w>h");
     let cached = h.state.figures.entries.len();
     assert_eq!(cached, 4);
     let generation = h.state.figures.generation;
@@ -161,7 +162,7 @@ fn figures_are_reused_across_parses_and_bounded() {
 #[test]
 fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     let (dir, mut h) = open("main.typ", DOC);
-    h.keys("<C-w>v<space>V<C-w>h");
+    h.keys("<C-w>vzr<C-w>h");
     let (version, preview_state) = typst(&h);
     let compiled = preview_state.pages.as_ref().expect("compiled");
     assert_eq!(compiled.pages.len(), 2);
@@ -225,7 +226,7 @@ fn typst_preview_recompiles_drops_stale_results_and_keeps_pages_on_errors() {
     assert_eq!(h.view().selection.primary().cursor_line(text), line);
 
     // Fixing it clears the errors.
-    h.keys("u<space>V");
+    h.keys("uzr");
     let (version, preview_state) = typst(&h);
     assert_eq!(preview_state.outcome, Outcome::Compiled);
     assert_eq!(preview_state.pages.as_ref().unwrap().version, version);
@@ -259,7 +260,7 @@ fn saving_an_imported_file_recompiles_the_preview() {
     )
     .unwrap();
     let mut h = Harness::new(dir.path());
-    h.keys(":o main.typ<ret><space>V");
+    h.keys(":o main.typ<ret>zr");
     let lib = dir.path().canonicalize().unwrap().join("lib.typ");
     assert_eq!(typst(&h).1.deps, [lib.clone()]);
     h.typesetting = Typesetting::Hold;
@@ -271,7 +272,7 @@ fn saving_an_imported_file_recompiles_the_preview() {
 #[test]
 fn split_pages_go_to_the_page_under_the_cursor() {
     let (_dir, mut h) = open("main.typ", DOC);
-    h.keys("<space>v");
+    h.keys("zv");
     let pane = h.state.layout.focus();
     // Line 4 is "= Two", on the second page; the cursor sits before its text.
     h.keys("4gg");
@@ -287,7 +288,7 @@ fn split_pages_go_to_the_page_under_the_cursor() {
 #[test]
 fn pages_fit_the_pane_and_keys_move_between_them() {
     let (_dir, mut h) = open("main.typ", DOC);
-    h.keys("<space>V");
+    h.keys("zr");
     let pane = h.state.layout.focus();
     let measure = model::sheet::Measure {
         viewport: model::sheet::Viewport::new(Px(600.0), Px(400.0)).unwrap(),
@@ -319,7 +320,7 @@ fn only_typst_pages_around_the_view_hold_their_drawing() {
         text.push_str(&format!("= Page {page}\n#pagebreak()\n"));
     }
     let (_dir, mut h) = open("main.typ", &text);
-    h.keys("<space>V");
+    h.keys("zr");
     let drawn = |h: &Harness| -> Vec<usize> {
         let compiled = typst(h).1.pages.as_ref().expect("compiled");
         (compiled.pages.iter().enumerate())

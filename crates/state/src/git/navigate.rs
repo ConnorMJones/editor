@@ -12,6 +12,7 @@ use crate::git::diff::{Bases, Diff, Hunk, Side, next_hunk, prev_hunk};
 use crate::project::path::RelPath;
 use crate::text::buffer::{Buffer, BufferId, Target};
 use crate::view::layout::PaneId;
+use crate::view::layout::{TabLayout, TabPane};
 use crate::view::panes::Arrive;
 use crate::view::scroll;
 use crate::view::tab::TextTabs;

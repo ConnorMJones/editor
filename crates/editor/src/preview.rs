@@ -11,8 +11,9 @@ use state::Overlay;
 use state::input::picker::{self, Preview, PreviewSource};
 use state::text::buffer::TextDoc;
 use state::view::display::{self, CursorShape, Focus, Frame};
-use state::view::layout::{Pane, Scroll, Sideways, Viewport};
+use state::view::layout::Pane;
 use state::view::tab::TextTabs;
+use state::view::text_view::{Scroll, Sideways, Viewport};
 
 use crate::fonts::hsla;
 use crate::workspace::Workspace;

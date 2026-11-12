@@ -8,7 +8,8 @@ use gpui::{
 use model::window::Side;
 use slotmap::Key as _;
 use state::view::layout::PaneId;
-use state::view::panes::{self, Dragged, DropOn, PanePoint, Zone};
+use state::view::layout::{DropOn, PanePoint, Zone};
+use state::view::panes::{self, Dragged};
 
 use super::Workspace;
 use super::sidebar::DraggedEntry;

@@ -1618,6 +1618,7 @@ dependencies = [
  "jsoncanvas",
  "library",
  "model",
+ "panes",
  "reader",
  "slotmap",
  "state",
@@ -4600,6 +4601,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "panes"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "slotmap",
+ "smallvec",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6257,6 +6269,7 @@ dependencies = [
  "model",
  "notify",
  "nucleo",
+ "panes",
  "pulldown-cmark",
  "reader",
  "ropey",

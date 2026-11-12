@@ -15,6 +15,7 @@ use model::register::Clipboard;
 use model::theme::Theme;
 use model::units::Px;
 use model::window::Axis;
+use panes::Shown;
 use slotmap::SecondaryMap;
 use state::git::stage::Discard;
 use state::insert::{self, ImageFrom, ImageInto};
@@ -23,7 +24,7 @@ use state::project::watch::{self, Watcher};
 use state::render::typeset::Request;
 use state::sidebar::changes::{self};
 use state::sidebar::tree::{self, NewEntry, TreeEdit};
-use state::view::layout::{PaneId, SplitPath, Tabs};
+use state::view::layout::{Node, PaneId, SplitPath, Tabs};
 use state::view::mode;
 use state::view::sheet::Wheel;
 use state::view::tab::{InvalidShare, Share};
@@ -68,7 +69,7 @@ pub struct Workspace {
     pub session: SessionFile,
     pub drag: Drag,
     /// The pane and zone a dragged file or tab would drop into.
-    pub drop_zone: Option<(PaneId, state::view::panes::Zone)>,
+    pub drop_zone: Option<(PaneId, state::view::layout::Zone)>,
     /// Window edge under the pointer; a change redraws so the cursor follows it.
     pub resize_edge: Option<ResizeEdge>,
     /// Bounds drawn last frame, which drags measure against.
@@ -515,7 +516,10 @@ impl Render for Workspace {
                 .absolute()
                 .size_full(),
             )
-            .child(self.node(&self.state.layout.root(), &mut path, cx));
+            .child(match self.state.layout.shown() {
+                Shown::Tree(root) => self.node(root, &mut path, cx),
+                Shown::One(pane) => self.node(&Node::Pane(pane), &mut path, cx),
+            });
         let main = div().flex_1().flex().flex_row().min_h_0();
         let main = match side {
             SidebarSide::Left => main.children(sidebar).child(editor),

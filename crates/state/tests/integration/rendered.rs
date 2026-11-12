@@ -12,6 +12,7 @@ use state::render::document::{
     self, BlockClick, DocumentMotion, DocumentScroll, DocumentState, Placed, TopItem,
 };
 use state::render::markdown::{LinkTarget, WikiLink};
+use state::view::layout::TabPane;
 
 use state::view::layout::PaneId;
 use state::view::mode;
@@ -72,38 +73,38 @@ fn top_line(h: &Harness, pane: PaneId) -> usize {
 }
 
 #[test]
-fn space_tab_cycles_through_the_modes_the_kind_of_file_has() {
+fn z_tab_cycles_through_the_modes_the_kind_of_file_has() {
     let (_dir, mut h) = harness();
-    h.keys("<space><tab>");
+    h.keys("z<tab>");
     assert_eq!(shown(&h), Shown::Split);
-    h.keys("<space><tab>");
+    h.keys("z<tab>");
     assert_eq!(shown(&h), Shown::Render);
-    h.keys("<space><tab>");
+    h.keys("z<tab>");
     assert_eq!(shown(&h), Shown::Diff);
-    h.keys("<space><tab>");
+    h.keys("z<tab>");
     assert_eq!(shown(&h), Shown::Source);
-    h.keys("<space><S-tab>");
+    h.keys("z<S-tab>");
     assert_eq!(shown(&h), Shown::Diff);
     assert_eq!(h.focused_tabs(), ["±note.md"], "one tab, in its mode");
     // A plain text file has no rendering to cycle through.
-    h.keys(":o plain.txt<ret><space><tab>");
+    h.keys(":o plain.txt<ret>z<tab>");
     assert_eq!(shown(&h), Shown::Diff);
-    h.keys("<space><tab>");
+    h.keys("z<tab>");
     assert_eq!(shown(&h), Shown::Source);
 }
 
 #[test]
 fn rendering_is_refused_for_files_without_one() {
     let (_dir, mut h) = harness();
-    h.keys(":o plain.txt<ret><space>V");
+    h.keys(":o plain.txt<ret>zr");
     assert_eq!(shown(&h), Shown::Source);
     assert!(matches!(h.state.notice, Some(Notice::NotRenderable { .. })));
 }
 
 #[test]
-fn space_capital_v_toggles_in_place_keeping_the_position() {
+fn zr_toggles_in_place_keeping_the_position() {
     let (_dir, mut h) = harness();
-    h.keys("11gg<space>V");
+    h.keys("11ggzr");
     assert_eq!(h.focused_tabs(), ["◉note.md"]);
     let focus = h.state.layout.focus();
     assert_eq!(input::context(&h.state), Context::Document);
@@ -127,7 +128,7 @@ fn space_capital_v_toggles_in_place_keeping_the_position() {
 
     // Back to the source at the heading the rendering showed, cursor moved there since it was
     // out of view.
-    h.keys("<space>V");
+    h.keys("zr");
     assert_eq!(h.focused_tabs(), ["note.md"]);
     assert_eq!(top_line(&h, focus), 12);
     assert_eq!(h.cursor_line(), 12);
@@ -137,14 +138,14 @@ fn space_capital_v_toggles_in_place_keeping_the_position() {
     );
 
     // `esc` in a rendering goes back to the source too.
-    h.keys("<space>V<esc>");
+    h.keys("zr<esc>");
     assert_eq!(shown(&h), Shown::Source);
 }
 
 #[test]
 fn opening_a_file_from_a_picker_keeps_its_mode() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V:o other.md<ret><space>bnote<ret>");
+    h.keys("zr:o other.md<ret><space>bnote<ret>");
     assert_eq!(h.focused_tabs(), ["◉note.md", "other.md"]);
     assert_eq!(shown(&h), Shown::Render);
 }
@@ -152,7 +153,7 @@ fn opening_a_file_from_a_picker_keeps_its_mode() {
 #[test]
 fn clicking_a_block_puts_the_text_cursor_on_it() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V");
+    h.keys("zr");
     let pane = h.state.layout.focus();
     // As the host draws it: the block's first line at the parsed version.
     let click = |h: &Harness| {
@@ -169,7 +170,7 @@ fn clicking_a_block_puts_the_text_cursor_on_it() {
     assert_eq!(h.cursor_line(), 12);
 
     // A click drawn before an edit is ignored.
-    h.keys("<space>VggOx<esc><space>V");
+    h.keys("zrggOx<esc>zr");
     h.run(|state, _| document::click(state, pane, drawn));
     assert_eq!(h.cursor_line(), 0);
 }
@@ -177,7 +178,7 @@ fn clicking_a_block_puts_the_text_cursor_on_it() {
 #[test]
 fn rendered_keys_scroll_by_motions_for_the_host_to_measure() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V");
+    h.keys("zr");
     let pane = h.state.layout.focus();
     let from = TopItem {
         item: 0,
@@ -247,7 +248,7 @@ fn checkbox_toggles_the_source_as_one_undo_step() {
 #[test]
 fn callout_folds_are_view_state() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V");
+    h.keys("zr");
     let pane = h.state.layout.focus();
     h.run(|state, _| document::toggle_fold(state, pane, 2));
     assert_eq!(rendered_in(&h, pane).toggled, [2]);
@@ -259,7 +260,7 @@ fn callout_folds_are_view_state() {
 #[test]
 fn links_follow_urls_headings_and_notes() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V");
+    h.keys("zr");
     let buffer = h.view().buffer();
     let origin = Origin::Document(h.state.layout.focus());
     h.run(|state, out| {
@@ -301,7 +302,7 @@ fn links_follow_urls_headings_and_notes() {
 #[test]
 fn sessions_keep_rendered_tabs() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V");
+    h.keys("zr");
     let pane = h.state.layout.focus();
     h.run(|state, _| {
         document::scrolled(
@@ -328,7 +329,7 @@ fn sessions_keep_rendered_tabs() {
 #[test]
 fn sessions_rendering_a_file_without_one_are_rejected() {
     let (_dir, mut h) = harness();
-    h.keys("<space>V");
+    h.keys("zr");
     let text = toml::to_string(&session::snapshot(&h.state))
         .unwrap()
         .replace("note.md", "plain.txt");
@@ -341,9 +342,9 @@ fn sessions_rendering_a_file_without_one_are_rejected() {
 }
 
 #[test]
-fn space_v_splits_the_tab_into_source_and_rendering() {
+fn zv_splits_the_tab_into_source_and_rendering() {
     let (_dir, mut h) = harness();
-    h.keys("<space>v");
+    h.keys("zv");
     assert_eq!(h.focused_tabs(), ["◧note.md"]);
     assert_eq!(shown(&h), Shown::Split);
     assert_eq!(
@@ -356,7 +357,7 @@ fn space_v_splits_the_tab_into_source_and_rendering() {
         h.state.documents.get(buffer).is_some(),
         "parsed for the rendering"
     );
-    h.keys("<space>v");
+    h.keys("zv");
     assert_eq!(h.focused_tabs(), ["note.md"]);
     assert!(h.state.documents.get(buffer).is_none());
 }
@@ -364,7 +365,7 @@ fn space_v_splits_the_tab_into_source_and_rendering() {
 #[test]
 fn the_split_rendering_follows_the_source_cursor_and_scroll() {
     let (_dir, mut h) = harness();
-    h.keys("<space>v");
+    h.keys("zv");
     let pane = h.state.layout.focus();
     assert_eq!(rendered_in(&h, pane).scroll, DocumentScroll::item(0));
     // Line 10 is "para four", block 5.
@@ -381,7 +382,7 @@ fn the_split_rendering_follows_the_source_cursor_and_scroll() {
 #[test]
 fn scrolling_the_split_rendering_scrolls_the_source_not_its_cursor() {
     let (_dir, mut h) = harness();
-    h.keys("<space>v");
+    h.keys("zv");
     let pane = h.state.layout.focus();
     let at = |item: usize, offset: f32| TopItem {
         item,
@@ -406,7 +407,7 @@ fn scrolling_the_split_rendering_scrolls_the_source_not_its_cursor() {
 #[test]
 fn clicking_a_split_rendering_moves_the_cursor_and_leaves_the_rendering() {
     let (_dir, mut h) = harness();
-    h.keys("<space>v");
+    h.keys("zv");
     let pane = h.state.layout.focus();
     let click = {
         let buffer = h.view().buffer();
@@ -425,7 +426,7 @@ fn clicking_a_split_rendering_moves_the_cursor_and_leaves_the_rendering() {
 #[test]
 fn sessions_keep_split_tabs() {
     let (_dir, mut h) = harness();
-    h.keys("<space>v");
+    h.keys("zv");
     let pane = h.state.layout.focus();
     h.run(|state, _| {
         document::scrolled(
@@ -455,9 +456,9 @@ fn sessions_keep_split_tabs() {
 #[test]
 fn split_keys_and_drags_resize_the_source_side() {
     let (_dir, mut h) = harness();
-    h.keys("<C-w>>");
+    h.keys("z>");
     assert!(matches!(h.state.notice, Some(Notice::NotSplit)));
-    h.keys("<space>v");
+    h.keys("zv");
     let pane = h.state.layout.focus();
     let share = |h: &Harness| match h
         .state
@@ -473,23 +474,44 @@ fn split_keys_and_drags_resize_the_source_side() {
         | None => panic!("not split"),
     };
     assert_eq!(share(&h), 0.5);
-    h.keys("<C-w><");
+    h.keys("z<");
     assert!((share(&h) - 0.45).abs() < 1e-6);
     for _ in 0..30 {
-        h.keys("<C-w>>");
+        h.keys("z>");
     }
     assert!(
         (share(&h) - 0.95).abs() < 1e-6,
         "stops a step short of the edge"
     );
-    h.keys("<C-w>=");
+    h.keys("z=");
     assert_eq!(share(&h), 0.5);
     h.run(|state, _| mode::drag(state, pane, Share::new(0.3).unwrap()));
     assert_eq!(share(&h), 0.3);
     // A drag reported after the tab left the split is dropped.
-    h.keys("<space>v");
+    h.keys("zv");
     h.run(|state, _| mode::drag(state, pane, Share::new(0.7).unwrap()));
     assert_eq!(shown(&h), Shown::Source);
     assert!(Share::new(1.0).is_err());
     assert!(Share::new(f32::NAN).is_err());
+}
+
+#[test]
+fn a_rendered_note_zooms_by_key_and_the_session_keeps_it() {
+    let (_dir, mut h) = harness();
+    h.keys("zr++");
+    let pane = h.state.layout.focus();
+    let zoom = rendered_in(&h, pane).zoom;
+    assert!((zoom.get() - 1.5625).abs() < 1e-4, "{zoom:?}");
+    let text = toml::to_string(&session::snapshot(&h.state)).unwrap();
+    let saved: session::Session = toml::from_str(&text).unwrap();
+    let mut after = Harness::new(h.state.project.root.path());
+    after
+        .run(|state, out| session::restore(state, saved, out))
+        .expect("valid session");
+    let focus = after.state.layout.focus();
+    assert_eq!(rendered_in(&after, focus).zoom, zoom);
+    h.keys("=");
+    assert_eq!(rendered_in(&h, pane).zoom, model::sheet::Zoom::ONE);
+    h.keys("zs+");
+    assert_eq!(shown(&h), Shown::Source, "source text has no zoom");
 }

@@ -8,13 +8,43 @@ const CUSTOM: &str = "\
 | `C-k C-s` | normal, insert, select, tree | Save all |
 | `g left` / `g right` | normal, select | Line start / end |
 | `g up` / `g down` | normal, select | File start / last line |
-| `g n` / `g p` | normal, select | Next / previous tab |
 | `space e` | normal, select, tree | Toggle the file tree |
 | `j` / `k` | tree | Move |
 | `S-up` / `S-down` | tree | Extend the selection |
 | `l` / `h` | tree | Open or expand / collapse |
 | `a` / `r` / `d` | tree | Add / rename / delete |
 | `esc` | tree | Back to the editor |
+";
+
+const PANES: &str = "\
+## Panes, tabs and views
+
+| Keys | Action |
+| --- | --- |
+| `C-w v` / `C-w s` | Split right / below |
+| `C-w w` | Next pane |
+| `C-w h j k l`, arrows | Focus |
+| `C-w H J K L` | Swap with the pane on that side |
+| `C-w t` | Transpose the split |
+| `C-w f` / `C-w F` | Open the file under the cursor below / right |
+| `C-w q` / `C-w o` | Close / keep only this pane |
+| `C-w <` / `C-w >` | Narrower / wider |
+| `C-w -` / `C-w +` | Shorter / taller |
+| `C-w =` | Even all panes |
+| `C-w _` / `C-w \\|` | Tallest / widest |
+| `C-w z` | Maximise / restore |
+| `C-w m` `h j k l` | Move the tab to that side |
+| `space w` … | Same as `C-w` … |
+| `gn` / `gp` | Next / previous tab |
+| `ga` | Last used tab |
+| `g<` / `g>` | Move the tab left / right |
+| `:bc` / `:bco` / `:bca` | Close this / other / all tabs |
+| `zr` | Rendered |
+| `zv` | Source and rendered side by side |
+| `zd` | Diff |
+| `zs` | Source |
+| `z tab` / `z S-tab` | Next / previous view |
+| `z<` / `z>` / `z=` | Move the divider |
 ";
 
 const SOURCE_VIEW: &str = "\
@@ -31,8 +61,6 @@ const SOURCE_VIEW: &str = "\
 | `d` | changes | Discard |
 | `esc` | changes | Back to the editor |
 | `y` / `n` / `esc` | confirm | Yes / no |
-| `space d` | normal, select, document, pages | Toggle the diff |
-| `space tab` / `space S-tab` | normal, select, document, pages | Next / previous mode |
 | `]g` / `[g` | normal, select | Next / previous change, across files |
 | `]G` / `[G` | normal, select | Last / first change |
 | `space h s` / `space h u` / `space h r` | normal, select | Stage / unstage / revert the change |
@@ -46,9 +74,6 @@ const MARKDOWN_VIEW: &str = "\
 
 | Keys | Context | Action |
 | --- | --- | --- |
-| `space v` | normal, select, document, pages | Toggle the split |
-| `space V` | normal, select, document, pages | Toggle the rendering |
-| `C-w <` / `C-w >` / `C-w =` | normal, select | Narrow / widen / even the split |
 | `j` / `k`, down / up | document, pages | Scroll |
 | `C-d` / `C-u` | document, pages | Half page |
 | `C-f` / `C-b`, pagedown / pageup, `space space` | document, pages | Page |
@@ -81,7 +106,7 @@ const DRAWINGS: &str = "\
 | `space l h` / `space l n` | drawing | Hide / add a layer |
 | `space i`, `:image <path>` | drawing, note | Insert an image |
 | `space p`, `:paste-image` | drawing, note | Paste an image |
-| `+` / `-` / `=` | pages, drawing, image, PDF, canvas | Zoom in / out / fit |
+| `+` / `-` / `=` | rendered note, book, pages, drawing, image, PDF, canvas | Zoom in / out / reset |
 | `zf` | pages, drawing, image, PDF, canvas | Fit width / height |
 | `h j k l`, arrows | pages, drawing, image, PDF, canvas | Pan |
 | `:export-pdf` / `:export-svg` / `:export-png` | drawing | Export |
@@ -92,7 +117,8 @@ const DRAWINGS: &str = "\
 | `esc` | comment | Save and close |
 | `C-s`, `:w` | comment, card | Save |
 | `space q` | comment, card | Close without saving |
-| `space v` | comment, card | Full / split |
+| `zv` | comment, card | Full / split |
+| `z<` / `z>` / `z=` | comment, card | Narrower / wider / even |
 | `d` | PDF, book | Delete the highlight |
 | `y` | PDF, book | Copy |
 | `esc` | PDF, book | Clear the selection |
@@ -101,14 +127,14 @@ const DRAWINGS: &str = "\
 | `n` / `N` | PDF, book | Next / previous hit |
 | `space a` | PDF, book | Notebook |
 | `space A` | PDF, book | Search annotations |
-| `space t` | PDF, book | Contents |
-| `space tab`, `space d` | PDF | Read / markup |
+| `space o` | PDF, book | Contents |
+| `z tab` | PDF | Read / markup |
 | `:flatten` | PDF | Flatten the markup |
 | `:export-notes` | PDF, book | Write annotations to a note beside it |
 | `]]` / `[[` | book | Next / previous heading |
 | `d`, `del` | canvas | Delete |
 | `y` | canvas | Duplicate |
-| `zs` | canvas | Zoom to the selection |
+| `zp` | canvas | Zoom to the selection |
 | `at`, double click | canvas | New text card |
 | `i`, `ret`, double click | canvas | Write in the card or label |
 | middle drag | canvas | Pan |
@@ -125,10 +151,12 @@ const DRAWINGS: &str = "\
 
 pub fn reference() -> String {
     let mut out = String::from(
-        "# Keymap\n\nGenerated from `crates/state/src/keymap.rs`; regenerate with \
+        "# Keymap\n\nGenerated from `crates/state/src/input/keymap/tables.rs`; regenerate with \
          `UPDATE_DOCS=1 cargo test -p state --test unit keymap_reference`.\n\n",
     );
     out.push_str(CUSTOM);
+    out.push_str("\n");
+    out.push_str(PANES);
     out.push_str("\n");
     out.push_str(SOURCE_VIEW);
     out.push_str("\n");

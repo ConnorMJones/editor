@@ -14,6 +14,7 @@ use crate::render::markdown::{self, Base, Markdown};
 use crate::render::{Opening, Rendering, step, typeset};
 use crate::text::buffer::{Buffer, BufferId, TextDoc};
 use crate::view::layout::{Pane, PaneId};
+use crate::view::layout::{TabLayout, TabPane};
 use crate::view::panes;
 use crate::view::tab::{Beside, BesideMut, Opened, Showing, Tab, TextTabs};
 use crate::{Effect, State};
@@ -33,6 +34,7 @@ pub struct DocumentState {
     pub scroll: DocumentScroll,
     /// Callouts, by `Callout::index`, whose fold the reader flipped from the default.
     pub toggled: Vec<u32>,
+    pub zoom: model::sheet::Zoom,
 }
 
 /// Where a document view stands, or is asked to move for the host to measure.
@@ -78,6 +80,7 @@ impl Rendering for DocumentState {
                 Opening::Item(item) => DocumentScroll::item(item),
             },
             toggled: Vec::new(),
+            zoom: model::sheet::Zoom::ONE,
         }
     }
 }

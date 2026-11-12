@@ -18,8 +18,10 @@ use crate::git::diffview::{self, Right};
 use crate::json_canvas::{Doing, JsonCanvasTab};
 use crate::reading::Reading;
 use crate::text::buffer::{Buffer, BufferId, HistoryStep, TextDoc, Uncommitted};
-use crate::view::layout::{Edited, Editing, Layout};
+use crate::view::layout::Layout;
+use crate::view::layout::TabPane;
 use crate::view::tab::{Opened, Tab, TextTabs};
+use crate::view::text_view::{Edited, Editing};
 
 /// Sorted, deduplicated lines touched by any range.
 pub fn selected_lines(text: &Rope, selection: &Selection) -> Vec<usize> {

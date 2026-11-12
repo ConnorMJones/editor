@@ -11,6 +11,7 @@ mod harness;
 mod json_canvas;
 mod loading;
 mod mouse;
+mod panes;
 mod pdf;
 mod rendered;
 mod session;
